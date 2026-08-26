@@ -24,8 +24,11 @@ pub struct Shell {
 impl Shell {
     pub fn boot(dir: DataDir) -> Shell {
         let core = Ryuuji::open(&dir).map(|core| Rc::new(RefCell::new(core)));
-        if let Err(err) = &core {
-            tracing::error!(error = %error_chain(err), "boot failed");
+        match &core {
+            // Before the first render, so the first frame already carries the
+            // saved theme instead of flashing the system one.
+            Ok(core) => set_requested_theme(requested_theme(core.borrow().state().settings.theme)),
+            Err(err) => tracing::error!(error = %error_chain(err), "boot failed"),
         }
         Shell { dir, core }
     }
@@ -42,15 +45,17 @@ impl Component for Shell {
             {
                 let core = core.clone();
                 move |_prev: AppState, command: Command| {
+                    let before = core.borrow().state().settings.theme;
                     core.borrow_mut().dispatch(command);
-                    core.borrow().state().clone()
+                    let state = core.borrow().state().clone();
+                    if state.settings.theme != before {
+                        set_requested_theme(requested_theme(state.settings.theme));
+                    }
+                    state
                 }
             },
             core.borrow().state().clone(),
         );
-
-        let theme = state.settings.theme;
-        cx.use_effect(theme, move || set_requested_theme(requested_theme(theme)));
 
         let menu_items = Page::ALL.into_iter().map(|page| {
             NavViewItem::new(page.label())
