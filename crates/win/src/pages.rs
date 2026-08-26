@@ -1,31 +1,77 @@
-//! Page bodies for the first window. Every page is a placeholder for now:
-//! a heading plus one line of guidance, in the symbolic empty-state style
-//! the UI-direction research settled on (heading required, neutral tone).
+//! Page bodies. The Library lists real entries; Now playing and Settings are
+//! placeholders in the symbolic empty-state style the UI-direction research
+//! settled on (heading required, neutral tone).
 
-use ryuuji_core::{AppState, NowPlaying, Page};
+use ryuuji_core::{
+    AppState, Command, DataDir, LibraryEntry, Notice, NowPlaying, Page, StoreError, error_chain,
+};
 use windows_reactor::*;
 
 const PAGE_PADDING: f64 = 24.0;
 
-/// Renders the body for the currently selected page.
-pub fn render(state: &AppState) -> Element {
+/// Renders the notice bar and the body for the currently selected page.
+pub fn render(state: &AppState, dispatch: Dispatch<Command>) -> Element {
     let page: Element = match state.page {
-        Page::Library => library(state),
+        Page::Library => library(&state.library),
         Page::NowPlaying => now_playing(&state.now_playing),
         Page::Settings => settings(),
     };
 
-    border(page)
-        .padding(Thickness::uniform(PAGE_PADDING))
-        .into()
+    grid((
+        notice(state.notice.as_ref(), dispatch).grid_row(0),
+        border(page)
+            .padding(Thickness::uniform(PAGE_PADDING))
+            .grid_row(1),
+    ))
+    .rows([GridLength::Auto, GridLength::STAR])
+    .into()
 }
 
-fn library(state: &AppState) -> Element {
-    if state.library.is_empty() {
-        placeholder("Your library is empty", "Shows you track will appear here.")
-    } else {
-        // Real rows arrive with the library slice; until then, a count.
-        placeholder("Library", format!("{} shows tracked.", state.library.len()))
+/// Shown instead of the shell when the library could not be opened.
+pub fn boot_failed(err: &StoreError, dir: &DataDir) -> Element {
+    border(placeholder(
+        "Ryuuji couldn't open its library",
+        format!(
+            "{}\nData directory: {}",
+            error_chain(err),
+            dir.root().display()
+        ),
+    ))
+    .padding(Thickness::uniform(PAGE_PADDING))
+    .into()
+}
+
+fn notice(notice: Option<&Notice>, dispatch: Dispatch<Command>) -> InfoBar {
+    let (title, message) = match notice {
+        Some(Notice::SaveFailed { detail }) => ("Couldn't save your change", detail.as_str()),
+        None => ("", ""),
+    };
+    InfoBar::new(title)
+        .message(message)
+        .severity(InfoBarSeverity::Error)
+        .is_open(notice.is_some())
+        .on_closed(move || dispatch.call(Command::DismissNotice))
+}
+
+fn library(entries: &[LibraryEntry]) -> Element {
+    if entries.is_empty() {
+        return placeholder("Your library is empty", "Shows you track will appear here.");
+    }
+    list_view(entries.to_vec(), |entry, _| {
+        vstack((
+            text_block(entry.title.clone()).semibold(),
+            text_block(status_line(entry)).foreground(ThemeRef::SecondaryText),
+        ))
+        .spacing(2.0)
+    })
+    .with_key_selector(|entry| entry.id.to_string())
+    .into()
+}
+
+fn status_line(entry: &LibraryEntry) -> String {
+    match entry.total {
+        Some(total) => format!("{} · {}/{}", entry.status.label(), entry.progress, total),
+        None => format!("{} · {}", entry.status.label(), entry.progress),
     }
 }
 
