@@ -4,10 +4,12 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use ryuuji_core::{AppState, Command, DataDir, Page, Ryuuji, StoreError, error_chain};
+use ryuuji_core::{
+    AppState, Command, DataDir, Page, Ryuuji, StoreError, ThemePreference, error_chain,
+};
 use windows_reactor::{
     Component, Element, NavViewItem, NavigationView, NavigationViewPaneDisplayMode, RenderCx,
-    Symbol,
+    RequestedTheme, Symbol, set_requested_theme,
 };
 
 use crate::pages;
@@ -47,6 +49,9 @@ impl Component for Shell {
             core.borrow().state().clone(),
         );
 
+        let theme = state.settings.theme;
+        cx.use_effect(theme, move || set_requested_theme(requested_theme(theme)));
+
         let menu_items = Page::ALL.into_iter().map(|page| {
             NavViewItem::new(page.label())
                 .tag(page.tag())
@@ -66,6 +71,14 @@ impl Component for Shell {
             // Settings is one of our own pages so it routes like the others.
             .settings_visible(false)
             .into()
+    }
+}
+
+fn requested_theme(theme: ThemePreference) -> RequestedTheme {
+    match theme {
+        ThemePreference::System => RequestedTheme::Default,
+        ThemePreference::Light => RequestedTheme::Light,
+        ThemePreference::Dark => RequestedTheme::Dark,
     }
 }
 

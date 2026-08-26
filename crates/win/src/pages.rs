@@ -1,9 +1,10 @@
-//! Page bodies. The Library lists real entries; Now playing and Settings are
-//! placeholders in the symbolic empty-state style the UI-direction research
-//! settled on (heading required, neutral tone).
+//! Page bodies. The Library lists real entries, Settings holds the theme
+//! switcher, and Now playing is a placeholder in the symbolic empty-state
+//! style the UI-direction research settled on (heading required, neutral tone).
 
 use ryuuji_core::{
-    AppState, Command, DataDir, LibraryEntry, Notice, NowPlaying, Page, StoreError, error_chain,
+    AppState, Command, DataDir, LibraryEntry, Notice, NowPlaying, Page, Settings, StoreError,
+    ThemePreference, error_chain,
 };
 use windows_reactor::*;
 
@@ -14,11 +15,11 @@ pub fn render(state: &AppState, dispatch: Dispatch<Command>) -> Element {
     let page: Element = match state.page {
         Page::Library => library(&state.library),
         Page::NowPlaying => now_playing(&state.now_playing),
-        Page::Settings => settings(),
+        Page::Settings => settings(&state.settings, dispatch.clone()),
     };
 
     grid((
-        notice(state.notice.as_ref(), dispatch).grid_row(0),
+        notice(&state.notices, dispatch).grid_row(0),
         border(page)
             .padding(Thickness::uniform(PAGE_PADDING))
             .grid_row(1),
@@ -41,16 +42,36 @@ pub fn boot_failed(err: &StoreError, dir: &DataDir) -> Element {
     .into()
 }
 
-fn notice(notice: Option<&Notice>, dispatch: Dispatch<Command>) -> InfoBar {
-    let (title, message) = match notice {
-        Some(Notice::SaveFailed { detail }) => ("Couldn't save your change", detail.as_str()),
-        None => ("", ""),
+/// Shows the oldest notice. Keyed on the queue length so a dismissal
+/// remounts the bar: `IsOpen` is diffed, and WinUI has already closed it.
+fn notice(notices: &[Notice], dispatch: Dispatch<Command>) -> InfoBar {
+    let (severity, title, message) = match notices.first() {
+        Some(Notice::SaveFailed { detail }) => (
+            InfoBarSeverity::Error,
+            "Couldn't save your change",
+            detail.clone(),
+        ),
+        Some(Notice::SettingsUnreadable { detail }) => (
+            InfoBarSeverity::Warning,
+            "settings.toml could not be read",
+            detail.clone(),
+        ),
+        Some(Notice::LibraryReset { backup }) => (
+            InfoBarSeverity::Warning,
+            "Your library was reset",
+            format!(
+                "The previous file wasn't a readable database. It was kept at {}.",
+                backup.display()
+            ),
+        ),
+        None => (InfoBarSeverity::Informational, "", String::new()),
     };
     InfoBar::new(title)
         .message(message)
-        .severity(InfoBarSeverity::Error)
-        .is_open(notice.is_some())
+        .severity(severity)
+        .is_open(!notices.is_empty())
         .on_closed(move || dispatch.call(Command::DismissNotice))
+        .with_key(notices.len().to_string())
 }
 
 fn library(entries: &[LibraryEntry]) -> Element {
@@ -96,8 +117,23 @@ fn now_playing(now_playing: &NowPlaying) -> Element {
     }
 }
 
-fn settings() -> Element {
-    placeholder("Settings", "Nothing to configure yet.")
+fn settings(settings: &Settings, dispatch: Dispatch<Command>) -> Element {
+    let selected = ThemePreference::ALL
+        .iter()
+        .position(|theme| *theme == settings.theme)
+        .map_or(-1, |index| index as i32);
+    RadioButtons::new(ThemePreference::ALL.map(ThemePreference::label))
+        .header("Theme")
+        .selected_index(selected)
+        .on_selection_changed(move |index: i32| {
+            let theme = usize::try_from(index)
+                .ok()
+                .and_then(|index| ThemePreference::ALL.get(index));
+            if let Some(theme) = theme {
+                dispatch.call(Command::SetTheme(*theme));
+            }
+        })
+        .into()
 }
 
 /// Symbolic placeholder: a heading and one line of body text on a card.
