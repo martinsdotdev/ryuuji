@@ -1,6 +1,16 @@
-[package]
-name = "ryuuji"
+[workspace]
+resolver = "3"
+members = ["crates/core", "crates/win"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.95"
+repository = "https://github.com/martinsdotdev/ryuuji"
 
-[dependencies]
+[workspace.dependencies]
+ryuuji-core = { path = "crates/core" }
+# windows-reactor is not published yet (crates.io holds 0.0.0 placeholders),
+# so pin a specific windows-rs commit. This one includes Windows App SDK 2.4.0.
+windows-reactor = { git = "https://github.com/microsoft/windows-rs", rev = "acaaa37be53e68f8c1be575d24dcbebce1e92b1a" }
+windows-reactor-setup = { git = "https://github.com/microsoft/windows-rs", rev = "acaaa37be53e68f8c1be575d24dcbebce1e92b1a" }
