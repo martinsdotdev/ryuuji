@@ -1,0 +1,18 @@
+[package]
+name = "ryuuji-win"
+description = "Ryuuji Windows shell (WinUI 3 via windows-reactor)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "ryuuji"
+path = "src/main.rs"
+
+[dependencies]
+ryuuji-core.workspace = true
+windows-reactor.workspace = true
+
+[build-dependencies]
+windows-reactor-setup.workspace = true

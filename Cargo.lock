@@ -3,5 +3,136 @@
 version = 4
 
 [[package]]
-name = "ryuuji"
+name = "rustc-hash"
+version = "2.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6b1e7f9a428571be2dc5bc0505c13fb6bf936822b894ec87abf8a08a4e51742d"
+
+[[package]]
+name = "ryuuji-core"
 version = "0.1.0"
+
+[[package]]
+name = "ryuuji-win"
+version = "0.1.0"
+dependencies = [
+ "ryuuji-core",
+ "windows-reactor",
+ "windows-reactor-setup",
+]
+
+[[package]]
+name = "windows-collections"
+version = "0.100.0"
+source = "git+https://github.com/microsoft/windows-rs?rev=acaaa37be53e68f8c1be575d24dcbebce1e92b1a#acaaa37be53e68f8c1be575d24dcbebce1e92b1a"
+dependencies = [
+ "windows-core",
+]
+
+[[package]]
+name = "windows-composition"
+version = "0.100.0"
+source = "git+https://github.com/microsoft/windows-rs?rev=acaaa37be53e68f8c1be575d24dcbebce1e92b1a#acaaa37be53e68f8c1be575d24dcbebce1e92b1a"
+dependencies = [
+ "windows-collections",
+ "windows-core",
+ "windows-numerics",
+ "windows-time",
+]
+
+[[package]]
+name = "windows-core"
+version = "0.100.0"
+source = "git+https://github.com/microsoft/windows-rs?rev=acaaa37be53e68f8c1be575d24dcbebce1e92b1a#acaaa37be53e68f8c1be575d24dcbebce1e92b1a"
+dependencies = [
+ "windows-link",
+ "windows-result",
+ "windows-strings",
+]
+
+[[package]]
+name = "windows-future"
+version = "0.100.0"
+source = "git+https://github.com/microsoft/windows-rs?rev=acaaa37be53e68f8c1be575d24dcbebce1e92b1a#acaaa37be53e68f8c1be575d24dcbebce1e92b1a"
+dependencies = [
+ "windows-core",
+ "windows-link",
+ "windows-threading",
+]
+
+[[package]]
+name = "windows-link"
+version = "0.100.0"
+source = "git+https://github.com/microsoft/windows-rs?rev=acaaa37be53e68f8c1be575d24dcbebce1e92b1a#acaaa37be53e68f8c1be575d24dcbebce1e92b1a"
+
+[[package]]
+name = "windows-numerics"
+version = "0.100.0"
+source = "git+https://github.com/microsoft/windows-rs?rev=acaaa37be53e68f8c1be575d24dcbebce1e92b1a#acaaa37be53e68f8c1be575d24dcbebce1e92b1a"
+dependencies = [
+ "windows-core",
+ "windows-link",
+]
+
+[[package]]
+name = "windows-reactor"
+version = "0.100.0"
+source = "git+https://github.com/microsoft/windows-rs?rev=acaaa37be53e68f8c1be575d24dcbebce1e92b1a#acaaa37be53e68f8c1be575d24dcbebce1e92b1a"
+dependencies = [
+ "rustc-hash",
+ "windows-collections",
+ "windows-composition",
+ "windows-core",
+ "windows-future",
+ "windows-numerics",
+ "windows-reference",
+ "windows-threading",
+ "windows-time",
+]
+
+[[package]]
+name = "windows-reactor-setup"
+version = "0.100.0"
+source = "git+https://github.com/microsoft/windows-rs?rev=acaaa37be53e68f8c1be575d24dcbebce1e92b1a#acaaa37be53e68f8c1be575d24dcbebce1e92b1a"
+
+[[package]]
+name = "windows-reference"
+version = "0.100.0"
+source = "git+https://github.com/microsoft/windows-rs?rev=acaaa37be53e68f8c1be575d24dcbebce1e92b1a#acaaa37be53e68f8c1be575d24dcbebce1e92b1a"
+dependencies = [
+ "windows-core",
+ "windows-time",
+]
+
+[[package]]
+name = "windows-result"
+version = "0.100.0"
+source = "git+https://github.com/microsoft/windows-rs?rev=acaaa37be53e68f8c1be575d24dcbebce1e92b1a#acaaa37be53e68f8c1be575d24dcbebce1e92b1a"
+dependencies = [
+ "windows-link",
+]
+
+[[package]]
+name = "windows-strings"
+version = "0.100.0"
+source = "git+https://github.com/microsoft/windows-rs?rev=acaaa37be53e68f8c1be575d24dcbebce1e92b1a#acaaa37be53e68f8c1be575d24dcbebce1e92b1a"
+dependencies = [
+ "windows-link",
+]
+
+[[package]]
+name = "windows-threading"
+version = "0.100.0"
+source = "git+https://github.com/microsoft/windows-rs?rev=acaaa37be53e68f8c1be575d24dcbebce1e92b1a#acaaa37be53e68f8c1be575d24dcbebce1e92b1a"
+dependencies = [
+ "windows-link",
+]
+
+[[package]]
+name = "windows-time"
+version = "0.100.0"
+source = "git+https://github.com/microsoft/windows-rs?rev=acaaa37be53e68f8c1be575d24dcbebce1e92b1a#acaaa37be53e68f8c1be575d24dcbebce1e92b1a"
+dependencies = [
+ "windows-core",
+ "windows-link",
+]

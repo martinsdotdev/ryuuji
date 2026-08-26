@@ -1,0 +1,9 @@
+[package]
+name = "ryuuji-core"
+description = "Platform-independent application state for Ryuuji"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
