@@ -8,13 +8,15 @@
 
 mod app;
 mod data_dir;
+mod settings;
 mod store;
 
 use std::fmt;
+use std::path::PathBuf;
 
 pub use app::Ryuuji;
 pub use data_dir::{DataDir, DataDirError};
-pub use store::{DbError, Store, StoreError};
+pub use store::{DbError, Opened, Recovered, Store, StoreError};
 
 /// Top-level pages reachable from the navigation pane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,6 +103,55 @@ impl WatchStatus {
     }
 }
 
+/// Which colour theme the shell should request from the platform.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ThemePreference {
+    /// Follow the operating system setting.
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl ThemePreference {
+    /// Every preference, in the order the UI lists them.
+    pub const ALL: [ThemePreference; 3] = [
+        ThemePreference::System,
+        ThemePreference::Light,
+        ThemePreference::Dark,
+    ];
+
+    /// Stable identifier written to `settings.toml`.
+    pub fn tag(self) -> &'static str {
+        match self {
+            ThemePreference::System => "system",
+            ThemePreference::Light => "light",
+            ThemePreference::Dark => "dark",
+        }
+    }
+
+    /// Inverse of [`ThemePreference::tag`].
+    pub fn from_tag(tag: &str) -> Option<ThemePreference> {
+        ThemePreference::ALL
+            .into_iter()
+            .find(|theme| theme.tag() == tag)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ThemePreference::System => "System",
+            ThemePreference::Light => "Light",
+            ThemePreference::Dark => "Dark",
+        }
+    }
+}
+
+/// Everything the user can configure, as persisted in `settings.toml`.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct Settings {
+    pub theme: ThemePreference,
+}
+
 /// Identity of a stored library entry. Only [`Store`] mints these.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct EntryId(i64);
@@ -161,15 +212,35 @@ pub enum NowPlaying {
 pub enum Command {
     SelectPage(Page),
     AddEntry(NewEntry),
-    SetProgress { id: EntryId, progress: u32 },
-    SetStatus { id: EntryId, status: WatchStatus },
+    SetProgress {
+        id: EntryId,
+        progress: u32,
+    },
+    SetStatus {
+        id: EntryId,
+        status: WatchStatus,
+    },
+    SetTheme(ThemePreference),
+    /// Drops the oldest notice.
     DismissNotice,
 }
 
 /// Something the shell should surface to the user until dismissed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Notice {
-    SaveFailed { detail: String },
+    SaveFailed {
+        detail: String,
+    },
+    /// `settings.toml` exists but could not be used; the app runs on defaults
+    /// and leaves the file alone.
+    SettingsUnreadable {
+        detail: String,
+    },
+    /// The library file was not a readable database. It was moved to
+    /// `backup` and a fresh one created.
+    LibraryReset {
+        backup: PathBuf,
+    },
 }
 
 /// The whole application state as the shell sees it.
@@ -178,7 +249,9 @@ pub struct AppState {
     pub page: Page,
     pub library: Vec<LibraryEntry>,
     pub now_playing: NowPlaying,
-    pub notice: Option<Notice>,
+    pub settings: Settings,
+    /// Oldest first; the shell shows the front one.
+    pub notices: Vec<Notice>,
 }
 
 impl Default for AppState {
@@ -187,7 +260,8 @@ impl Default for AppState {
             page: Page::Library,
             library: Vec::new(),
             now_playing: NowPlaying::Idle,
-            notice: None,
+            settings: Settings::default(),
+            notices: Vec::new(),
         }
     }
 }
@@ -225,11 +299,20 @@ mod tests {
     }
 
     #[test]
+    fn theme_tags_round_trip() {
+        for theme in ThemePreference::ALL {
+            assert_eq!(ThemePreference::from_tag(theme.tag()), Some(theme));
+        }
+        assert_eq!(ThemePreference::from_tag("blue"), None);
+    }
+
+    #[test]
     fn default_state_is_empty_library_on_library_page() {
         let state = AppState::default();
         assert_eq!(state.page, Page::Library);
         assert!(state.library.is_empty());
         assert_eq!(state.now_playing, NowPlaying::Idle);
-        assert_eq!(state.notice, None);
+        assert_eq!(state.settings.theme, ThemePreference::System);
+        assert!(state.notices.is_empty());
     }
 }
