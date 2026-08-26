@@ -66,6 +66,10 @@ impl DataDir {
     pub(crate) fn library_db(&self) -> PathBuf {
         self.root.join("library.sqlite")
     }
+
+    pub(crate) fn settings_file(&self) -> PathBuf {
+        self.root.join("settings.toml")
+    }
 }
 
 fn create_dir(path: &Path) -> Result<(), DataDirError> {
