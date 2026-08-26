@@ -1,9 +1,20 @@
 //! Platform-independent application state for Ryuuji.
 //!
-//! This crate holds the data the shells render. It has no I/O and no
-//! platform dependencies, so it compiles everywhere the future Linux shell
-//! will. Detection, parsing and persistence arrive in later Foundation
-//! issues; for now the state is exactly what the first window needs.
+//! This crate owns the data the shells render and the store that persists
+//! it. Shells talk to it through [`Ryuuji`]: open it once, read
+//! [`Ryuuji::state`], and feed user actions through [`Ryuuji::dispatch`].
+//! Nothing platform-specific lives here, so it compiles everywhere the
+//! future Linux shell will.
+
+mod app;
+mod data_dir;
+mod store;
+
+use std::fmt;
+
+pub use app::Ryuuji;
+pub use data_dir::{DataDir, DataDirError};
+pub use store::{DbError, Store, StoreError};
 
 /// Top-level pages reachable from the navigation pane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,6 +63,33 @@ pub enum WatchStatus {
 }
 
 impl WatchStatus {
+    /// Every status, in the order the UI lists them.
+    pub const ALL: [WatchStatus; 5] = [
+        WatchStatus::Watching,
+        WatchStatus::Completed,
+        WatchStatus::OnHold,
+        WatchStatus::Dropped,
+        WatchStatus::PlanToWatch,
+    ];
+
+    /// Stable identifier stored in the library database.
+    pub fn tag(self) -> &'static str {
+        match self {
+            WatchStatus::Watching => "watching",
+            WatchStatus::Completed => "completed",
+            WatchStatus::OnHold => "on-hold",
+            WatchStatus::Dropped => "dropped",
+            WatchStatus::PlanToWatch => "plan-to-watch",
+        }
+    }
+
+    /// Inverse of [`WatchStatus::tag`].
+    pub fn from_tag(tag: &str) -> Option<WatchStatus> {
+        WatchStatus::ALL
+            .into_iter()
+            .find(|status| status.tag() == tag)
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             WatchStatus::Watching => "Watching",
@@ -63,9 +101,37 @@ impl WatchStatus {
     }
 }
 
-/// One tracked show.
+/// Identity of a stored library entry. Only [`Store`] mints these.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct EntryId(i64);
+
+impl EntryId {
+    pub fn as_i64(self) -> i64 {
+        self.0
+    }
+}
+
+impl fmt::Display for EntryId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// A show about to be added to the library.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NewEntry {
+    pub title: String,
+    pub status: WatchStatus,
+    /// Episodes watched so far.
+    pub progress: u32,
+    /// Total episode count when known.
+    pub total: Option<u32>,
+}
+
+/// One tracked show as stored.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LibraryEntry {
+    pub id: EntryId,
     pub title: String,
     pub status: WatchStatus,
     /// Episodes watched so far.
@@ -90,12 +156,29 @@ pub enum NowPlaying {
     },
 }
 
+/// Everything a shell can ask the core to do.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Command {
+    SelectPage(Page),
+    AddEntry(NewEntry),
+    SetProgress { id: EntryId, progress: u32 },
+    SetStatus { id: EntryId, status: WatchStatus },
+    DismissNotice,
+}
+
+/// Something the shell should surface to the user until dismissed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Notice {
+    SaveFailed { detail: String },
+}
+
 /// The whole application state as the shell sees it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AppState {
     pub page: Page,
     pub library: Vec<LibraryEntry>,
     pub now_playing: NowPlaying,
+    pub notice: Option<Notice>,
 }
 
 impl Default for AppState {
@@ -104,22 +187,21 @@ impl Default for AppState {
             page: Page::Library,
             library: Vec::new(),
             now_playing: NowPlaying::Idle,
+            notice: None,
         }
     }
 }
 
-impl AppState {
-    /// Switches to the page with the given tag. Returns `false` (and leaves
-    /// the state untouched) when the tag is unknown.
-    pub fn select_page(&mut self, tag: &str) -> bool {
-        match Page::from_tag(tag) {
-            Some(page) => {
-                self.page = page;
-                true
-            }
-            None => false,
-        }
+/// Joins an error and its sources with `": "`, outermost first.
+pub fn error_chain(err: &dyn std::error::Error) -> String {
+    let mut chain = err.to_string();
+    let mut source = err.source();
+    while let Some(cause) = source {
+        chain.push_str(": ");
+        chain.push_str(&cause.to_string());
+        source = cause.source();
     }
+    chain
 }
 
 #[cfg(test)]
@@ -135,19 +217,19 @@ mod tests {
     }
 
     #[test]
+    fn watch_status_tags_round_trip() {
+        for status in WatchStatus::ALL {
+            assert_eq!(WatchStatus::from_tag(status.tag()), Some(status));
+        }
+        assert_eq!(WatchStatus::from_tag("nope"), None);
+    }
+
+    #[test]
     fn default_state_is_empty_library_on_library_page() {
         let state = AppState::default();
         assert_eq!(state.page, Page::Library);
         assert!(state.library.is_empty());
         assert_eq!(state.now_playing, NowPlaying::Idle);
-    }
-
-    #[test]
-    fn select_page_switches_on_known_tag_only() {
-        let mut state = AppState::default();
-        assert!(state.select_page("now-playing"));
-        assert_eq!(state.page, Page::NowPlaying);
-        assert!(!state.select_page("unknown"));
-        assert_eq!(state.page, Page::NowPlaying);
+        assert_eq!(state.notice, None);
     }
 }
