@@ -1,23 +1,20 @@
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{fmt, fs, io};
 
 use rusqlite::ErrorCode;
 use rusqlite::{Connection, OptionalExtension, Row, ToSql, params};
-use rusqlite_migration::{M, Migrations};
+use rusqlite_migration::Migrations;
 use tracing::{debug, info, info_span, warn};
 
-use crate::{DataDir, EntryId, LibraryEntry, NewEntry, WatchStatus};
+use crate::{
+    Confidence, DataDir, EntryId, LibraryEntry, MatchOutcome, NewEntry, ProposedMatch, WatchStatus,
+};
 
-const SCHEMA_V1: &str = "\
-CREATE TABLE entries (
-    id INTEGER PRIMARY KEY,
-    title TEXT NOT NULL,
-    status TEXT NOT NULL,
-    progress INTEGER NOT NULL DEFAULT 0,
-    total INTEGER,
-    updated_at INTEGER NOT NULL
-)";
+/// The schema, compiled in from `migrations/`, one numbered directory per
+/// version.
+static MIGRATIONS: include_dir::Dir<'static> =
+    include_dir::include_dir!("$CARGO_MANIFEST_DIR/migrations");
 
 const SELECT_ENTRY: &str = "SELECT id, title, status, progress, total FROM entries";
 
@@ -90,6 +87,8 @@ pub enum StoreError {
     NotFound { id: EntryId },
     #[error("library entry {id} has an invalid {field}")]
     InvalidRow { id: EntryId, field: &'static str },
+    #[error("the stored last match has an invalid {field}")]
+    InvalidLastMatch { field: &'static str },
 }
 
 impl StoreError {
@@ -101,7 +100,8 @@ impl StoreError {
             | StoreError::Query(source) => source.is_corruption(),
             StoreError::Quarantine { .. }
             | StoreError::NotFound { .. }
-            | StoreError::InvalidRow { .. } => false,
+            | StoreError::InvalidRow { .. }
+            | StoreError::InvalidLastMatch { .. } => false,
         }
     }
 }
@@ -252,8 +252,57 @@ impl Store {
             .map_err(query_failed)
     }
 
+    /// Writes the single last-match row, replacing whatever was there.
+    pub fn save_last_match(&mut self, m: &ProposedMatch) -> Result<(), StoreError> {
+        let _span = info_span!("store.save_last_match").entered();
+        self.conn
+            .execute(
+                "INSERT INTO last_match (id, raw_title, parsed_title, episode, season, \
+                 release_group, entry_id, confidence, outcome, player, at) \
+                 VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
+                 ON CONFLICT(id) DO UPDATE SET raw_title=excluded.raw_title, \
+                 parsed_title=excluded.parsed_title, episode=excluded.episode, \
+                 season=excluded.season, release_group=excluded.release_group, \
+                 entry_id=excluded.entry_id, confidence=excluded.confidence, \
+                 outcome=excluded.outcome, player=excluded.player, at=excluded.at",
+                params![
+                    m.raw_title,
+                    m.parsed_title,
+                    m.episode.map(i64::from),
+                    m.season.map(i64::from),
+                    m.release_group,
+                    m.entry.map(EntryId::as_i64),
+                    m.confidence.tag(),
+                    m.outcome.tag(),
+                    m.player,
+                    unix_secs(m.at),
+                ],
+            )
+            .map_err(query_failed)?;
+        info!(confidence = m.confidence.tag(), "last match saved");
+        Ok(())
+    }
+
+    /// The stored last match, if any. Its `elements` are always empty; they
+    /// live only in memory.
+    pub fn last_match(&self) -> Result<Option<ProposedMatch>, StoreError> {
+        let _span = info_span!("store.last_match").entered();
+        self.conn
+            .query_row(
+                "SELECT raw_title, parsed_title, episode, season, release_group, \
+                 entry_id, confidence, outcome, player, at \
+                 FROM last_match WHERE id = 1",
+                [],
+                RawLastMatch::read,
+            )
+            .optional()
+            .map_err(query_failed)?
+            .map(RawLastMatch::parse)
+            .transpose()
+    }
+
     #[cfg(test)]
-    fn execute_raw(&self, sql: &str) {
+    pub(crate) fn execute_raw(&self, sql: &str) {
         self.conn.execute(sql, []).unwrap();
     }
 }
@@ -265,7 +314,8 @@ fn try_open(path: &Path) -> Result<Store, StoreError> {
         path: path.to_path_buf(),
         source: err.into(),
     })?;
-    Migrations::from_slice(&[M::up(SCHEMA_V1)])
+    Migrations::from_directory(&MIGRATIONS)
+        .map_err(|err| StoreError::Migrate(err.into()))?
         .to_latest(&mut conn)
         .map_err(|err| StoreError::Migrate(err.into()))?;
     let report: String = conn
@@ -278,6 +328,8 @@ fn try_open(path: &Path) -> Result<Store, StoreError> {
         });
     }
     conn.pragma_update(None, "synchronous", "FULL")
+        .map_err(query_failed)?;
+    conn.pragma_update(None, "foreign_keys", "ON")
         .map_err(query_failed)?;
     Ok(Store { conn })
 }
@@ -355,13 +407,75 @@ impl RawEntry {
     }
 }
 
+/// The last-match row as SQLite hands it over, before the domain checks in
+/// `parse`.
+struct RawLastMatch {
+    raw_title: String,
+    parsed_title: String,
+    episode: Option<i64>,
+    season: Option<i64>,
+    release_group: Option<String>,
+    entry_id: Option<i64>,
+    confidence: String,
+    outcome: String,
+    player: String,
+    at: i64,
+}
+
+impl RawLastMatch {
+    fn read(row: &Row<'_>) -> rusqlite::Result<RawLastMatch> {
+        Ok(RawLastMatch {
+            raw_title: row.get(0)?,
+            parsed_title: row.get(1)?,
+            episode: row.get(2)?,
+            season: row.get(3)?,
+            release_group: row.get(4)?,
+            entry_id: row.get(5)?,
+            confidence: row.get(6)?,
+            outcome: row.get(7)?,
+            player: row.get(8)?,
+            at: row.get(9)?,
+        })
+    }
+
+    fn parse(self) -> Result<ProposedMatch, StoreError> {
+        let invalid = |field| StoreError::InvalidLastMatch { field };
+        Ok(ProposedMatch {
+            raw_title: self.raw_title,
+            parsed_title: self.parsed_title,
+            episode: self
+                .episode
+                .map(u32::try_from)
+                .transpose()
+                .map_err(|_| invalid("episode"))?,
+            season: self
+                .season
+                .map(u32::try_from)
+                .transpose()
+                .map_err(|_| invalid("season"))?,
+            release_group: self.release_group,
+            entry: self.entry_id.map(EntryId),
+            confidence: Confidence::from_tag(&self.confidence)
+                .ok_or_else(|| invalid("confidence"))?,
+            outcome: MatchOutcome::from_tag(&self.outcome).ok_or_else(|| invalid("outcome"))?,
+            player: self.player,
+            at: UNIX_EPOCH
+                + Duration::from_secs(u64::try_from(self.at).map_err(|_| invalid("at"))?),
+            elements: Vec::new(),
+        })
+    }
+}
+
 fn query_failed(err: rusqlite::Error) -> StoreError {
     StoreError::Query(err.into())
 }
 
 fn unix_now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
+    unix_secs(SystemTime::now())
+}
+
+fn unix_secs(time: SystemTime) -> i64 {
+    time.duration_since(UNIX_EPOCH)
         .map(|elapsed| i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX))
         .unwrap_or(0)
 }
@@ -412,13 +526,13 @@ mod tests {
     }
 
     #[test]
-    fn open_creates_the_database_at_schema_v1_without_recovery() {
+    fn open_creates_the_database_at_schema_v2_without_recovery() {
         let (_tmp, dir) = open_tmp();
         let store = open(&dir);
         assert!(dir.root().join("library.sqlite").is_file());
-        assert_eq!(schema_version(&store), SchemaVersion(1));
+        assert_eq!(schema_version(&store), SchemaVersion(2));
         drop(store);
-        assert_eq!(schema_version(&open(&dir)), SchemaVersion(1));
+        assert_eq!(schema_version(&open(&dir)), SchemaVersion(2));
     }
 
     #[test]
@@ -445,7 +559,7 @@ mod tests {
         let recovered = recovered.expect("recovery reported");
         assert_backup_name(&backup_name(&recovered));
         assert_eq!(fs::read(&recovered.backup).unwrap(), garbage);
-        assert_eq!(schema_version(&store), SchemaVersion(1));
+        assert_eq!(schema_version(&store), SchemaVersion(2));
         assert_eq!(store.entries().unwrap(), vec![]);
         drop(store);
 
@@ -529,6 +643,124 @@ mod tests {
             Err(StoreError::InvalidRow {
                 field: "status",
                 ..
+            })
+        ));
+    }
+
+    fn proposed(raw: &str) -> ProposedMatch {
+        ProposedMatch {
+            raw_title: raw.into(),
+            parsed_title: "Show".into(),
+            episode: Some(3),
+            season: Some(2),
+            release_group: Some("Subs".into()),
+            entry: None,
+            confidence: Confidence::Unmatched,
+            outcome: MatchOutcome::Proposed,
+            player: "mpv".into(),
+            at: UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+            elements: vec![("file_name".into(), raw.into())],
+        }
+    }
+
+    fn stored(m: &ProposedMatch) -> ProposedMatch {
+        ProposedMatch {
+            elements: Vec::new(),
+            ..m.clone()
+        }
+    }
+
+    #[test]
+    fn v1_library_migrates_to_v2_and_keeps_entries() {
+        let (_tmp, dir) = open_tmp();
+        let conn = Connection::open(dir.library_db()).unwrap();
+        conn.execute_batch(include_str!("../migrations/01-entries/up.sql"))
+            .unwrap();
+        conn.execute(
+            "INSERT INTO entries (title, status, progress, total, updated_at) \
+             VALUES ('Show', 'watching', 3, 12, 0)",
+            [],
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 1).unwrap();
+        drop(conn);
+
+        let store = open(&dir);
+        assert_eq!(schema_version(&store), SchemaVersion(2));
+        let entries = store.entries().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].title, "Show");
+        assert_eq!(entries[0].progress, 3);
+        assert_eq!(entries[0].total, Some(12));
+        assert_eq!(store.last_match().unwrap(), None);
+    }
+
+    #[test]
+    fn migrations_directory_is_well_formed() {
+        Migrations::from_directory(&MIGRATIONS)
+            .unwrap()
+            .validate()
+            .unwrap();
+    }
+
+    #[test]
+    fn last_match_is_none_until_saved() {
+        let (_tmp, dir) = open_tmp();
+        assert_eq!(open(&dir).last_match().unwrap(), None);
+    }
+
+    #[test]
+    fn save_last_match_overwrites_the_single_row() {
+        let (_tmp, dir) = open_tmp();
+        let mut store = open(&dir);
+        let id = store.add(entry("Show")).unwrap().id;
+        store.save_last_match(&proposed("first.mkv")).unwrap();
+        let second = ProposedMatch {
+            entry: Some(id),
+            confidence: Confidence::Exact,
+            ..proposed("second.mkv")
+        };
+        store.save_last_match(&second).unwrap();
+        assert_eq!(store.last_match().unwrap(), Some(stored(&second)));
+        let rows: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM last_match", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 1);
+    }
+
+    #[test]
+    fn last_match_survives_reopen() {
+        let (_tmp, dir) = open_tmp();
+        let mut store = open(&dir);
+        let m = proposed("Show - 03.mkv");
+        store.save_last_match(&m).unwrap();
+        drop(store);
+        assert_eq!(open(&dir).last_match().unwrap(), Some(stored(&m)));
+    }
+
+    #[test]
+    fn last_match_with_unknown_entry_is_rejected_by_the_foreign_key() {
+        let (_tmp, dir) = open_tmp();
+        let mut store = open(&dir);
+        let m = ProposedMatch {
+            entry: Some(EntryId(999)),
+            ..proposed("Show - 03.mkv")
+        };
+        assert!(store.save_last_match(&m).is_err());
+        assert_eq!(store.last_match().unwrap(), None);
+    }
+
+    #[test]
+    fn garbage_confidence_surfaces_as_invalid_last_match() {
+        let (_tmp, dir) = open_tmp();
+        let mut store = open(&dir);
+        store.save_last_match(&proposed("Show - 03.mkv")).unwrap();
+        store.execute_raw("UPDATE last_match SET confidence = 'bogus'");
+        assert!(matches!(
+            store.last_match(),
+            Err(StoreError::InvalidLastMatch {
+                field: "confidence"
             })
         ));
     }
