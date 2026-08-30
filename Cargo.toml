@@ -20,7 +20,8 @@ windows-reactor-setup = { git = "https://github.com/microsoft/windows-rs", rev =
 # windows-interface into the lock for an #[implement] nothing here uses.
 windows = { git = "https://github.com/microsoft/windows-rs", rev = "acaaa37be53e68f8c1be575d24dcbebce1e92b1a", default-features = false, features = ["std", "Media_Control", "Foundation_Collections"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
-rusqlite_migration = "2.6"
+rusqlite_migration = { version = "2.6", features = ["from-directory"] }
+include_dir = "0.7.4"
 directories = "6"
 tracing = "0.1"
 thiserror = "2"

@@ -9,6 +9,7 @@
 mod app;
 mod data_dir;
 mod diagnostics;
+mod matching;
 mod playback;
 mod settings;
 mod store;
@@ -20,6 +21,7 @@ use std::time::Duration;
 pub use app::Ryuuji;
 pub use data_dir::{DataDir, DataDirError, DataDirSource};
 pub use diagnostics::{ByteSize, Diagnostics, FileFacts, FileStat, ProbeFailed};
+pub use matching::{Confidence, MatchOutcome, ProposedMatch, normalize_title, propose, similarity};
 pub use playback::{PlaybackEvent, PlaybackSource, PlaybackStatus};
 pub use store::{DbError, Opened, Recovered, SchemaVersion, Store, StoreError};
 
@@ -263,6 +265,9 @@ pub struct AppState {
     pub page: Page,
     pub library: Vec<LibraryEntry>,
     pub now_playing: NowPlaying,
+    /// The latest playback title's proposal against the library. Survives
+    /// restarts via the store, though a reloaded value has empty `elements`.
+    pub last_match: Option<ProposedMatch>,
     pub settings: Settings,
     /// Oldest first; the shell shows the front one.
     pub notices: Vec<Notice>,
@@ -274,6 +279,7 @@ impl Default for AppState {
             page: Page::Library,
             library: Vec::new(),
             now_playing: NowPlaying::Idle,
+            last_match: None,
             settings: Settings::default(),
             notices: Vec::new(),
         }
@@ -334,6 +340,7 @@ mod tests {
         assert_eq!(state.page, Page::Library);
         assert!(state.library.is_empty());
         assert_eq!(state.now_playing, NowPlaying::Idle);
+        assert_eq!(state.last_match, None);
         assert_eq!(state.settings.theme, ThemePreference::System);
         assert!(state.notices.is_empty());
     }

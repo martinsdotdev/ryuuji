@@ -708,7 +708,7 @@ mod tests {
             "Library: {} ({len}, modified ",
             core.library.path.display()
         )));
-        assert!(text.contains("Schema version: 1\n"));
+        assert!(text.contains("Schema version: 2\n"));
         assert!(text.contains(&format!(
             "Settings: {} (missing)",
             core.settings.path.display()
