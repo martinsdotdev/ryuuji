@@ -24,3 +24,4 @@ toml = "1"
 serde = { version = "1", features = ["derive"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
+clipboard-win = { version = "5", features = ["std"] }

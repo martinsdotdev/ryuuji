@@ -1,6 +1,8 @@
 //! Page bodies. The Library lists real entries, Settings holds the theme
-//! switcher, and Now playing is a placeholder in the symbolic empty-state
-//! style the UI-direction research settled on (heading required, neutral tone).
+//! switcher and the way into Diagnostics, and Now playing is a placeholder in
+//! the symbolic empty-state style the UI-direction research settled on
+//! (heading required, neutral tone). The Diagnostics body itself is built by
+//! the caller, so this module never sees the core handle or the log buffer.
 
 use ryuuji_core::{
     AppState, Command, DataDir, LibraryEntry, Notice, NowPlaying, Page, Settings, StoreError,
@@ -11,11 +13,16 @@ use windows_reactor::*;
 const PAGE_PADDING: f64 = 24.0;
 
 /// Renders the notice bar and the body for the currently selected page.
-pub fn render(state: &AppState, dispatch: Dispatch<Command>) -> Element {
+pub fn render(
+    state: &AppState,
+    dispatch: Dispatch<Command>,
+    debug: impl FnOnce() -> Element,
+) -> Element {
     let page: Element = match state.page {
         Page::Library => library(&state.library),
         Page::NowPlaying => now_playing(&state.now_playing),
         Page::Settings => settings(&state.settings, dispatch.clone()),
+        Page::Debug => debug(),
     };
 
     grid((
@@ -122,18 +129,23 @@ fn settings(settings: &Settings, dispatch: Dispatch<Command>) -> Element {
         .iter()
         .position(|theme| *theme == settings.theme)
         .map_or(-1, |index| index as i32);
-    RadioButtons::new(ThemePreference::ALL.map(ThemePreference::label))
+    let theme = RadioButtons::new(ThemePreference::ALL.map(ThemePreference::label))
         .header("Theme")
         .selected_index(selected)
-        .on_selection_changed(move |index: i32| {
-            let theme = usize::try_from(index)
-                .ok()
-                .and_then(|index| ThemePreference::ALL.get(index));
-            if let Some(theme) = theme {
-                dispatch.call(Command::SetTheme(*theme));
+        .on_selection_changed({
+            let dispatch = dispatch.clone();
+            move |index: i32| {
+                let theme = usize::try_from(index)
+                    .ok()
+                    .and_then(|index| ThemePreference::ALL.get(index));
+                if let Some(theme) = theme {
+                    dispatch.call(Command::SetTheme(*theme));
+                }
             }
-        })
-        .into()
+        });
+    let diagnostics = button(Page::Debug.label())
+        .on_click(move || dispatch.call(Command::SelectPage(Page::Debug)));
+    vstack((theme, diagnostics)).spacing(16.0).into()
 }
 
 /// Symbolic placeholder: a heading and one line of body text on a card.
