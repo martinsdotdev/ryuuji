@@ -6,7 +6,7 @@ members = ["crates/core", "crates/win"]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
-repository = "https://codeberg.org/umarudotdev/ryuuji"
+repository = "https://github.com/martinsdotdev/thenexus"
 
 [workspace.dependencies]
 ryuuji-core = { path = "crates/core" }
