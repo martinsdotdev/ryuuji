@@ -7,6 +7,7 @@ mod debug;
 mod logging;
 mod pages;
 mod shell;
+mod ui;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dir = DataDir::resolve()?;

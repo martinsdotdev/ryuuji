@@ -13,12 +13,11 @@ use ryuuji_core::{
 use windows_reactor::*;
 
 use crate::debug;
+use crate::ui::{
+    CONTENT_MAX_WIDTH, FOLDER_GLYPH, REPAIR_GLYPH, caption, card, card_frame, section,
+};
 
 const PAGE_PADDING: f64 = 24.0;
-const CONTENT_MAX_WIDTH: f64 = 1000.0;
-const ICON_FONT: &str = "Segoe Fluent Icons";
-const FOLDER_GLYPH: &str = "\u{E8B7}";
-const REPAIR_GLYPH: &str = "\u{E90F}";
 
 /// Renders the notice bar and the body for the currently selected page.
 pub fn render(
@@ -162,75 +161,12 @@ fn settings(settings: &Settings, dir: &DataDir, dispatch: Dispatch<Command>) -> 
                 ),
             ))
             .spacing(8.0),
-            text_block(format!("Ryuuji {} · {} build", app.version, app.profile))
-                .foreground(ThemeRef::SecondaryText)
-                .font_size(12.0),
+            caption(format!("Ryuuji {} · {} build", app.version, app.profile)),
         ))
         .spacing(24.0)
         .max_width(CONTENT_MAX_WIDTH),
     )
     .into()
-}
-
-fn section(title: &str) -> TextBlock {
-    text_block(title).semibold().margin(Thickness {
-        top: 8.0,
-        ..Thickness::default()
-    })
-}
-
-/// A settings card: icon, title and description on the left, the control on
-/// the right.
-fn card(
-    icon: Option<&str>,
-    title: &str,
-    description: impl Into<String>,
-    control: Element,
-) -> Border {
-    let icon: Element = match icon {
-        Some(glyph) => text_block(glyph)
-            .font_family(ICON_FONT)
-            .font_size(20.0)
-            .margin(Thickness {
-                right: 16.0,
-                ..Thickness::default()
-            })
-            .vertical_alignment(VerticalAlignment::Center)
-            .grid_column(0)
-            .into(),
-        None => Element::Empty,
-    };
-    card_frame(
-        grid(vec![
-            icon,
-            heading(title, description).grid_column(1).into(),
-            border(control)
-                .vertical_alignment(VerticalAlignment::Center)
-                .grid_column(2)
-                .into(),
-        ])
-        .columns([GridLength::Auto, GridLength::STAR, GridLength::Auto]),
-    )
-}
-
-fn heading(title: &str, description: impl Into<String>) -> StackPanel {
-    vstack((
-        text_block(title),
-        text_block(description)
-            .foreground(ThemeRef::SecondaryText)
-            .font_size(12.0)
-            .wrap(),
-    ))
-    .spacing(2.0)
-}
-
-fn card_frame(child: impl Into<Element>) -> Border {
-    border(child)
-        .background(ThemeRef::CardBackground)
-        .border_brush(ThemeRef::CardStroke)
-        .border_thickness(Thickness::uniform(1.0))
-        .corner_radius(4.0)
-        .padding(Thickness::uniform(16.0))
 }
 
 /// The theme picker, a drop-down like Windows Settings' "Choose your mode".

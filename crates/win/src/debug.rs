@@ -2,7 +2,7 @@
 //! the tail of the log, with the whole thing copyable as plain text.
 
 use std::fmt::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command as Process;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -11,8 +11,10 @@ use tracing::{Level, warn};
 use windows_reactor::*;
 
 use crate::logging::EventRecord;
+use crate::ui::{CONTENT_MAX_WIDTH, FOLDER_GLYPH, caption, card, card_frame, section};
 
 const MONO_FONT: &str = "Cascadia Mono";
+const NOT_APPLICABLE: &str = "—";
 
 /// Which events the page shows. The report always carries all of them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -82,8 +84,9 @@ impl Report {
         }
     }
 
-    /// The plain-text form that goes to the clipboard. Every event is
-    /// included whatever the page's level filter shows.
+    /// The plain-text form that goes to the clipboard, oldest event first
+    /// like the log it excerpts. Every event is included whatever the page's
+    /// level filter shows.
     pub fn to_text(&self) -> String {
         let now = SystemTime::now();
         let core = &self.core;
@@ -115,17 +118,25 @@ impl Report {
 
 /// `HH:MM:SS.mmm LEVEL target message`, time of day in UTC.
 pub fn event_line(event: &EventRecord) -> String {
-    let since_epoch = event.at.duration_since(UNIX_EPOCH).unwrap_or_default();
-    let secs = since_epoch.as_secs() % 86_400;
     format!(
-        "{:02}:{:02}:{:02}.{:03} {:<5} {} {}",
-        secs / 3600,
-        (secs / 60) % 60,
-        secs % 60,
-        since_epoch.subsec_millis(),
+        "{} {:<5} {} {}",
+        clock(event.at),
         event.level.to_string(),
         event.target,
         event.message
+    )
+}
+
+/// `HH:MM:SS.mmm`, time of day in UTC.
+fn clock(at: SystemTime) -> String {
+    let since_epoch = at.duration_since(UNIX_EPOCH).unwrap_or_default();
+    let secs = since_epoch.as_secs() % 86_400;
+    format!(
+        "{:02}:{:02}:{:02}.{:03}",
+        secs / 3600,
+        (secs / 60) % 60,
+        secs % 60,
+        since_epoch.subsec_millis()
     )
 }
 
@@ -137,10 +148,25 @@ fn source_label(source: DataDirSource) -> &'static str {
     }
 }
 
+fn source_text(source: DataDirSource) -> &'static str {
+    match source {
+        DataDirSource::PlatformDefault => "Windows default location",
+        DataDirSource::EnvOverride => "Set by RYUUJI_DATA_DIR",
+        DataDirSource::Explicit => "Given explicitly",
+    }
+}
+
 fn schema_text(schema: &std::result::Result<SchemaVersion, ProbeFailed>) -> String {
     match schema {
         Ok(version) => version.to_string(),
         Err(ProbeFailed { detail }) => format!("unknown ({detail})"),
+    }
+}
+
+fn schema_note(schema: &std::result::Result<SchemaVersion, ProbeFailed>) -> String {
+    match schema {
+        Ok(version) => format!("schema version {version}"),
+        Err(_) => schema_text(schema),
     }
 }
 
@@ -173,10 +199,12 @@ fn modified_text(modified: Option<SystemTime>, now: SystemTime) -> String {
     let unix = modified
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs());
-    let age = now
-        .duration_since(modified)
-        .map_or_else(|_| "in the future".to_owned(), age_text);
-    format!("{unix} ({age})")
+    format!("{unix} ({})", age_of(modified, now))
+}
+
+fn age_of(modified: SystemTime, now: SystemTime) -> String {
+    now.duration_since(modified)
+        .map_or_else(|_| "in the future".to_owned(), age_text)
 }
 
 fn age_text(age: Duration) -> String {
@@ -220,156 +248,231 @@ pub fn page(
     set_last_action: SetState<Option<String>>,
 ) -> Element {
     let core = &report.core;
-    let now = SystemTime::now();
-    let events: Vec<Element> = report
-        .events
-        .iter()
-        .filter(|event| filter.admits(event.level))
-        .map(|event| {
-            text_block(event_line(event))
-                .font_family(MONO_FONT)
-                .font_size(12.0)
-                .selectable()
-                .into()
-        })
-        .collect();
-
-    scroll_viewer(
-        vstack((
-            actions(
-                report.to_text(),
-                core.data_dir.clone(),
-                last_action,
-                set_last_action,
-            ),
-            section(
-                "Data directory",
-                vec![
-                    ("Path", core.data_dir.display().to_string()),
-                    ("Source", source_label(core.data_dir_source).to_owned()),
-                    ("Settings", core.settings.path.display().to_string()),
-                    ("Settings state", stat_text(&core.settings.stat, now)),
-                ],
-            ),
-            section(
-                "Database",
-                vec![
-                    ("Path", core.library.path.display().to_string()),
-                    ("Size", size_text(&core.library.stat)),
-                    ("Modified", modified_only(&core.library.stat, now)),
-                    ("Schema version", schema_text(&core.schema)),
-                ],
-            ),
-            section(
-                "Logs",
-                vec![
-                    ("Folder", core.logs.display().to_string()),
-                    (
-                        "Current file",
-                        core.current_log.as_ref().map_or_else(
-                            || "none".to_owned(),
-                            |facts| facts.path.display().to_string(),
-                        ),
-                    ),
-                    (
-                        "Size",
-                        core.current_log
-                            .as_ref()
-                            .map_or_else(|| "none".to_owned(), |facts| size_text(&facts.stat)),
-                    ),
-                    (
-                        "Modified",
-                        core.current_log.as_ref().map_or_else(
-                            || "none".to_owned(),
-                            |facts| modified_only(&facts.stat, now),
-                        ),
-                    ),
-                ],
-            ),
-            text_block(format!(
-                "Ryuuji {} ({} build)",
-                report.app.version, report.app.profile
-            ))
-            .foreground(ThemeRef::SecondaryText),
-            RadioButtons::new(EventLevelFilter::ALL.map(EventLevelFilter::label))
-                .header("Recent events")
-                .selected_index(selected_index(filter))
-                .on_selection_changed(move |index: i32| {
-                    let chosen = usize::try_from(index)
-                        .ok()
-                        .and_then(|index| EventLevelFilter::ALL.get(index));
-                    if let Some(chosen) = chosen {
-                        set_filter.call(*chosen);
-                    }
-                }),
-            vstack(events).spacing(2.0),
-        ))
-        .spacing(12.0),
-    )
-    .into()
-}
-
-fn actions(
-    text: String,
-    root: PathBuf,
-    last_action: Option<String>,
-    set_last_action: SetState<Option<String>>,
-) -> Element {
     let copy = {
+        let text = report.to_text();
         let set = set_last_action.clone();
         move || set.call(Some(copy_to_clipboard(&text)))
     };
-    let open = move || set_last_action.call(Some(open_folder(&root)));
-    hstack((
+    let open = {
+        let root = core.data_dir.clone();
+        move || set_last_action.call(Some(open_folder(&root)))
+    };
+
+    let actions_row = hstack((
         button("Copy diagnostics").accent().on_click(copy),
-        button("Open data folder").on_click(open),
-        text_block(last_action.unwrap_or_default())
-            .foreground(ThemeRef::SecondaryText)
-            .vertical_alignment(VerticalAlignment::Center),
+        caption(last_action.unwrap_or_default()).vertical_alignment(VerticalAlignment::Center),
     ))
-    .spacing(8.0)
+    .spacing(12.0);
+
+    let directory_card = card(
+        Some(FOLDER_GLYPH),
+        &core.data_dir.display().to_string(),
+        format!(
+            "{} · Ryuuji {} · {} build",
+            source_text(core.data_dir_source),
+            report.app.version,
+            report.app.profile
+        ),
+        button("Open folder").on_click(open).into(),
+    );
+
+    let events_header = grid((
+        section("Recent events · newest first")
+            .vertical_alignment(VerticalAlignment::Center)
+            .grid_column(0),
+        level_picker(filter, set_filter)
+            .vertical_alignment(VerticalAlignment::Center)
+            .grid_column(1),
+    ))
+    .columns([GridLength::STAR, GridLength::Auto]);
+
+    scroll_viewer(
+        vstack((
+            actions_row,
+            vstack((section("Data directory"), directory_card)).spacing(8.0),
+            vstack((section("Files"), files_card(core))).spacing(8.0),
+            vstack((events_header, events_card(report, filter))).spacing(8.0),
+        ))
+        .spacing(24.0)
+        .max_width(CONTENT_MAX_WIDTH),
+    )
     .into()
 }
 
-fn section(title: &str, rows: Vec<(&'static str, String)>) -> Element {
-    let row_count = rows.len();
-    let cells: Vec<Element> = rows
+fn level_picker(filter: EventLevelFilter, set_filter: SetState<EventLevelFilter>) -> ComboBox {
+    ComboBox::new(EventLevelFilter::ALL.map(EventLevelFilter::label))
+        .selected_index(selected_index(filter))
+        .on_selection_changed(move |index: i32| {
+            let chosen = usize::try_from(index)
+                .ok()
+                .and_then(|index| EventLevelFilter::ALL.get(index));
+            if let Some(chosen) = chosen {
+                set_filter.call(*chosen);
+            }
+        })
+        .min_width(200.0)
+}
+
+/// One line of the Files table.
+struct FileRow {
+    name: String,
+    size: String,
+    modified: String,
+    note: String,
+}
+
+impl FileRow {
+    fn of(facts: &FileFacts, root: &Path, note: String, now: SystemTime) -> FileRow {
+        let modified = match facts.stat {
+            FileStat::Present {
+                modified: Some(modified),
+                ..
+            } => age_of(modified, now),
+            FileStat::Present { modified: None, .. }
+            | FileStat::Missing
+            | FileStat::Unreadable(_) => NOT_APPLICABLE.to_owned(),
+        };
+        FileRow {
+            name: relative(&facts.path, root),
+            size: size_text(&facts.stat),
+            modified,
+            note,
+        }
+    }
+
+    fn cells(self, row: i32) -> [Element; 4] {
+        [
+            text_block(self.name)
+                .selectable()
+                .grid_row(row)
+                .grid_column(0)
+                .into(),
+            text_block(self.size).grid_row(row).grid_column(1).into(),
+            text_block(self.modified)
+                .grid_row(row)
+                .grid_column(2)
+                .into(),
+            text_block(self.note).grid_row(row).grid_column(3).into(),
+        ]
+    }
+}
+
+fn files_card(core: &Diagnostics) -> Border {
+    let now = SystemTime::now();
+    let root = core.data_dir.as_path();
+    let log = match &core.current_log {
+        Some(facts) => FileRow::of(facts, root, "current log".to_owned(), now),
+        None => FileRow {
+            name: format!("{}\\ (no file yet)", relative(&core.logs, root)),
+            size: NOT_APPLICABLE.to_owned(),
+            modified: NOT_APPLICABLE.to_owned(),
+            note: NOT_APPLICABLE.to_owned(),
+        },
+    };
+    let rows = [
+        FileRow::of(&core.library, root, schema_note(&core.schema), now),
+        FileRow::of(&core.settings, root, NOT_APPLICABLE.to_owned(), now),
+        log,
+    ];
+    let header = ["Name", "Size", "Modified", "Note"]
         .into_iter()
         .enumerate()
-        .flat_map(|(index, (label, value))| {
-            let row = i32::try_from(index).unwrap_or(i32::MAX);
-            [
-                text_block(label)
-                    .foreground(ThemeRef::SecondaryText)
-                    .grid_row(row)
-                    .grid_column(0)
-                    .into(),
-                text_block(value)
-                    .selectable()
-                    .wrap()
-                    .grid_row(row)
-                    .grid_column(1)
-                    .into(),
-            ]
-        })
+        .map(|(column, title)| caption(title).grid_row(0).grid_column(column as i32).into());
+    let cells: Vec<Element> = header
+        .chain(
+            rows.into_iter()
+                .enumerate()
+                .flat_map(|(index, row)| row.cells(index as i32 + 1)),
+        )
         .collect();
-    Expander::new(
+    card_frame(
         grid(cells)
-            .rows(std::iter::repeat_n(GridLength::Auto, row_count))
-            .columns([GridLength::Auto, GridLength::STAR])
-            .row_spacing(4.0)
+            .rows(std::iter::repeat_n(GridLength::Auto, 4))
+            .columns([
+                GridLength::STAR,
+                GridLength::Auto,
+                GridLength::Auto,
+                GridLength::Auto,
+            ])
+            .row_spacing(6.0)
             .column_spacing(16.0),
     )
-    .header(title)
-    .expanded(true)
-    .into()
 }
 
-fn modified_only(stat: &FileStat, now: SystemTime) -> String {
-    match stat {
-        FileStat::Present { modified, .. } => modified_text(*modified, now),
-        FileStat::Missing => "missing".to_owned(),
-        FileStat::Unreadable(kind) => format!("unreadable: {kind}"),
+/// `path` under `root`, or the whole path when it lives elsewhere.
+fn relative(path: &Path, root: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .display()
+        .to_string()
+}
+
+fn events_card(report: &Report, filter: EventLevelFilter) -> Border {
+    let events: Vec<&EventRecord> = report
+        .events
+        .iter()
+        .rev()
+        .filter(|event| filter.admits(event.level))
+        .collect();
+    if events.is_empty() {
+        return card_frame(caption("Nothing at this level yet."));
+    }
+    let row_count = events.len();
+    let cells: Vec<Element> = events
+        .into_iter()
+        .enumerate()
+        .flat_map(|(index, event)| event_cells(event, index as i32))
+        .collect();
+    card_frame(
+        grid(cells)
+            .rows(std::iter::repeat_n(GridLength::Auto, row_count))
+            .columns([
+                GridLength::Auto,
+                GridLength::Auto,
+                GridLength::Auto,
+                GridLength::STAR,
+            ])
+            .row_spacing(4.0)
+            .column_spacing(12.0),
+    )
+}
+
+fn event_cells(event: &EventRecord, row: i32) -> [Element; 4] {
+    [
+        mono(clock(event.at))
+            .foreground(ThemeRef::SecondaryText)
+            .grid_row(row)
+            .grid_column(0)
+            .into(),
+        mono(event.level.to_string())
+            .semibold()
+            .foreground(level_brush(event.level))
+            .grid_row(row)
+            .grid_column(1)
+            .into(),
+        mono(event.target.clone())
+            .foreground(ThemeRef::SecondaryText)
+            .grid_row(row)
+            .grid_column(2)
+            .into(),
+        text_block(event.message.clone())
+            .wrap()
+            .grid_row(row)
+            .grid_column(3)
+            .into(),
+    ]
+}
+
+fn mono(text: impl Into<String>) -> TextBlock {
+    text_block(text).font_family(MONO_FONT).font_size(12.0)
+}
+
+/// The status brush for a level word; the word itself carries the meaning.
+fn level_brush(level: Level) -> ThemeRef {
+    match level {
+        Level::ERROR => ThemeRef::SystemCritical,
+        Level::WARN => ThemeRef::SystemCaution,
+        _ => ThemeRef::SecondaryText,
     }
 }
 
@@ -476,5 +579,34 @@ mod tests {
         assert_eq!(age_text(Duration::from_secs(150)), "2 min ago");
         assert_eq!(age_text(Duration::from_secs(7_200)), "2 h ago");
         assert_eq!(age_text(Duration::from_secs(200_000)), "2 d ago");
+    }
+
+    #[test]
+    fn relative_strips_the_root_and_keeps_foreign_paths() {
+        let root = Path::new(r"C:\Users\me\Ryuuji");
+        assert_eq!(
+            relative(Path::new(r"C:\Users\me\Ryuuji\library.sqlite"), root),
+            "library.sqlite"
+        );
+        assert_eq!(
+            relative(
+                Path::new(r"C:\Users\me\Ryuuji\logs\ryuuji.log.2026-08-29"),
+                root
+            ),
+            r"logs\ryuuji.log.2026-08-29"
+        );
+        assert_eq!(
+            relative(Path::new(r"D:\elsewhere\library.sqlite"), root),
+            r"D:\elsewhere\library.sqlite"
+        );
+    }
+
+    #[test]
+    fn level_brush_maps_warn_and_error() {
+        assert_eq!(level_brush(Level::ERROR), ThemeRef::SystemCritical);
+        assert_eq!(level_brush(Level::WARN), ThemeRef::SystemCaution);
+        for level in [Level::INFO, Level::DEBUG, Level::TRACE] {
+            assert_eq!(level_brush(level), ThemeRef::SecondaryText);
+        }
     }
 }
