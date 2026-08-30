@@ -6,7 +6,10 @@ use std::path::Path;
 use std::process::Command as Process;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use ryuuji_core::{DataDirSource, Diagnostics, FileFacts, FileStat, ProbeFailed, SchemaVersion};
+use ryuuji_core::{
+    Command, DataDirSource, Diagnostics, FileFacts, FileStat, PlaybackEvent, PlaybackSource,
+    PlaybackStatus, ProbeFailed, SchemaVersion,
+};
 use tracing::{Level, warn};
 use windows_reactor::*;
 
@@ -15,6 +18,22 @@ use crate::ui::{CONTENT_MAX_WIDTH, FOLDER_GLYPH, caption, card, card_frame, sect
 
 const MONO_FONT: &str = "Cascadia Mono";
 const NOT_APPLICABLE: &str = "—";
+
+pub const INJECTED_TITLE: &str = "Sousou no Frieren - 01";
+pub const INJECTED_PLAYER: &str = "Injected";
+
+/// The canned event the Diagnostics page feeds through `Command::Playback`.
+pub fn injected(status: PlaybackStatus) -> PlaybackEvent {
+    PlaybackEvent {
+        player: INJECTED_PLAYER.to_owned(),
+        title: INJECTED_TITLE.to_owned(),
+        status,
+        position: Duration::from_secs(5 * 60),
+        duration: Duration::from_secs(24 * 60),
+        observed_at: SystemTime::now(),
+        source: PlaybackSource::Injected,
+    }
+}
 
 /// Which events the page shows. The report always carries all of them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -246,6 +265,7 @@ pub fn page(
     set_filter: SetState<EventLevelFilter>,
     last_action: Option<String>,
     set_last_action: SetState<Option<String>>,
+    dispatch: Dispatch<Command>,
 ) -> Element {
     let core = &report.core;
     let copy = {
@@ -255,7 +275,16 @@ pub fn page(
     };
     let open = {
         let root = core.data_dir.clone();
-        move || set_last_action.call(Some(open_folder(&root)))
+        let set = set_last_action.clone();
+        move || set.call(Some(open_folder(&root)))
+    };
+    let inject = |status: PlaybackStatus, outcome: &'static str| {
+        let dispatch = dispatch.clone();
+        let set = set_last_action.clone();
+        move || {
+            dispatch.call(Command::Playback(injected(status)));
+            set.call(Some(outcome.to_owned()));
+        }
     };
 
     let actions_row = hstack((
@@ -276,6 +305,18 @@ pub fn page(
         button("Open folder").on_click(open).into(),
     );
 
+    let playback_card = card(
+        None,
+        "Inject playback event",
+        "Feeds a canned event through Command::Playback, tagged injected.",
+        hstack((
+            button("Inject playing").on_click(inject(PlaybackStatus::Playing, "Injected playing")),
+            button("Inject stopped").on_click(inject(PlaybackStatus::Stopped, "Injected stopped")),
+        ))
+        .spacing(8.0)
+        .into(),
+    );
+
     let events_header = grid((
         section("Recent events · newest first")
             .vertical_alignment(VerticalAlignment::Center)
@@ -291,6 +332,7 @@ pub fn page(
             actions_row,
             vstack((section("Data directory"), directory_card)).spacing(8.0),
             vstack((section("Files"), files_card(core))).spacing(8.0),
+            vstack((section("Playback"), playback_card)).spacing(8.0),
             vstack((events_header, events_card(report, filter))).spacing(8.0),
         ))
         .spacing(24.0)
@@ -599,6 +641,19 @@ mod tests {
             relative(Path::new(r"D:\elsewhere\library.sqlite"), root),
             r"D:\elsewhere\library.sqlite"
         );
+    }
+
+    #[test]
+    fn injected_events_carry_the_canned_values_and_the_injected_tag() {
+        for status in [PlaybackStatus::Playing, PlaybackStatus::Stopped] {
+            let event = injected(status);
+            assert_eq!(event.title, INJECTED_TITLE);
+            assert_eq!(event.player, INJECTED_PLAYER);
+            assert_eq!(event.status, status);
+            assert_eq!(event.position, Duration::from_secs(300));
+            assert_eq!(event.duration, Duration::from_secs(1440));
+            assert_eq!(event.source, PlaybackSource::Injected);
+        }
     }
 
     #[test]

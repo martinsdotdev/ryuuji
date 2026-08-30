@@ -96,10 +96,18 @@ impl Component for Shell {
         let body = pages::render(&state, dispatch.clone(), &self.dir, {
             let core = core.clone();
             let recent = self.recent.clone();
+            let dispatch = dispatch.clone();
             move || {
                 let events = recent.snapshot();
                 let report = Report::new(core.borrow().diagnostics(), events);
-                debug::page(&report, filter, set_filter, last_action, set_last_action)
+                debug::page(
+                    &report,
+                    filter,
+                    set_filter,
+                    last_action,
+                    set_last_action,
+                    dispatch.clone(),
+                )
             }
         });
 
