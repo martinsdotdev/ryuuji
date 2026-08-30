@@ -1,0 +1,24 @@
+//! Player detection for Ryuuji, modeled on anisthesia: a table of known
+//! players plus per-player strategies, each producing one normalized
+//! [`ryuuji_core::PlaybackEvent`]. The only strategy so far is Windows SMTC
+//! (`Windows.Media.Control`); the table and the session logic are portable.
+
+mod players;
+#[cfg_attr(not(windows), allow(dead_code))]
+mod session;
+#[cfg(windows)]
+mod smtc;
+
+pub use players::{Player, PlayerTable, TableError};
+#[cfg(windows)]
+pub use smtc::{WatchError, Watcher, watch};
+
+/// Every SMTC session seen at the last refresh, matched or not. `title` is
+/// empty for unmatched sessions since their media properties are not read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionFacts {
+    pub app_id: String,
+    pub title: String,
+    pub status: String,
+    pub player: Option<String>,
+}

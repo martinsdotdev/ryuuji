@@ -1,0 +1,16 @@
+# SMTC app ids are matched case-insensitively as substrings of
+# GlobalSystemMediaTransportControlsSession.SourceAppUserModelId.
+# Unpackaged apps get a system-assigned id that contains the exe name.
+# Verify each id from the Diagnostics page's "Media sessions" card.
+
+[[player]]
+name = "mpv"
+smtc_app_ids = ["mpv.exe"]
+
+[[player]]
+name = "VLC"
+smtc_app_ids = ["vlc.exe", "videolan.vlc"]
+
+[[player]]
+name = "MPC-HC"
+smtc_app_ids = ["mpc-hc64.exe", "mpc-hc.exe"]

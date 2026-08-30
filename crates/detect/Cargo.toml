@@ -1,0 +1,17 @@
+[package]
+name = "ryuuji-detect"
+description = "Player detection strategies producing normalized playback events"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+ryuuji-core.workspace = true
+tracing.workspace = true
+serde.workspace = true
+toml.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true
