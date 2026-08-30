@@ -3,26 +3,32 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::time::Duration;
 
 use ryuuji_core::{
     AppState, Command, DataDir, Page, Ryuuji, StoreError, ThemePreference, error_chain,
 };
 use windows_reactor::{
-    Component, Element, NavViewItem, NavigationView, NavigationViewPaneDisplayMode, RenderCx,
-    RequestedTheme, Symbol, set_requested_theme,
+    Component, DispatcherTimer, Element, NavViewItem, NavigationView,
+    NavigationViewPaneDisplayMode, RenderCx, RequestedTheme, Symbol, set_requested_theme,
 };
 
+use crate::debug::{self, EventLevelFilter, Report};
+use crate::logging::RecentEvents;
 use crate::pages;
+
+const DIAGNOSTICS_REFRESH: Duration = Duration::from_secs(2);
 
 /// Root component. Owns the core for the life of the window; the reducer
 /// hook mirrors its state so the tree rerenders after every command.
 pub struct Shell {
     dir: DataDir,
     core: Result<Rc<RefCell<Ryuuji>>, StoreError>,
+    recent: RecentEvents,
 }
 
 impl Shell {
-    pub fn boot(dir: DataDir) -> Shell {
+    pub fn boot(dir: DataDir, recent: RecentEvents) -> Shell {
         let core = Ryuuji::open(&dir).map(|core| Rc::new(RefCell::new(core)));
         match &core {
             // Before the first render, so the first frame already carries the
@@ -30,7 +36,7 @@ impl Shell {
             Ok(core) => set_requested_theme(requested_theme(core.borrow().state().settings.theme)),
             Err(err) => tracing::error!(error = %error_chain(err), "boot failed"),
         }
-        Shell { dir, core }
+        Shell { dir, core, recent }
     }
 }
 
@@ -56,22 +62,59 @@ impl Component for Shell {
             },
             core.borrow().state().clone(),
         );
+        // The tick has no reader; each bump only forces a rerender so the
+        // diagnostics page gathers fresh values.
+        let (_tick, bump) = cx.use_reducer(0u32);
+        let (filter, set_filter) = cx.use_state(EventLevelFilter::All);
+        let (last_action, set_last_action) = cx.use_state(None::<String>);
+        let on_debug = state.page == Page::Debug;
+        cx.use_effect_with_cleanup(on_debug, move || {
+            if !on_debug {
+                return None;
+            }
+            match DispatcherTimer::new(DIAGNOSTICS_REFRESH, move || {
+                bump.call(|n| n.wrapping_add(1));
+            }) {
+                Ok(timer) => Some(move || drop(timer)),
+                Err(err) => {
+                    tracing::warn!(%err, "diagnostics timer not started");
+                    None
+                }
+            }
+        });
 
-        let menu_items = Page::ALL.into_iter().map(|page| {
+        let menu_items = Page::NAV.into_iter().map(|page| {
             NavViewItem::new(page.label())
                 .tag(page.tag())
                 .icon(icon_for(page))
         });
 
-        let body = pages::render(&state, dispatch.clone());
+        let body = pages::render(&state, dispatch.clone(), {
+            let core = core.clone();
+            let recent = self.recent.clone();
+            move || {
+                let events = recent.snapshot();
+                let report = Report::new(core.borrow().diagnostics(), events);
+                debug::page(&report, filter, set_filter, last_action, set_last_action)
+            }
+        });
+
+        let highlighted = if on_debug { Page::Settings } else { state.page };
+        let back = {
+            let dispatch = dispatch.clone();
+            move || dispatch.call(Command::SelectPage(Page::Settings))
+        };
 
         NavigationView::new(menu_items, body)
-            .selected_tag(state.page.tag())
+            .selected_tag(highlighted.tag())
             .on_selection_changed(move |tag: String| {
                 if let Some(page) = Page::from_tag(&tag) {
                     dispatch.call(Command::SelectPage(page));
                 }
             })
+            .back_button_visible(on_debug)
+            .back_enabled(on_debug)
+            .on_back_requested(back)
             .pane_display_mode(NavigationViewPaneDisplayMode::Left)
             // Settings is one of our own pages so it routes like the others.
             .settings_visible(false)
@@ -92,5 +135,6 @@ fn icon_for(page: Page) -> Symbol {
         Page::Library => Symbol::Library,
         Page::NowPlaying => Symbol::Play,
         Page::Settings => Symbol::Setting,
+        Page::Debug => Symbol::Repair,
     }
 }
