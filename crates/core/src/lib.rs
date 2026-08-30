@@ -8,6 +8,7 @@
 
 mod app;
 mod data_dir;
+mod diagnostics;
 mod settings;
 mod store;
 
@@ -15,20 +16,23 @@ use std::fmt;
 use std::path::PathBuf;
 
 pub use app::Ryuuji;
-pub use data_dir::{DataDir, DataDirError};
-pub use store::{DbError, Opened, Recovered, Store, StoreError};
+pub use data_dir::{DataDir, DataDirError, DataDirSource};
+pub use diagnostics::{ByteSize, Diagnostics, FileFacts, FileStat, ProbeFailed};
+pub use store::{DbError, Opened, Recovered, SchemaVersion, Store, StoreError};
 
-/// Top-level pages reachable from the navigation pane.
+/// Every page the shell can show. The first three sit in the navigation
+/// pane; `Debug` is reached from Settings and returns there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Page {
     Library,
     NowPlaying,
     Settings,
+    Debug,
 }
 
 impl Page {
-    /// Every page, in navigation order.
-    pub const ALL: [Page; 3] = [Page::Library, Page::NowPlaying, Page::Settings];
+    /// The navigation pane items, in order.
+    pub const NAV: [Page; 3] = [Page::Library, Page::NowPlaying, Page::Settings];
 
     /// Stable identifier used as the navigation item tag.
     pub fn tag(self) -> &'static str {
@@ -36,20 +40,22 @@ impl Page {
             Page::Library => "library",
             Page::NowPlaying => "now-playing",
             Page::Settings => "settings",
+            Page::Debug => "debug",
         }
     }
 
-    /// Inverse of [`Page::tag`].
+    /// Inverse of [`Page::tag`] for the navigation items.
     pub fn from_tag(tag: &str) -> Option<Page> {
-        Page::ALL.into_iter().find(|page| page.tag() == tag)
+        Page::NAV.into_iter().find(|page| page.tag() == tag)
     }
 
-    /// Human-readable navigation label.
+    /// Human-readable label.
     pub fn label(self) -> &'static str {
         match self {
             Page::Library => "Library",
             Page::NowPlaying => "Now playing",
             Page::Settings => "Settings",
+            Page::Debug => "Diagnostics",
         }
     }
 }
@@ -284,9 +290,10 @@ mod tests {
 
     #[test]
     fn page_tags_round_trip() {
-        for page in Page::ALL {
+        for page in Page::NAV {
             assert_eq!(Page::from_tag(page.tag()), Some(page));
         }
+        assert_eq!(Page::from_tag(Page::Debug.tag()), None);
         assert_eq!(Page::from_tag("nope"), None);
     }
 

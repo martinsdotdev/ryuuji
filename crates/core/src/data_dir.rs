@@ -5,11 +5,22 @@ use std::{fs, io};
 /// Environment variable that overrides the platform data directory.
 pub const DATA_DIR_ENV: &str = "RYUUJI_DATA_DIR";
 
+/// How the data directory was chosen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DataDirSource {
+    PlatformDefault,
+    /// `RYUUJI_DATA_DIR` was set.
+    EnvOverride,
+    /// Handed in directly through [`DataDir::at`].
+    Explicit,
+}
+
 /// The directory Ryuuji keeps its files in. Constructing one guarantees the
 /// root and its `logs/` subdirectory exist.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DataDir {
     root: PathBuf,
+    source: DataDirSource,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -39,17 +50,23 @@ impl DataDir {
         env_override: Option<OsString>,
         platform_default: Option<PathBuf>,
     ) -> Result<DataDir, DataDirError> {
-        let root = env_override
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .or(platform_default)
-            .ok_or(DataDirError::NoPlatformDir)?;
-        DataDir::at(root)
+        let (root, source) = match env_override.filter(|value| !value.is_empty()) {
+            Some(value) => (PathBuf::from(value), DataDirSource::EnvOverride),
+            None => (
+                platform_default.ok_or(DataDirError::NoPlatformDir)?,
+                DataDirSource::PlatformDefault,
+            ),
+        };
+        DataDir::create(root, source)
     }
 
     /// Uses `root` as the data directory, creating it and `logs/`.
     pub fn at(root: impl Into<PathBuf>) -> Result<DataDir, DataDirError> {
-        let dir = DataDir { root: root.into() };
+        DataDir::create(root.into(), DataDirSource::Explicit)
+    }
+
+    fn create(root: PathBuf, source: DataDirSource) -> Result<DataDir, DataDirError> {
+        let dir = DataDir { root, source };
         create_dir(&dir.root)?;
         create_dir(&dir.logs())?;
         Ok(dir)
@@ -57,6 +74,10 @@ impl DataDir {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    pub fn source(&self) -> DataDirSource {
+        self.source
     }
 
     pub fn logs(&self) -> PathBuf {
@@ -90,6 +111,7 @@ mod tests {
         let platform = tmp.path().join("platform");
         let dir = DataDir::from_parts(Some(wanted.clone().into()), Some(platform.clone())).unwrap();
         assert_eq!(dir.root(), wanted);
+        assert_eq!(dir.source(), DataDirSource::EnvOverride);
         assert!(!platform.exists());
     }
 
@@ -99,6 +121,7 @@ mod tests {
         let platform = tmp.path().join("platform");
         let dir = DataDir::from_parts(Some(OsString::new()), Some(platform.clone())).unwrap();
         assert_eq!(dir.root(), platform);
+        assert_eq!(dir.source(), DataDirSource::PlatformDefault);
     }
 
     #[test]
@@ -116,6 +139,7 @@ mod tests {
         let dir = DataDir::at(&root).unwrap();
         assert!(root.is_dir());
         assert!(dir.logs().is_dir());
+        assert_eq!(dir.source(), DataDirSource::Explicit);
         assert_eq!(DataDir::at(&root).unwrap(), dir);
     }
 }
