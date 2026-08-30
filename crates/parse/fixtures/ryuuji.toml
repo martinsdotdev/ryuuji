@@ -1,0 +1,153 @@
+# Ryuuji's own conformance cases for the keyword pass. Comparison ignores
+# file_name; a case with strict = false is only checked on the kinds it lists.
+
+[[case]]
+name = "extension resolution and checksum"
+input = "[Taka]_Fullmetal_Alchemist_(2009)_04_[720p][40F2A957].mp4"
+
+[case.elements]
+file_extension = "mp4"
+video_resolution = "720p"
+file_checksum = "40F2A957"
+
+[[case]]
+name = "thora with bluray audio and video terms"
+input = "Evangelion_1.11_You_Are_(Not)_Alone_(2009)_[1080p,BluRay,x264,DTS-ES]_-_THORA.mkv"
+
+[case.elements]
+file_extension = "mkv"
+video_resolution = "1080p"
+source = "BluRay"
+video_term = "x264"
+audio_term = "DTS-ES"
+release_group = "THORA"
+
+[[case]]
+name = "dual audio preidentified alongside flac"
+input = "[Coalgirls]_Spirited_Away_(1080p_FLAC)_Dual Audio.mkv"
+
+[case.elements]
+file_extension = "mkv"
+video_resolution = "1080p"
+audio_term = ["FLAC", "Dual Audio"]
+
+[[case]]
+name = "ova anime type"
+input = "[HorribleSubs] Boku no Hero Academia - OVA [720p].mkv"
+
+[case.elements]
+file_extension = "mkv"
+anime_type = "OVA"
+video_resolution = "720p"
+
+[[case]]
+name = "invalid anime type keyword is still recorded"
+input = "Suzumiya Haruhi no Yuuutsu NCOP (BD 1440x1080).mkv"
+
+[case.elements]
+file_extension = "mkv"
+anime_type = "NCOP"
+source = "BD"
+video_resolution = "1440x1080"
+
+[[case]]
+name = "release version and batch"
+input = "[Group] Kara no Kyoukai v2 Batch (BD 1080p FLAC).mkv"
+
+[case.elements]
+file_extension = "mkv"
+release_version = "2"
+release_information = "Batch"
+source = "BD"
+video_resolution = "1080p"
+audio_term = "FLAC"
+
+[[case]]
+name = "language and hardsubs"
+input = "[Foo] Cowboy Bebop [VOSTFR][HardSub][480p].avi"
+
+[case.elements]
+file_extension = "avi"
+language = "VOSTFR"
+subtitles = "HardSub"
+video_resolution = "480p"
+
+[[case]]
+name = "device compatibility"
+input = "Sword Art Online II 05 (PS3) [1080p].mkv"
+
+[case.elements]
+file_extension = "mkv"
+device_compatibility = "PS3"
+video_resolution = "1080p"
+
+[[case]]
+name = "other terms and explicit dimensions"
+input = "Cardcaptor Sakura 12 Remastered WS DVD (640x480).mkv"
+
+[case.elements]
+file_extension = "mkv"
+other = ["Remastered", "WS"]
+source = "DVD"
+video_resolution = "640x480"
+
+[[case]]
+name = "extension parsing disabled"
+input = "Gintama [720p].mkv"
+
+[case.options]
+parse_file_extension = false
+
+[case.elements]
+video_resolution = "720p"
+
+[[case]]
+name = "release group parsing disabled"
+input = "Gintama (BD 1080p) - THORA.mkv"
+
+[case.options]
+parse_release_group = false
+
+[case.elements]
+file_extension = "mkv"
+source = "BD"
+video_resolution = "1080p"
+
+[[case]]
+name = "eight digit numeric checksum"
+input = "[Foo] Bar - 07 [12345678].mkv"
+
+[case.elements]
+file_extension = "mkv"
+file_checksum = "12345678"
+
+[[case]]
+name = "ignored strings unlock a keyword"
+input = "[EnigmaBD 1080p].mkv"
+
+[case.options]
+ignored_strings = ["Enigma"]
+
+[case.elements]
+file_extension = "mkv"
+source = "BD"
+video_resolution = "1080p"
+
+[[case]]
+name = "truehd atmos and hevc"
+input = "Akira (2160p TrueHD Atmos HEVC).mkv"
+
+[case.elements]
+file_extension = "mkv"
+video_resolution = "2160p"
+audio_term = ["TrueHD", "Atmos"]
+video_term = "HEVC"
+
+[[case]]
+name = "loose comparison checks only the listed kinds"
+input = "Monogatari (BD 1080p FLAC) [ABCD1234].mkv"
+strict = false
+
+[case.elements]
+source = "BD"
+file_checksum = "ABCD1234"
