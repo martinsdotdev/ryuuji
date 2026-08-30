@@ -1,10 +1,12 @@
 //! Page bodies. The Library lists real entries, Settings is laid out in the
 //! Windows Settings idiom (section headers and cards) with the theme picker,
-//! the data folder and the way into Diagnostics, and Now playing is a
-//! placeholder in the symbolic empty-state style the UI-direction research
-//! settled on (heading required, neutral tone). The Diagnostics body itself is
-//! built by the caller, so this module never sees the core handle or the log
-//! buffer.
+//! the data folder and the way into Diagnostics, and Now playing shows the
+//! last playback observation on a card, or a placeholder in the symbolic
+//! empty-state style the UI-direction research settled on (heading required,
+//! neutral tone). The Diagnostics body itself is built by the caller, so this
+//! module never sees the core handle or the log buffer.
+
+use std::time::Duration;
 
 use ryuuji_core::{
     AppState, Command, DataDir, LibraryEntry, Notice, NowPlaying, Page, Settings, StoreError,
@@ -123,12 +125,43 @@ fn now_playing(now_playing: &NowPlaying) -> Element {
         ),
         NowPlaying::Playing {
             title,
-            episode,
             player,
-        } => placeholder(
-            format!("{title} · Episode {episode}"),
-            format!("Playing in {player}."),
-        ),
+            status,
+            position,
+            duration,
+        } => card_frame(
+            vstack((
+                text_block(title.clone()).font_size(20.0).semibold().wrap(),
+                caption(format!("{} in {player}", status.label())),
+                text_block(format!(
+                    "{} / {}",
+                    clock_text(*position),
+                    duration_text(*duration)
+                )),
+            ))
+            .spacing(4.0),
+        )
+        .into(),
+    }
+}
+
+/// `m:ss`, or `h:mm:ss` from one hour.
+fn clock_text(value: Duration) -> String {
+    let total = value.as_secs();
+    let (hours, minutes, seconds) = (total / 3600, total / 60 % 60, total % 60);
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    }
+}
+
+/// Like [`clock_text`], with an unknown length shown as `--:--`.
+fn duration_text(value: Duration) -> String {
+    if value.is_zero() {
+        "--:--".to_string()
+    } else {
+        clock_text(value)
     }
 }
 
@@ -220,5 +253,18 @@ mod tests {
             let index = usize::try_from(theme_index(theme)).unwrap();
             assert_eq!(ThemePreference::ALL[index], theme);
         }
+    }
+
+    #[test]
+    fn clock_text_formats_minutes_and_hours() {
+        assert_eq!(clock_text(Duration::ZERO), "0:00");
+        assert_eq!(clock_text(Duration::from_secs(305)), "5:05");
+        assert_eq!(clock_text(Duration::from_secs(3661)), "1:01:01");
+    }
+
+    #[test]
+    fn duration_text_marks_zero_unknown() {
+        assert_eq!(duration_text(Duration::ZERO), "--:--");
+        assert_eq!(duration_text(Duration::from_secs(1420)), "23:40");
     }
 }
