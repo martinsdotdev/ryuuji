@@ -100,6 +100,17 @@ pub(crate) enum Observation {
     Seen(PlaybackEvent),
 }
 
+/// `unreadable` counts matched sessions whose media or timeline could not be
+/// read this refresh. They keep the observation out of `Absent`, since a
+/// session that exists but is not ready has not vanished.
+pub(crate) fn observe(matched: &[Matched<'_>], unreadable: usize, now: SystemTime) -> Observation {
+    match choose(matched) {
+        Some(chosen) => normalize(chosen, now).map_or(Observation::Transitional, Observation::Seen),
+        None if unreadable > 0 => Observation::Transitional,
+        None => Observation::Absent,
+    }
+}
+
 /// Drops observations equal to the last one in every field except
 /// `observed_at`; synthesises Stopped when the session vanishes.
 #[derive(Default)]
@@ -302,6 +313,22 @@ mod tests {
         let normalized = normalize(&matched, now()).unwrap();
         assert_eq!(normalized.position, Duration::ZERO);
         assert_eq!(normalized.duration, Duration::ZERO);
+    }
+
+    #[test]
+    fn unreadable_matched_session_is_transitional_not_absent() {
+        assert!(matches!(observe(&[], 1, now()), Observation::Transitional));
+        let mpv = player("mpv");
+        let matched = [Matched {
+            player: &mpv,
+            snapshot: snapshot(RawStatus::Playing),
+        }];
+        assert!(matches!(observe(&matched, 1, now()), Observation::Seen(_)));
+    }
+
+    #[test]
+    fn no_sessions_is_absent() {
+        assert!(matches!(observe(&[], 0, now()), Observation::Absent));
     }
 
     #[test]
