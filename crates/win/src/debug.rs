@@ -53,7 +53,7 @@ pub struct AppInfo {
 }
 
 impl AppInfo {
-    fn current() -> AppInfo {
+    pub(crate) fn current() -> AppInfo {
         AppInfo {
             version: env!("CARGO_PKG_VERSION"),
             profile: if cfg!(debug_assertions) {

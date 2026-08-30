@@ -89,7 +89,7 @@ impl Component for Shell {
                 .icon(icon_for(page))
         });
 
-        let body = pages::render(&state, dispatch.clone(), {
+        let body = pages::render(&state, dispatch.clone(), &self.dir, {
             let core = core.clone();
             let recent = self.recent.clone();
             move || {
@@ -106,6 +106,7 @@ impl Component for Shell {
         };
 
         NavigationView::new(menu_items, body)
+            .header(state.page.label())
             .selected_tag(highlighted.tag())
             .on_selection_changed(move |tag: String| {
                 if let Some(page) = Page::from_tag(&tag) {
