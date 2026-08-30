@@ -16,7 +16,7 @@ use windows::Media::Control::{
 };
 use windows::core::EventRevoker;
 
-use crate::session::{Dedup, Matched, Observation, RawStatus, SessionSnapshot, choose, normalize};
+use crate::session::{Dedup, Matched, RawStatus, SessionSnapshot, observe};
 use crate::{PlayerTable, SessionFacts};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -141,6 +141,7 @@ impl Spawn {
             tx: self.tx,
             sessions: Vec::new(),
             dedup: Dedup::default(),
+            retry: false,
             facts: self.facts,
             sink: self.sink,
         };
@@ -159,6 +160,8 @@ struct Worker {
     tx: Sender<Msg>,
     sessions: Vec<Subscribed>,
     dedup: Dedup,
+    /// The last refresh left a matched session unread; poll again soon.
+    retry: bool,
     facts: Arc<Mutex<Vec<SessionFacts>>>,
     sink: Sink,
 }
@@ -172,7 +175,7 @@ struct Subscribed {
 impl Worker {
     /// Blocks until the next refresh is due. False means stop.
     fn wait(&self, rx: &Receiver<Msg>) -> bool {
-        let first = if self.dedup.is_playing() {
+        let first = if self.dedup.is_playing() || self.retry {
             match rx.recv_timeout(PLAYING_POLL) {
                 Ok(msg) => msg,
                 Err(RecvTimeoutError::Timeout) => return true,
@@ -205,9 +208,15 @@ impl Worker {
         let mut facts = Vec::new();
         let mut matched = Vec::new();
         let mut live = Vec::new();
+        let mut unreadable = 0;
         for session in &self.manager.GetSessions()? {
-            let app_id = session.SourceAppUserModelId()?.to_string_lossy();
-            let raw = session.GetPlaybackInfo()?.PlaybackStatus()?.0;
+            let (app_id, raw) = match read_session(&session) {
+                Ok(read) => read,
+                Err(err) => {
+                    debug!(error = %err, "smtc session not ready");
+                    continue;
+                }
+            };
             let status = RawStatus::from_winrt(raw);
             let status_label =
                 status.map_or_else(|| format!("Unknown({raw})"), |s| s.label().to_owned());
@@ -215,31 +224,26 @@ impl Worker {
             let player = self.table.match_smtc(&app_id);
             let mut title = String::new();
             if let (Some(player), Some(status)) = (player, status) {
-                title = session
-                    .TryGetMediaPropertiesAsync()?
-                    .join()?
-                    .Title()?
-                    .to_string_lossy();
-                let timeline = session.GetTimelineProperties()?;
-                let snapshot = SessionSnapshot {
-                    app_id: app_id.clone(),
-                    title: title.clone(),
-                    status,
-                    start: span(timeline.StartTime()?),
-                    end: span(timeline.EndTime()?),
-                    position: span(timeline.Position()?),
-                };
-                debug!(
-                    app_id,
-                    title,
-                    status = status.label(),
-                    player = player.name,
-                    position_ms = snapshot.position.as_millis(),
-                    start_ms = snapshot.start.as_millis(),
-                    end_ms = snapshot.end.as_millis(),
-                    "smtc matched session"
-                );
-                matched.push(Matched { player, snapshot });
+                match read_snapshot(&session, app_id.clone(), status) {
+                    Ok(snapshot) => {
+                        title = snapshot.title.clone();
+                        debug!(
+                            app_id,
+                            title,
+                            status = status.label(),
+                            player = player.name,
+                            position_ms = snapshot.position.as_millis(),
+                            start_ms = snapshot.start.as_millis(),
+                            end_ms = snapshot.end.as_millis(),
+                            "smtc matched session"
+                        );
+                        matched.push(Matched { player, snapshot });
+                    }
+                    Err(err) => {
+                        debug!(app_id, error = %err, "smtc session not ready");
+                        unreadable += 1;
+                    }
+                }
                 live.push((app_id.clone(), session));
             }
             facts.push(SessionFacts {
@@ -255,12 +259,8 @@ impl Worker {
                 "several smtc sessions match the player table"
             );
         }
-        let observation = match choose(&matched) {
-            None => Observation::Absent,
-            Some(chosen) => {
-                normalize(chosen, now).map_or(Observation::Transitional, Observation::Seen)
-            }
-        };
+        let observation = observe(&matched, unreadable, now);
+        self.retry = unreadable > 0;
         self.resubscribe(live)?;
         *self.facts.lock().unwrap_or_else(PoisonError::into_inner) = facts;
         if let Some(event) = self.dedup.admit(observation, now) {
@@ -313,6 +313,35 @@ impl Worker {
         }
         Ok(())
     }
+}
+
+/// App id and raw playback status, the reads every session gets.
+fn read_session(session: &Session) -> windows::core::Result<(String, i32)> {
+    let app_id = session.SourceAppUserModelId()?.to_string_lossy();
+    let raw = session.GetPlaybackInfo()?.PlaybackStatus()?.0;
+    Ok((app_id, raw))
+}
+
+/// Media properties and timeline, read only for matched sessions.
+fn read_snapshot(
+    session: &Session,
+    app_id: String,
+    status: RawStatus,
+) -> windows::core::Result<SessionSnapshot> {
+    let title = session
+        .TryGetMediaPropertiesAsync()?
+        .join()?
+        .Title()?
+        .to_string_lossy();
+    let timeline = session.GetTimelineProperties()?;
+    Ok(SessionSnapshot {
+        app_id,
+        title,
+        status,
+        start: span(timeline.StartTime()?),
+        end: span(timeline.EndTime()?),
+        position: span(timeline.Position()?),
+    })
 }
 
 /// A WinRT `TimeSpan` as a `Duration`; negative spans read as zero.

@@ -14,7 +14,8 @@ pub use players::{Player, PlayerTable, TableError};
 pub use smtc::{WatchError, Watcher, watch};
 
 /// Every SMTC session seen at the last refresh, matched or not. `title` is
-/// empty for unmatched sessions since their media properties are not read.
+/// empty for unmatched sessions, whose media properties are not read, and
+/// for matched sessions whose media properties were not ready.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionFacts {
     pub app_id: String,
