@@ -30,11 +30,8 @@ pub struct Shell {
 impl Shell {
     pub fn boot(dir: DataDir, recent: RecentEvents) -> Shell {
         let core = Ryuuji::open(&dir).map(|core| Rc::new(RefCell::new(core)));
-        match &core {
-            // Before the first render, so the first frame already carries the
-            // saved theme instead of flashing the system one.
-            Ok(core) => set_requested_theme(requested_theme(core.borrow().state().settings.theme)),
-            Err(err) => tracing::error!(error = %error_chain(err), "boot failed"),
+        if let Err(err) = &core {
+            tracing::error!(error = %error_chain(err), "boot failed");
         }
         Shell { dir, core, recent }
     }
@@ -46,6 +43,13 @@ impl Component for Shell {
             Ok(core) => core,
             Err(err) => return pages::boot_failed(err, &self.dir),
         };
+
+        // Runs once, during the first render: the host only accepts theme
+        // requests while rendering, and this lands before the first commit.
+        cx.use_memo((), {
+            let theme = core.borrow().state().settings.theme;
+            move || set_requested_theme(requested_theme(theme))
+        });
 
         let (state, dispatch) = cx.use_reducer_fn(
             {
