@@ -112,7 +112,9 @@ impl Component for Shell {
                     dispatch.call(Command::SelectPage(page));
                 }
             })
-            .back_button_visible(on_debug)
+            // The toolkit only pushes IsBackButtonVisible when it is false, so
+            // a later `true` never re-shows the arrow; keep it visible and gate
+            // it through `back_enabled` instead.
             .back_enabled(on_debug)
             .on_back_requested(back)
             .pane_display_mode(NavigationViewPaneDisplayMode::Left)
