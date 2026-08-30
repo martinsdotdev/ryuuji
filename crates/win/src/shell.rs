@@ -6,8 +6,10 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use ryuuji_core::{
-    AppState, Command, DataDir, Page, Ryuuji, StoreError, ThemePreference, error_chain,
+    AppState, Command, DataDir, Page, PlaybackEvent, Ryuuji, StoreError, ThemePreference,
+    error_chain,
 };
+use ryuuji_detect::{WatchError, Watcher};
 use windows_reactor::{
     Component, DispatcherTimer, Element, NavViewItem, NavigationView,
     NavigationViewPaneDisplayMode, RenderCx, RequestedTheme, Symbol, set_requested_theme,
@@ -66,6 +68,21 @@ impl Component for Shell {
             },
             core.borrow().state().clone(),
         );
+        // The watcher lives for the Shell's life; process exit ends its worker.
+        let (latest, set_latest) = cx.use_async_state::<Option<PlaybackEvent>>(None);
+        let watcher: Rc<Result<Watcher, WatchError>> = cx.use_memo((), move || {
+            Rc::new(ryuuji_detect::watch(move |event| {
+                set_latest.call(Some(event));
+            }))
+        });
+        cx.use_effect(latest.clone(), {
+            let dispatch = dispatch.clone();
+            move || {
+                if let Some(event) = latest {
+                    dispatch.call(Command::Playback(event));
+                }
+            }
+        });
         // The tick has no reader; each bump only forces a rerender so the
         // diagnostics page gathers fresh values.
         let (_tick, bump) = cx.use_reducer(0u32);
@@ -99,7 +116,10 @@ impl Component for Shell {
             let dispatch = dispatch.clone();
             move || {
                 let events = recent.snapshot();
-                let report = Report::new(core.borrow().diagnostics(), events);
+                let sessions = Result::as_ref(&watcher)
+                    .map(Watcher::sessions)
+                    .map_err(|err| error_chain(err));
+                let report = Report::new(core.borrow().diagnostics(), events, sessions);
                 debug::page(
                     &report,
                     filter,

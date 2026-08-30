@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 ryuuji-core.workspace = true
+ryuuji-detect.workspace = true
 windows-reactor.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
