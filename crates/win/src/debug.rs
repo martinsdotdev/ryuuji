@@ -10,6 +10,7 @@ use ryuuji_core::{
     Command, DataDirSource, Diagnostics, FileFacts, FileStat, PlaybackEvent, PlaybackSource,
     PlaybackStatus, ProbeFailed, SchemaVersion,
 };
+use ryuuji_detect::SessionFacts;
 use tracing::{Level, warn};
 use windows_reactor::*;
 
@@ -92,14 +93,21 @@ pub struct Report {
     pub app: AppInfo,
     pub core: Diagnostics,
     pub events: Vec<EventRecord>,
+    /// Every SMTC session at the last refresh, or why detection is off.
+    pub sessions: std::result::Result<Vec<SessionFacts>, String>,
 }
 
 impl Report {
-    pub fn new(core: Diagnostics, events: Vec<EventRecord>) -> Report {
+    pub fn new(
+        core: Diagnostics,
+        events: Vec<EventRecord>,
+        sessions: std::result::Result<Vec<SessionFacts>, String>,
+    ) -> Report {
         Report {
             app: AppInfo::current(),
             core,
             events,
+            sessions,
         }
     }
 
@@ -127,12 +135,38 @@ impl Report {
             .map_or_else(|| "none".to_owned(), |facts| file_line(facts, now));
         let _ = writeln!(out, "Current log: {current_log}");
         let _ = writeln!(out);
+        let _ = writeln!(out, "Media sessions:");
+        match &self.sessions {
+            Ok(sessions) if sessions.is_empty() => {
+                let _ = writeln!(out, "  none");
+            }
+            Ok(sessions) => {
+                for session in sessions {
+                    let _ = writeln!(out, "  {}", session_line(session));
+                }
+            }
+            Err(err) => {
+                let _ = writeln!(out, "  unavailable: {err}");
+            }
+        }
+        let _ = writeln!(out);
         let _ = writeln!(out, "Recent events ({}):", self.events.len());
         for event in &self.events {
             let _ = writeln!(out, "{}", event_line(event));
         }
         out
     }
+}
+
+/// `app_id | title | status | player`, the player as `-` when unmatched.
+fn session_line(session: &SessionFacts) -> String {
+    format!(
+        "{} | {} | {} | {}",
+        session.app_id,
+        session.title,
+        session.status,
+        session.player.as_deref().unwrap_or("-")
+    )
 }
 
 /// `HH:MM:SS.mmm LEVEL target message`, time of day in UTC.
@@ -333,6 +367,7 @@ pub fn page(
             vstack((section("Data directory"), directory_card)).spacing(8.0),
             vstack((section("Files"), files_card(core))).spacing(8.0),
             vstack((section("Playback"), playback_card)).spacing(8.0),
+            vstack((section("Media sessions"), sessions_card(&report.sessions))).spacing(8.0),
             vstack((events_header, events_card(report, filter))).spacing(8.0),
         ))
         .spacing(24.0)
@@ -439,6 +474,63 @@ fn files_card(core: &Diagnostics) -> Border {
             .row_spacing(6.0)
             .column_spacing(16.0),
     )
+}
+
+fn sessions_card(sessions: &std::result::Result<Vec<SessionFacts>, String>) -> Border {
+    let sessions = match sessions {
+        Ok(sessions) if sessions.is_empty() => {
+            return card_frame(caption("No media sessions."));
+        }
+        Ok(sessions) => sessions,
+        Err(err) => return card_frame(caption(format!("Detection unavailable: {err}"))),
+    };
+    let header = ["App id", "Title", "Status", "Player"]
+        .into_iter()
+        .enumerate()
+        .map(|(column, title)| caption(title).grid_row(0).grid_column(column as i32).into());
+    let cells: Vec<Element> = header
+        .chain(
+            sessions
+                .iter()
+                .enumerate()
+                .flat_map(|(index, session)| session_cells(session, index as i32 + 1)),
+        )
+        .collect();
+    card_frame(
+        grid(cells)
+            .rows(std::iter::repeat_n(GridLength::Auto, sessions.len() + 1))
+            .columns([
+                GridLength::Auto,
+                GridLength::STAR,
+                GridLength::Auto,
+                GridLength::Auto,
+            ])
+            .row_spacing(6.0)
+            .column_spacing(16.0),
+    )
+}
+
+fn session_cells(session: &SessionFacts, row: i32) -> [Element; 4] {
+    [
+        mono(session.app_id.clone())
+            .selectable()
+            .grid_row(row)
+            .grid_column(0)
+            .into(),
+        text_block(session.title.clone())
+            .wrap()
+            .grid_row(row)
+            .grid_column(1)
+            .into(),
+        text_block(session.status.clone())
+            .grid_row(row)
+            .grid_column(2)
+            .into(),
+        text_block(session.player.as_deref().unwrap_or(NOT_APPLICABLE))
+            .grid_row(row)
+            .grid_column(3)
+            .into(),
+    ]
 }
 
 /// `path` under `root`, or the whole path when it lives elsewhere.
@@ -586,7 +678,21 @@ mod tests {
             record(Level::INFO, 1_756_400_000, 0, "info event"),
             record(Level::ERROR, 1_756_400_001, 0, "error event"),
         ];
-        let report = Report::new(core.clone(), events);
+        let sessions = vec![
+            SessionFacts {
+                app_id: "mpv.exe".to_owned(),
+                title: "Sousou no Frieren - 01".to_owned(),
+                status: "Playing".to_owned(),
+                player: Some("mpv".to_owned()),
+            },
+            SessionFacts {
+                app_id: "Spotify.exe".to_owned(),
+                title: String::new(),
+                status: "Paused".to_owned(),
+                player: None,
+            },
+        ];
+        let report = Report::new(core.clone(), events, Ok(sessions));
 
         let text = report.to_text();
         assert!(text.starts_with(&format!("Ryuuji {} (", env!("CARGO_PKG_VERSION"))));
@@ -609,10 +715,28 @@ mod tests {
         )));
         assert!(text.contains(&format!("Logs: {}\n", dir.logs().display())));
         assert!(text.contains("Current log: none\n"));
+        assert!(text.contains(
+            "Media sessions:\n  mpv.exe | Sousou no Frieren - 01 | Playing | mpv\n  \
+             Spotify.exe |  | Paused | -\n"
+        ));
         assert!(text.contains("Recent events (2):\n"));
         assert!(text.contains(" INFO  ryuuji_core::store info event\n"));
         assert!(text.contains(" ERROR ryuuji_core::store error event\n"));
         assert!(text.contains(" ago)"));
+    }
+
+    #[test]
+    fn report_text_names_empty_and_unavailable_sessions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = DataDir::at(tmp.path()).unwrap();
+        let Opened { store, .. } = Store::open(&dir).unwrap();
+        let core = Diagnostics::gather(&dir, &store);
+
+        let text = Report::new(core.clone(), Vec::new(), Ok(Vec::new())).to_text();
+        assert!(text.contains("Media sessions:\n  none\n\nRecent events (0):\n"));
+
+        let text = Report::new(core, Vec::new(), Err("no manager".to_owned())).to_text();
+        assert!(text.contains("Media sessions:\n  unavailable: no manager\n"));
     }
 
     #[test]

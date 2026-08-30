@@ -459,6 +459,7 @@ version = "0.1.0"
 dependencies = [
  "clipboard-win",
  "ryuuji-core",
+ "ryuuji-detect",
  "tempfile",
  "tracing",
  "tracing-appender",
