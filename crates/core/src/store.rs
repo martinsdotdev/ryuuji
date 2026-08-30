@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
-use std::{fs, io};
+use std::{fmt, fs, io};
 
 use rusqlite::ErrorCode;
 use rusqlite::{Connection, OptionalExtension, Row, ToSql, params};
@@ -103,6 +103,16 @@ impl StoreError {
             | StoreError::NotFound { .. }
             | StoreError::InvalidRow { .. } => false,
         }
+    }
+}
+
+/// The library's schema version as SQLite stores it (`PRAGMA user_version`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SchemaVersion(pub(crate) i64);
+
+impl fmt::Display for SchemaVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
     }
 }
 
@@ -232,6 +242,14 @@ impl Store {
         let stored = fetch(&tx, id)?;
         tx.commit().map_err(query_failed)?;
         Ok(stored)
+    }
+
+    /// Reads `PRAGMA user_version`; touches nothing on disk.
+    pub fn schema_version(&self) -> Result<SchemaVersion, StoreError> {
+        self.conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .map(SchemaVersion)
+            .map_err(query_failed)
     }
 
     #[cfg(test)]
@@ -389,11 +407,8 @@ mod tests {
         }
     }
 
-    fn user_version(store: &Store) -> i64 {
-        store
-            .conn
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
-            .unwrap()
+    fn schema_version(store: &Store) -> SchemaVersion {
+        store.schema_version().unwrap()
     }
 
     #[test]
@@ -401,9 +416,23 @@ mod tests {
         let (_tmp, dir) = open_tmp();
         let store = open(&dir);
         assert!(dir.root().join("library.sqlite").is_file());
-        assert_eq!(user_version(&store), 1);
+        assert_eq!(schema_version(&store), SchemaVersion(1));
         drop(store);
-        assert_eq!(user_version(&open(&dir)), 1);
+        assert_eq!(schema_version(&open(&dir)), SchemaVersion(1));
+    }
+
+    #[test]
+    fn schema_version_reads_the_user_version_pragma() {
+        let (_tmp, dir) = open_tmp();
+        let store = open(&dir);
+        store.execute_raw("PRAGMA user_version = 42");
+        let pragma: i64 = store
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(pragma, 42);
+        assert_eq!(schema_version(&store), SchemaVersion(42));
+        assert_eq!(schema_version(&store).to_string(), "42");
     }
 
     #[test]
@@ -416,7 +445,7 @@ mod tests {
         let recovered = recovered.expect("recovery reported");
         assert_backup_name(&backup_name(&recovered));
         assert_eq!(fs::read(&recovered.backup).unwrap(), garbage);
-        assert_eq!(user_version(&store), 1);
+        assert_eq!(schema_version(&store), SchemaVersion(1));
         assert_eq!(store.entries().unwrap(), vec![]);
         drop(store);
 

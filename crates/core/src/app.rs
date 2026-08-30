@@ -1,7 +1,7 @@
 use crate::settings::{self, SettingsError};
 use crate::{
-    AppState, Command, DataDir, LibraryEntry, Notice, Opened, Settings, Store, StoreError,
-    ThemePreference, error_chain,
+    AppState, Command, DataDir, Diagnostics, LibraryEntry, Notice, Opened, Settings, Store,
+    StoreError, ThemePreference, error_chain,
 };
 
 /// The running application: the store plus the state derived from it.
@@ -45,6 +45,11 @@ impl Ryuuji {
 
     pub fn state(&self) -> &AppState {
         &self.state
+    }
+
+    /// A fresh look at the files and schema, taken now.
+    pub fn diagnostics(&self) -> Diagnostics {
+        Diagnostics::gather(&self.dir, &self.store)
     }
 
     pub fn dispatch(&mut self, command: Command) {
