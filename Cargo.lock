@@ -442,6 +442,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryuuji-detect"
+version = "0.1.0"
+dependencies = [
+ "ryuuji-core",
+ "serde",
+ "thiserror",
+ "toml",
+ "tracing",
+ "windows",
+]
+
+[[package]]
 name = "ryuuji-win"
 version = "0.1.0"
 dependencies = [
@@ -807,6 +819,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7ef64dbcc55df09c7e5a46182d181c2cfa3e925f3da937ea764728b4bbb9dcbf"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "windows"
+version = "0.100.0"
+source = "git+https://github.com/microsoft/windows-rs?rev=acaaa37be53e68f8c1be575d24dcbebce1e92b1a#acaaa37be53e68f8c1be575d24dcbebce1e92b1a"
+dependencies = [
+ "windows-collections",
+ "windows-core",
+ "windows-future",
+ "windows-numerics",
+ "windows-reference",
+ "windows-time",
 ]
 
 [[package]]
