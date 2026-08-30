@@ -83,6 +83,11 @@ impl Fields {
     }
 
     fn record(&mut self, field: &Field, value: String) {
+        // `tracing-log` attaches the `log` record's origin as `log.*` fields;
+        // `target` already carries what the page needs.
+        if field.name().starts_with("log.") {
+            return;
+        }
         if field.name() == "message" {
             self.message = value;
         } else {
@@ -180,5 +185,24 @@ mod tests {
                 (Level::ERROR, "also shown".to_owned()),
             ]
         );
+    }
+
+    #[test]
+    fn log_bridge_fields_are_dropped() {
+        let recent = RecentEvents::default();
+        let subscriber = tracing_subscriber::registry().with(recent.clone());
+        let _default = subscriber.set_default();
+
+        tracing::event!(
+            target: "bridge",
+            Level::INFO,
+            { log.target = "x", log.line = 12u32, keep = "yes" },
+            "hello"
+        );
+
+        let events = recent.snapshot();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].target, "bridge");
+        assert_eq!(events[0].message, "hello keep=yes");
     }
 }
