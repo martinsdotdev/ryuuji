@@ -9,15 +9,18 @@
 mod app;
 mod data_dir;
 mod diagnostics;
+mod playback;
 mod settings;
 mod store;
 
 use std::fmt;
 use std::path::PathBuf;
+use std::time::Duration;
 
 pub use app::Ryuuji;
 pub use data_dir::{DataDir, DataDirError, DataDirSource};
 pub use diagnostics::{ByteSize, Diagnostics, FileFacts, FileStat, ProbeFailed};
+pub use playback::{PlaybackEvent, PlaybackSource, PlaybackStatus};
 pub use store::{DbError, Opened, Recovered, SchemaVersion, Store, StoreError};
 
 /// Every page the shell can show. The first three sit in the navigation
@@ -205,11 +208,14 @@ pub enum NowPlaying {
     Idle,
     /// A player is open but nothing has been identified yet.
     Detecting,
-    /// Something identifiable is playing.
+    /// A player reported something with a title.
     Playing {
         title: String,
-        episode: u32,
         player: String,
+        status: PlaybackStatus,
+        position: Duration,
+        /// [`Duration::ZERO`] means unknown.
+        duration: Duration,
     },
 }
 
@@ -229,6 +235,8 @@ pub enum Command {
     SetTheme(ThemePreference),
     /// Drops the oldest notice.
     DismissNotice,
+    /// A detection strategy or the inject control observed a player.
+    Playback(PlaybackEvent),
 }
 
 /// Something the shell should surface to the user until dismissed.
@@ -311,6 +319,13 @@ mod tests {
             assert_eq!(ThemePreference::from_tag(theme.tag()), Some(theme));
         }
         assert_eq!(ThemePreference::from_tag("blue"), None);
+    }
+
+    #[test]
+    fn playback_status_labels() {
+        assert_eq!(PlaybackStatus::Playing.label(), "Playing");
+        assert_eq!(PlaybackStatus::Paused.label(), "Paused");
+        assert_eq!(PlaybackStatus::Stopped.label(), "Stopped");
     }
 
     #[test]
