@@ -6,26 +6,37 @@
 //! neutral tone). The Diagnostics body itself is built by the caller, so this
 //! module never sees the core handle or the log buffer.
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use ryuuji_core::{
-    AppState, Command, DataDir, LibraryEntry, Notice, NowPlaying, Page, ProposedMatch, Settings,
-    StoreError, ThemePreference, error_chain,
+    AppState, Command, Confidence, DataDir, LibraryEntry, Notice, NowPlaying, Page, ProposedMatch,
+    Settings, StoreError, ThemePreference, error_chain,
 };
 use windows_reactor::*;
 
 use crate::debug;
 use crate::ui::{
-    CONTENT_MAX_WIDTH, FOLDER_GLYPH, REPAIR_GLYPH, caption, card, card_frame, section,
+    CONTENT_MAX_WIDTH, FOLDER_GLYPH, REPAIR_GLYPH, age_of, caption, card, card_frame, section,
 };
 
 const PAGE_PADDING: f64 = 24.0;
+
+/// What the shell threads into the pages beyond the core state: whether the
+/// watcher came up, the render instant for relative ages, and the Settings
+/// folder-action outcome and its setter.
+pub struct Env {
+    pub detection_down: bool,
+    pub now: SystemTime,
+    pub folder_action: Option<String>,
+    pub set_folder_action: SetState<Option<String>>,
+}
 
 /// Renders the notice bar and the body for the currently selected page.
 pub fn render(
     state: &AppState,
     dispatch: Dispatch<Command>,
     dir: &DataDir,
+    env: Env,
     debug: impl FnOnce() -> Element,
 ) -> Element {
     let page: Element = match state.page {
@@ -34,8 +45,17 @@ pub fn render(
             &state.now_playing,
             state.last_match.as_ref(),
             &state.library,
+            env.detection_down,
+            env.now,
+            dispatch.clone(),
         ),
-        Page::Settings => settings(&state.settings, dir, dispatch.clone()),
+        Page::Settings => settings(
+            &state.settings,
+            dir,
+            dispatch.clone(),
+            env.folder_action,
+            env.set_folder_action,
+        ),
         Page::Debug => debug(),
     };
 
@@ -97,7 +117,10 @@ fn notice(notices: &[Notice], dispatch: Dispatch<Command>) -> InfoBar {
 
 fn library(entries: &[LibraryEntry]) -> Element {
     if entries.is_empty() {
-        return placeholder("Your library is empty", "Shows you track will appear here.");
+        return placeholder(
+            "Your library is empty",
+            "Shows you track will appear here. Add one from Now playing when an episode is detected.",
+        );
     }
     list_view(entries.to_vec(), |entry, _| {
         vstack((
@@ -121,12 +144,15 @@ fn now_playing(
     now_playing: &NowPlaying,
     last_match: Option<&ProposedMatch>,
     library: &[LibraryEntry],
+    detection_down: bool,
+    now: SystemTime,
+    dispatch: Dispatch<Command>,
 ) -> Element {
     let top: Element = match now_playing {
-        NowPlaying::Idle => placeholder(
-            "Nothing playing",
-            "Open an episode in your player and it will show up here.",
-        ),
+        NowPlaying::Idle => {
+            let (heading, body) = idle_placeholder_copy(detection_down);
+            placeholder(heading, body)
+        }
         NowPlaying::Detecting => placeholder(
             "Detecting…",
             "A player is open; waiting for something recognisable.",
@@ -154,7 +180,13 @@ fn now_playing(
     match last_match {
         Some(m) => vstack((
             top,
-            proposal_card(m, library, matches!(now_playing, NowPlaying::Idle)),
+            proposal_card(
+                m,
+                library,
+                matches!(now_playing, NowPlaying::Idle),
+                now,
+                dispatch,
+            ),
         ))
         .spacing(8.0)
         .into(),
@@ -162,19 +194,48 @@ fn now_playing(
     }
 }
 
-fn proposal_card(m: &ProposedMatch, library: &[LibraryEntry], idle: bool) -> Element {
+/// The Now playing placeholder copy: the plain idle pair, or the
+/// detection-down pair when the watcher never started.
+pub(crate) fn idle_placeholder_copy(detection_down: bool) -> (&'static str, &'static str) {
+    if detection_down {
+        (
+            "Detection isn't running",
+            "Ryuuji can't watch your players right now. See Diagnostics in Settings for what went wrong.",
+        )
+    } else {
+        (
+            "Nothing playing",
+            "Open an episode in your player and it will show up here.",
+        )
+    }
+}
+
+fn proposal_card(
+    m: &ProposedMatch,
+    library: &[LibraryEntry],
+    idle: bool,
+    now: SystemTime,
+    dispatch: Dispatch<Command>,
+) -> Element {
     let title = text_block(match_title(m, library))
         .font_size(20.0)
         .semibold()
         .wrap();
-    let summary = caption(match_caption(m, idle));
+    let mut children: Vec<Element> =
+        vec![title.into(), caption(match_caption(m, idle, now)).into()];
     let rows = fact_rows(m);
-    let body = if rows.is_empty() {
-        vstack((title, summary)).spacing(4.0)
-    } else {
-        vstack((title, summary, facts_grid(&rows))).spacing(4.0)
-    };
-    card_frame(body).into()
+    if !rows.is_empty() {
+        children.push(facts_grid(&rows));
+    }
+    if m.confidence == Confidence::Unmatched {
+        children.push(
+            button("Add to library")
+                .on_click(move || dispatch.call(Command::AddProposedToLibrary))
+                .horizontal_alignment(HorizontalAlignment::Left)
+                .into(),
+        );
+    }
+    card_frame(vstack(children).spacing(4.0)).into()
 }
 
 /// The library entry's title when the proposal resolves to one, else the
@@ -192,7 +253,7 @@ pub(crate) fn match_title(m: &ProposedMatch, library: &[LibraryEntry]) -> String
     }
 }
 
-pub(crate) fn match_caption(m: &ProposedMatch, idle: bool) -> String {
+pub(crate) fn match_caption(m: &ProposedMatch, idle: bool, now: SystemTime) -> String {
     let mut parts = Vec::new();
     if let Some(episode) = m.episode {
         parts.push(format!("Episode {episode}"));
@@ -200,6 +261,7 @@ pub(crate) fn match_caption(m: &ProposedMatch, idle: bool) -> String {
     parts.push(m.confidence.label().to_owned());
     if idle {
         parts.push(format!("Last seen in {}", m.player));
+        parts.push(age_of(m.at, now));
     }
     parts.join(" \u{b7} ")
 }
@@ -282,11 +344,15 @@ fn duration_text(value: Duration) -> String {
     }
 }
 
-fn settings(settings: &Settings, dir: &DataDir, dispatch: Dispatch<Command>) -> Element {
+fn settings(
+    settings: &Settings,
+    dir: &DataDir,
+    dispatch: Dispatch<Command>,
+    folder_action: Option<String>,
+    set_folder_action: SetState<Option<String>>,
+) -> Element {
     let root = dir.root().to_path_buf();
-    let open_folder = move || {
-        debug::open_folder(&root);
-    };
+    let open_folder = move || set_folder_action.call(Some(debug::open_folder(&root)));
     let open_diagnostics = {
         let dispatch = dispatch.clone();
         move || dispatch.call(Command::SelectPage(Page::Debug))
@@ -301,7 +367,13 @@ fn settings(settings: &Settings, dir: &DataDir, dispatch: Dispatch<Command>) -> 
                     Some(FOLDER_GLYPH),
                     "Data folder",
                     dir.root().display().to_string(),
-                    button("Open folder").on_click(open_folder).into(),
+                    hstack((
+                        button("Open folder").on_click(open_folder),
+                        caption(folder_action.unwrap_or_default())
+                            .vertical_alignment(VerticalAlignment::Center),
+                    ))
+                    .spacing(12.0)
+                    .into(),
                 ),
                 card(
                     Some(REPAIR_GLYPH),
@@ -410,10 +482,41 @@ mod tests {
             ..proposal()
         };
         assert_eq!(
-            match_caption(&m, true),
-            "Episode 1 \u{b7} Exact match \u{b7} Last seen in mpv"
+            match_caption(&m, true, SystemTime::UNIX_EPOCH),
+            "Episode 1 \u{b7} Exact match \u{b7} Last seen in mpv \u{b7} 0 s ago"
         );
-        assert_eq!(match_caption(&proposal(), false), "Exact match");
+        assert_eq!(
+            match_caption(&proposal(), false, SystemTime::UNIX_EPOCH),
+            "Exact match"
+        );
+    }
+
+    #[test]
+    fn match_caption_appends_last_seen_and_age_when_idle() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(2 * 3600);
+        assert_eq!(
+            match_caption(&proposal(), true, now),
+            "Exact match \u{b7} Last seen in mpv \u{b7} 2 h ago"
+        );
+        assert_eq!(match_caption(&proposal(), false, now), "Exact match");
+    }
+
+    #[test]
+    fn idle_placeholder_copy_branches_on_detection_down() {
+        assert_eq!(
+            idle_placeholder_copy(false),
+            (
+                "Nothing playing",
+                "Open an episode in your player and it will show up here."
+            )
+        );
+        assert_eq!(
+            idle_placeholder_copy(true),
+            (
+                "Detection isn't running",
+                "Ryuuji can't watch your players right now. See Diagnostics in Settings for what went wrong."
+            )
+        );
     }
 
     #[test]

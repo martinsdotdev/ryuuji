@@ -15,7 +15,7 @@ use tracing::{Level, warn};
 use windows_reactor::*;
 
 use crate::logging::EventRecord;
-use crate::ui::{CONTENT_MAX_WIDTH, FOLDER_GLYPH, caption, card, card_frame, section};
+use crate::ui::{CONTENT_MAX_WIDTH, FOLDER_GLYPH, age_of, caption, card, card_frame, section};
 
 const MONO_FONT: &str = "Cascadia Mono";
 const NOT_APPLICABLE: &str = "—";
@@ -301,22 +301,6 @@ fn modified_text(modified: Option<SystemTime>, now: SystemTime) -> String {
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs());
     format!("{unix} ({})", age_of(modified, now))
-}
-
-fn age_of(modified: SystemTime, now: SystemTime) -> String {
-    now.duration_since(modified)
-        .map_or_else(|_| "in the future".to_owned(), age_text)
-}
-
-fn age_text(age: Duration) -> String {
-    let secs = age.as_secs();
-    let amount = match secs {
-        0..60 => format!("{secs} s"),
-        60..3_600 => format!("{} min", secs / 60),
-        3_600..86_400 => format!("{} h", secs / 3_600),
-        _ => format!("{} d", secs / 86_400),
-    };
-    format!("{amount} ago")
 }
 
 /// Writes `text` to the clipboard and describes the outcome for the page.
@@ -805,14 +789,6 @@ mod tests {
 
         let text = Report::new(core, None, Vec::new(), Err("no manager".to_owned())).to_text();
         assert!(text.contains("Media sessions:\n  unavailable: no manager\n"));
-    }
-
-    #[test]
-    fn ages_round_to_the_largest_whole_unit() {
-        assert_eq!(age_text(Duration::from_secs(12)), "12 s ago");
-        assert_eq!(age_text(Duration::from_secs(150)), "2 min ago");
-        assert_eq!(age_text(Duration::from_secs(7_200)), "2 h ago");
-        assert_eq!(age_text(Duration::from_secs(200_000)), "2 d ago");
     }
 
     #[test]
