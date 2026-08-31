@@ -3,11 +3,11 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use ryuuji_core::{
-    AppState, Command, DataDir, Page, PlaybackEvent, Ryuuji, StoreError, ThemePreference,
-    error_chain,
+    AppState, Command, DataDir, NowPlaying, Page, PlaybackEvent, Ryuuji, StoreError,
+    ThemePreference, error_chain,
 };
 use ryuuji_detect::{WatchError, Watcher};
 use windows_reactor::{
@@ -84,13 +84,19 @@ impl Component for Shell {
             }
         });
         // The tick has no reader; each bump only forces a rerender so the
-        // diagnostics page gathers fresh values.
+        // diagnostics page gathers fresh values and the idle proposal's age
+        // stays current.
         let (_tick, bump) = cx.use_reducer(0u32);
         let (filter, set_filter) = cx.use_state(EventLevelFilter::All);
         let (last_action, set_last_action) = cx.use_state(None::<String>);
+        let (folder_action, set_folder_action) = cx.use_state(None::<String>);
         let on_debug = state.page == Page::Debug;
-        cx.use_effect_with_cleanup(on_debug, move || {
-            if !on_debug {
+        let wants_timer = on_debug
+            || (state.page == Page::NowPlaying
+                && matches!(state.now_playing, NowPlaying::Idle)
+                && state.last_match.is_some());
+        cx.use_effect_with_cleanup(wants_timer, move || {
+            if !wants_timer {
                 return None;
             }
             match DispatcherTimer::new(DIAGNOSTICS_REFRESH, move || {
@@ -110,31 +116,43 @@ impl Component for Shell {
                 .icon(icon_for(page))
         });
 
-        let body = pages::render(&state, dispatch.clone(), &self.dir, {
-            let core = core.clone();
-            let recent = self.recent.clone();
-            let dispatch = dispatch.clone();
-            move || {
-                let events = recent.snapshot();
-                let sessions = Result::as_ref(&watcher)
-                    .map(Watcher::sessions)
-                    .map_err(|err| error_chain(err));
-                let report = Report::new(
-                    core.borrow().diagnostics(),
-                    core.borrow().state().last_match.clone(),
-                    events,
-                    sessions,
-                );
-                debug::page(
-                    &report,
-                    filter,
-                    set_filter,
-                    last_action,
-                    set_last_action,
-                    dispatch.clone(),
-                )
-            }
-        });
+        let detection_down = watcher.is_err();
+        let body = pages::render(
+            &state,
+            dispatch.clone(),
+            &self.dir,
+            pages::Env {
+                detection_down,
+                now: SystemTime::now(),
+                folder_action,
+                set_folder_action,
+            },
+            {
+                let core = core.clone();
+                let recent = self.recent.clone();
+                let dispatch = dispatch.clone();
+                move || {
+                    let events = recent.snapshot();
+                    let sessions = Result::as_ref(&watcher)
+                        .map(Watcher::sessions)
+                        .map_err(|err| error_chain(err));
+                    let report = Report::new(
+                        core.borrow().diagnostics(),
+                        core.borrow().state().last_match.clone(),
+                        events,
+                        sessions,
+                    );
+                    debug::page(
+                        &report,
+                        filter,
+                        set_filter,
+                        last_action,
+                        set_last_action,
+                        dispatch.clone(),
+                    )
+                }
+            },
+        );
 
         let highlighted = if on_debug { Page::Settings } else { state.page };
         let back = {

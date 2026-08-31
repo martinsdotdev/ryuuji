@@ -1,5 +1,8 @@
 //! The Fluent building blocks the Settings and Diagnostics pages share:
-//! section headers, cards and captions in the Windows Settings idiom.
+//! section headers, cards and captions in the Windows Settings idiom, and
+//! the relative-age text both pages print.
+
+use std::time::{Duration, SystemTime};
 
 use windows_reactor::*;
 
@@ -67,4 +70,34 @@ pub(crate) fn card_frame(child: impl Into<Element>) -> Border {
         .border_thickness(Thickness::uniform(1.0))
         .corner_radius(4.0)
         .padding(Thickness::uniform(16.0))
+}
+
+/// "2 h ago"-style age of `modified` at `now`.
+pub(crate) fn age_of(modified: SystemTime, now: SystemTime) -> String {
+    now.duration_since(modified)
+        .map_or_else(|_| "in the future".to_owned(), age_text)
+}
+
+pub(crate) fn age_text(age: Duration) -> String {
+    let secs = age.as_secs();
+    let amount = match secs {
+        0..60 => format!("{secs} s"),
+        60..3_600 => format!("{} min", secs / 60),
+        3_600..86_400 => format!("{} h", secs / 3_600),
+        _ => format!("{} d", secs / 86_400),
+    };
+    format!("{amount} ago")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ages_round_to_the_largest_whole_unit() {
+        assert_eq!(age_text(Duration::from_secs(12)), "12 s ago");
+        assert_eq!(age_text(Duration::from_secs(150)), "2 min ago");
+        assert_eq!(age_text(Duration::from_secs(7_200)), "2 h ago");
+        assert_eq!(age_text(Duration::from_secs(200_000)), "2 d ago");
+    }
 }
