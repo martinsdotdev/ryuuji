@@ -1,8 +1,8 @@
 use crate::settings::{self, SettingsError};
 use crate::{
-    AppState, Command, DataDir, Diagnostics, LibraryEntry, Notice, NowPlaying, Opened,
-    PlaybackEvent, PlaybackStatus, Settings, Store, StoreError, ThemePreference, error_chain,
-    matching,
+    AppState, Command, Confidence, DataDir, Diagnostics, LibraryEntry, NewEntry, Notice,
+    NowPlaying, Opened, PlaybackEvent, PlaybackStatus, ProposedMatch, Settings, Store, StoreError,
+    ThemePreference, WatchStatus, error_chain, matching,
 };
 
 /// The running application: the store plus the state derived from it.
@@ -18,6 +18,9 @@ pub struct Ryuuji {
     dir: DataDir,
     store: Store,
     state: AppState,
+    /// The library changed since the last proposal, so the next playback
+    /// event re-matches even for an unchanged title.
+    match_stale: bool,
 }
 
 impl Ryuuji {
@@ -39,6 +42,7 @@ impl Ryuuji {
         Ok(Ryuuji {
             dir: dir.clone(),
             store,
+            match_stale: false,
             state: AppState {
                 library,
                 last_match,
@@ -69,17 +73,24 @@ impl Ryuuji {
             }
             Command::AddEntry(entry) => {
                 let outcome = self.store.add(entry);
-                self.absorb(outcome);
+                if self.absorb(outcome) {
+                    self.match_stale = true;
+                }
             }
             Command::SetProgress { id, progress } => {
                 let outcome = self.store.set_progress(id, progress);
-                self.absorb(outcome);
+                if self.absorb(outcome) {
+                    self.match_stale = true;
+                }
             }
             Command::SetStatus { id, status } => {
                 let outcome = self.store.set_status(id, status);
-                self.absorb(outcome);
+                if self.absorb(outcome) {
+                    self.match_stale = true;
+                }
             }
             Command::Playback(event) => self.observe_playback(event),
+            Command::AddProposedToLibrary => self.add_proposed(),
         }
     }
 
@@ -97,11 +108,12 @@ impl Ryuuji {
             event.status,
             PlaybackStatus::Playing | PlaybackStatus::Paused
         ) && !event.title.trim().is_empty()
-            && self
-                .state
-                .last_match
-                .as_ref()
-                .is_none_or(|m| m.raw_title != event.title);
+            && (self.match_stale
+                || self
+                    .state
+                    .last_match
+                    .as_ref()
+                    .is_none_or(|m| m.raw_title != event.title));
         if proposes {
             let proposal = matching::propose(&event, &self.state.library);
             if let Err(err) = self.store.save_last_match(&proposal) {
@@ -110,6 +122,7 @@ impl Ryuuji {
                 self.state.notices.push(Notice::SaveFailed { detail });
             }
             self.state.last_match = Some(proposal);
+            self.match_stale = false;
         }
         self.state.now_playing = now_playing_for(event);
     }
@@ -126,15 +139,63 @@ impl Ryuuji {
         self.state.settings = next;
     }
 
-    fn absorb(&mut self, outcome: Result<LibraryEntry, StoreError>) {
+    fn absorb(&mut self, outcome: Result<LibraryEntry, StoreError>) -> bool {
         match outcome {
-            Ok(entry) => upsert(&mut self.state.library, entry),
+            Ok(entry) => {
+                upsert(&mut self.state.library, entry);
+                true
+            }
             Err(err) => {
                 let detail = error_chain(&err);
                 tracing::error!(error = %detail, "save failed");
                 self.state.notices.push(Notice::SaveFailed { detail });
+                false
             }
         }
+    }
+
+    fn add_proposed(&mut self) {
+        let Some(last) = self
+            .state
+            .last_match
+            .clone()
+            .filter(|m| m.confidence == Confidence::Unmatched)
+        else {
+            return;
+        };
+        let title = if last.parsed_title.is_empty() {
+            last.raw_title.clone()
+        } else {
+            last.parsed_title.clone()
+        };
+        let entry = match self.store.add(NewEntry {
+            title,
+            status: WatchStatus::Watching,
+            progress: 0,
+            total: None,
+        }) {
+            Ok(entry) => entry,
+            Err(err) => {
+                let detail = error_chain(&err);
+                tracing::error!(error = %detail, "save failed");
+                self.state.notices.push(Notice::SaveFailed { detail });
+                return;
+            }
+        };
+        upsert(&mut self.state.library, entry.clone());
+        let relinked = ProposedMatch {
+            entry: Some(entry.id),
+            confidence: Confidence::Exact,
+            ..last
+        };
+        if let Err(err) = self.store.save_last_match(&relinked) {
+            let detail = error_chain(&err);
+            tracing::error!(error = %detail, "last match save failed");
+            self.state.notices.push(Notice::SaveFailed { detail });
+        }
+        self.state.last_match = Some(relinked);
+        self.match_stale = false;
+        tracing::info!(entry = entry.id.as_i64(), "proposal added to library");
     }
 
     #[cfg(test)]
@@ -172,9 +233,7 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     use super::*;
-    use crate::{
-        EntryId, MatchOutcome, NewEntry, Page, PlaybackSource, ProposedMatch, WatchStatus,
-    };
+    use crate::{EntryId, MatchOutcome, Page, PlaybackSource};
 
     fn open_tmp() -> (tempfile::TempDir, DataDir) {
         let tmp = tempfile::tempdir().unwrap();
@@ -526,5 +585,175 @@ mod tests {
             app.state().notices.as_slice(),
             [Notice::SaveFailed { .. }]
         ));
+    }
+
+    #[test]
+    fn add_proposed_from_unmatched_creates_watching_entry_and_relinks() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::Playback(playing(
+            "[SubsPlease] Frieren - Beyond Journey's End - 01 (1080p) [ABCD1234].mkv",
+        )));
+        assert_eq!(
+            app.state().last_match.as_ref().unwrap().confidence,
+            Confidence::Unmatched
+        );
+
+        app.dispatch(Command::AddProposedToLibrary);
+        let added = app.state().library.clone();
+        assert_eq!(added.len(), 1);
+        assert_eq!(added[0].title, "Frieren - Beyond Journey's End");
+        assert_eq!(added[0].status, WatchStatus::Watching);
+        assert_eq!(added[0].progress, 0);
+        assert_eq!(added[0].total, None);
+        let relinked = app.state().last_match.clone().unwrap();
+        assert_eq!(relinked.entry, Some(added[0].id));
+        assert_eq!(relinked.confidence, Confidence::Exact);
+        drop(app);
+
+        let reopened = Ryuuji::open(&dir).unwrap();
+        assert_eq!(reopened.state().library, added);
+        assert_eq!(
+            reopened.state().last_match,
+            Some(ProposedMatch {
+                elements: Vec::new(),
+                ..relinked
+            })
+        );
+    }
+
+    #[test]
+    fn add_proposed_falls_back_to_raw_title() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::Playback(playing("[EnigmaBD 1080p].mkv")));
+        let proposal = app.state().last_match.clone().unwrap();
+        assert!(proposal.parsed_title.is_empty());
+        assert_eq!(proposal.confidence, Confidence::Unmatched);
+
+        app.dispatch(Command::AddProposedToLibrary);
+        assert_eq!(app.state().library.len(), 1);
+        assert_eq!(app.state().library[0].title, "[EnigmaBD 1080p].mkv");
+    }
+
+    #[test]
+    fn add_proposed_is_a_no_op_without_last_match() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        let before = app.state().clone();
+        app.dispatch(Command::AddProposedToLibrary);
+        assert_eq!(app.state(), &before);
+    }
+
+    #[test]
+    fn add_proposed_is_a_no_op_when_confidence_is_not_unmatched() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::AddEntry(entry("Show")));
+        app.dispatch(Command::Playback(playing("Show - 03.mkv")));
+        assert_eq!(
+            app.state().last_match.as_ref().unwrap().confidence,
+            Confidence::Exact
+        );
+        let before = app.state().clone();
+
+        app.dispatch(Command::AddProposedToLibrary);
+        assert_eq!(app.state(), &before);
+    }
+
+    #[test]
+    fn add_proposed_add_failure_notices_and_changes_nothing() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::Playback(playing("Show - 03.mkv")));
+        app.store_mut().execute_raw("DROP TABLE entries");
+
+        app.dispatch(Command::AddProposedToLibrary);
+        assert!(matches!(
+            app.state().notices.as_slice(),
+            [Notice::SaveFailed { .. }]
+        ));
+        assert!(app.state().library.is_empty());
+        assert_eq!(
+            app.state().last_match.as_ref().unwrap().confidence,
+            Confidence::Unmatched
+        );
+    }
+
+    #[test]
+    fn add_proposed_relink_save_failure_keeps_memory_and_notices() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::Playback(playing("Show - 03.mkv")));
+        app.store_mut().execute_raw("DROP TABLE last_match");
+
+        app.dispatch(Command::AddProposedToLibrary);
+        assert_eq!(app.state().library.len(), 1);
+        let relinked = app.state().last_match.clone().unwrap();
+        assert_eq!(relinked.entry, Some(app.state().library[0].id));
+        assert_eq!(relinked.confidence, Confidence::Exact);
+        assert!(matches!(
+            app.state().notices.as_slice(),
+            [Notice::SaveFailed { .. }]
+        ));
+    }
+
+    #[test]
+    fn library_change_re_proposes_the_same_title() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::Playback(playing("X - 03.mkv")));
+        assert_eq!(
+            app.state().last_match.as_ref().unwrap().confidence,
+            Confidence::Unmatched
+        );
+
+        app.dispatch(Command::AddEntry(entry("X")));
+        app.dispatch(Command::Playback(PlaybackEvent {
+            observed_at: SystemTime::UNIX_EPOCH + Duration::from_secs(60),
+            ..playing("X - 03.mkv")
+        }));
+        assert_eq!(
+            app.state().last_match.as_ref().unwrap().confidence,
+            Confidence::Exact
+        );
+
+        let id = app.state().library[0].id;
+        app.dispatch(Command::Playback(playing("Other - 01.mkv")));
+        let before = app.state().last_match.clone().unwrap();
+        app.dispatch(Command::SetStatus {
+            id,
+            status: WatchStatus::Watching,
+        });
+        app.dispatch(Command::Playback(PlaybackEvent {
+            observed_at: SystemTime::UNIX_EPOCH + Duration::from_secs(120),
+            ..playing("Other - 01.mkv")
+        }));
+        let after = app.state().last_match.clone().unwrap();
+        assert_ne!(after.at, before.at);
+
+        let before = after;
+        app.dispatch(Command::SetProgress { id, progress: 5 });
+        app.dispatch(Command::Playback(PlaybackEvent {
+            observed_at: SystemTime::UNIX_EPOCH + Duration::from_secs(180),
+            ..playing("Other - 01.mkv")
+        }));
+        assert_ne!(app.state().last_match.as_ref().unwrap().at, before.at);
+    }
+
+    #[test]
+    fn add_proposed_clears_the_stale_flag() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::Playback(playing("Show - 03.mkv")));
+        app.dispatch(Command::AddProposedToLibrary);
+        let relinked = app.state().last_match.clone();
+        assert!(relinked.is_some());
+
+        app.dispatch(Command::Playback(PlaybackEvent {
+            observed_at: SystemTime::UNIX_EPOCH + Duration::from_secs(60),
+            ..playing("Show - 03.mkv")
+        }));
+        assert_eq!(app.state().last_match, relinked);
     }
 }

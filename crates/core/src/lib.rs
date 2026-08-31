@@ -239,6 +239,8 @@ pub enum Command {
     DismissNotice,
     /// A detection strategy or the inject control observed a player.
     Playback(PlaybackEvent),
+    /// Creates a Watching entry from the unmatched last proposal and relinks it.
+    AddProposedToLibrary,
 }
 
 /// Something the shell should surface to the user until dismissed.
