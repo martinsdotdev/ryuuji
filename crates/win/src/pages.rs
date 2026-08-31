@@ -9,8 +9,8 @@
 use std::time::Duration;
 
 use ryuuji_core::{
-    AppState, Command, DataDir, LibraryEntry, Notice, NowPlaying, Page, Settings, StoreError,
-    ThemePreference, error_chain,
+    AppState, Command, DataDir, LibraryEntry, Notice, NowPlaying, Page, ProposedMatch, Settings,
+    StoreError, ThemePreference, error_chain,
 };
 use windows_reactor::*;
 
@@ -30,7 +30,11 @@ pub fn render(
 ) -> Element {
     let page: Element = match state.page {
         Page::Library => library(&state.library),
-        Page::NowPlaying => now_playing(&state.now_playing),
+        Page::NowPlaying => now_playing(
+            &state.now_playing,
+            state.last_match.as_ref(),
+            &state.library,
+        ),
         Page::Settings => settings(&state.settings, dir, dispatch.clone()),
         Page::Debug => debug(),
     };
@@ -113,8 +117,12 @@ fn status_line(entry: &LibraryEntry) -> String {
     }
 }
 
-fn now_playing(now_playing: &NowPlaying) -> Element {
-    match now_playing {
+fn now_playing(
+    now_playing: &NowPlaying,
+    last_match: Option<&ProposedMatch>,
+    library: &[LibraryEntry],
+) -> Element {
+    let top: Element = match now_playing {
         NowPlaying::Idle => placeholder(
             "Nothing playing",
             "Open an episode in your player and it will show up here.",
@@ -142,7 +150,116 @@ fn now_playing(now_playing: &NowPlaying) -> Element {
             .spacing(4.0),
         )
         .into(),
+    };
+    match last_match {
+        Some(m) => vstack((
+            top,
+            proposal_card(m, library, matches!(now_playing, NowPlaying::Idle)),
+        ))
+        .spacing(8.0)
+        .into(),
+        None => top,
     }
+}
+
+fn proposal_card(m: &ProposedMatch, library: &[LibraryEntry], idle: bool) -> Element {
+    let title = text_block(match_title(m, library))
+        .font_size(20.0)
+        .semibold()
+        .wrap();
+    let summary = caption(match_caption(m, idle));
+    let rows = fact_rows(m);
+    let body = if rows.is_empty() {
+        vstack((title, summary)).spacing(4.0)
+    } else {
+        vstack((title, summary, facts_grid(&rows))).spacing(4.0)
+    };
+    card_frame(body).into()
+}
+
+/// The library entry's title when the proposal resolves to one, else the
+/// parsed title, else the raw player title.
+pub(crate) fn match_title(m: &ProposedMatch, library: &[LibraryEntry]) -> String {
+    let entry = m
+        .entry
+        .and_then(|id| library.iter().find(|entry| entry.id == id));
+    if let Some(entry) = entry {
+        entry.title.clone()
+    } else if !m.parsed_title.is_empty() {
+        m.parsed_title.clone()
+    } else {
+        m.raw_title.clone()
+    }
+}
+
+pub(crate) fn match_caption(m: &ProposedMatch, idle: bool) -> String {
+    let mut parts = Vec::new();
+    if let Some(episode) = m.episode {
+        parts.push(format!("Episode {episode}"));
+    }
+    parts.push(m.confidence.label().to_owned());
+    if idle {
+        parts.push(format!("Last seen in {}", m.player));
+    }
+    parts.join(" \u{b7} ")
+}
+
+/// Every parsed element, or the persisted scalars after a reload has
+/// emptied `elements`.
+pub(crate) fn fact_rows(m: &ProposedMatch) -> Vec<(String, String)> {
+    if !m.elements.is_empty() {
+        return m
+            .elements
+            .iter()
+            .map(|(label, value)| (fact_label(label), value.clone()))
+            .collect();
+    }
+    let mut rows = Vec::new();
+    if !m.parsed_title.is_empty() {
+        rows.push(("Title".to_owned(), m.parsed_title.clone()));
+    }
+    if let Some(episode) = m.episode {
+        rows.push(("Episode".to_owned(), episode.to_string()));
+    }
+    if let Some(season) = m.season {
+        rows.push(("Season".to_owned(), season.to_string()));
+    }
+    if let Some(group) = &m.release_group {
+        rows.push(("Group".to_owned(), group.clone()));
+    }
+    rows
+}
+
+fn fact_label(label: &str) -> String {
+    let mut label = label.replace('_', " ");
+    if let Some(first) = label.get_mut(..1) {
+        first.make_ascii_uppercase();
+    }
+    label
+}
+
+fn facts_grid(rows: &[(String, String)]) -> Element {
+    let cells: Vec<Element> = rows
+        .iter()
+        .enumerate()
+        .flat_map(|(index, (label, value))| {
+            let row = index as i32;
+            [
+                caption(label.clone()).grid_row(row).grid_column(0).into(),
+                text_block(value.clone())
+                    .wrap()
+                    .grid_row(row)
+                    .grid_column(1)
+                    .into(),
+            ]
+        })
+        .collect();
+    grid(cells)
+        .rows(std::iter::repeat_n(GridLength::Auto, rows.len()))
+        .columns([GridLength::Auto, GridLength::STAR])
+        .row_spacing(6.0)
+        .column_spacing(16.0)
+        .into()
 }
 
 /// `m:ss`, or `h:mm:ss` from one hour.
@@ -245,6 +362,8 @@ fn placeholder(heading: impl Into<String>, body: impl Into<String>) -> Element {
 
 #[cfg(test)]
 mod tests {
+    use ryuuji_core::{Confidence, MatchOutcome, NewEntry, Ryuuji, WatchStatus};
+
     use super::*;
 
     #[test]
@@ -266,5 +385,96 @@ mod tests {
     fn duration_text_marks_zero_unknown() {
         assert_eq!(duration_text(Duration::ZERO), "--:--");
         assert_eq!(duration_text(Duration::from_secs(1420)), "23:40");
+    }
+
+    fn proposal() -> ProposedMatch {
+        ProposedMatch {
+            raw_title: "raw.mkv".to_owned(),
+            parsed_title: "Parsed".to_owned(),
+            episode: None,
+            season: None,
+            release_group: None,
+            entry: None,
+            confidence: Confidence::Exact,
+            outcome: MatchOutcome::Proposed,
+            player: "mpv".to_owned(),
+            at: std::time::SystemTime::UNIX_EPOCH,
+            elements: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn match_caption_joins_episode_confidence_and_idle_player() {
+        let m = ProposedMatch {
+            episode: Some(1),
+            ..proposal()
+        };
+        assert_eq!(
+            match_caption(&m, true),
+            "Episode 1 \u{b7} Exact match \u{b7} Last seen in mpv"
+        );
+        assert_eq!(match_caption(&proposal(), false), "Exact match");
+    }
+
+    #[test]
+    fn match_title_prefers_the_entry_then_parsed_then_raw() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = DataDir::at(tmp.path()).unwrap();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::AddEntry(NewEntry {
+            title: "Frieren: Beyond Journey's End".to_owned(),
+            status: WatchStatus::Watching,
+            progress: 0,
+            total: None,
+        }));
+        let library = app.state().library.clone();
+        let entry = ProposedMatch {
+            entry: Some(library[0].id),
+            ..proposal()
+        };
+        assert_eq!(
+            match_title(&entry, &library),
+            "Frieren: Beyond Journey's End"
+        );
+        assert_eq!(match_title(&proposal(), &library), "Parsed");
+        let raw = ProposedMatch {
+            parsed_title: String::new(),
+            ..proposal()
+        };
+        assert_eq!(match_title(&raw, &library), "raw.mkv");
+    }
+
+    #[test]
+    fn fact_rows_fall_back_to_scalars_when_elements_are_empty() {
+        let m = ProposedMatch {
+            episode: Some(3),
+            season: Some(2),
+            release_group: Some("Subs".to_owned()),
+            ..proposal()
+        };
+        assert_eq!(
+            fact_rows(&m),
+            vec![
+                ("Title".to_owned(), "Parsed".to_owned()),
+                ("Episode".to_owned(), "3".to_owned()),
+                ("Season".to_owned(), "2".to_owned()),
+                ("Group".to_owned(), "Subs".to_owned()),
+            ]
+        );
+        let m = ProposedMatch {
+            elements: vec![("anime_title".to_owned(), "Show".to_owned())],
+            ..m
+        };
+        assert_eq!(
+            fact_rows(&m),
+            vec![("Anime title".to_owned(), "Show".to_owned())]
+        );
+    }
+
+    #[test]
+    fn fact_label_humanises_snake_case() {
+        assert_eq!(fact_label("release_group"), "Release group");
+        assert_eq!(fact_label("anime_title"), "Anime title");
+        assert_eq!(fact_label("source"), "Source");
     }
 }

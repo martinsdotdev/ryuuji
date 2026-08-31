@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ryuuji_core::{
     Command, DataDirSource, Diagnostics, FileFacts, FileStat, PlaybackEvent, PlaybackSource,
-    PlaybackStatus, ProbeFailed, SchemaVersion,
+    PlaybackStatus, ProbeFailed, ProposedMatch, SchemaVersion,
 };
 use ryuuji_detect::SessionFacts;
 use tracing::{Level, warn};
@@ -20,7 +20,8 @@ use crate::ui::{CONTENT_MAX_WIDTH, FOLDER_GLYPH, caption, card, card_frame, sect
 const MONO_FONT: &str = "Cascadia Mono";
 const NOT_APPLICABLE: &str = "—";
 
-pub const INJECTED_TITLE: &str = "Sousou no Frieren - 01";
+pub const INJECTED_TITLE: &str =
+    "[SubsPlease] Frieren - Beyond Journey's End - 01 (1080p) [ABCD1234].mkv";
 pub const INJECTED_PLAYER: &str = "Injected";
 
 /// The canned event the Diagnostics page feeds through `Command::Playback`.
@@ -92,6 +93,8 @@ impl AppInfo {
 pub struct Report {
     pub app: AppInfo,
     pub core: Diagnostics,
+    /// The core's latest proposal, as shown on Now playing.
+    pub last_match: Option<ProposedMatch>,
     pub events: Vec<EventRecord>,
     /// Every SMTC session at the last refresh, or why detection is off.
     pub sessions: std::result::Result<Vec<SessionFacts>, String>,
@@ -100,12 +103,14 @@ pub struct Report {
 impl Report {
     pub fn new(
         core: Diagnostics,
+        last_match: Option<ProposedMatch>,
         events: Vec<EventRecord>,
         sessions: std::result::Result<Vec<SessionFacts>, String>,
     ) -> Report {
         Report {
             app: AppInfo::current(),
             core,
+            last_match,
             events,
             sessions,
         }
@@ -134,6 +139,44 @@ impl Report {
             .as_ref()
             .map_or_else(|| "none".to_owned(), |facts| file_line(facts, now));
         let _ = writeln!(out, "Current log: {current_log}");
+        match &self.last_match {
+            Some(last) => {
+                let _ = writeln!(out, "Last match:");
+                let _ = writeln!(out, "  raw: {}", last.raw_title);
+                let title = if last.parsed_title.is_empty() {
+                    NOT_APPLICABLE
+                } else {
+                    last.parsed_title.as_str()
+                };
+                let _ = writeln!(out, "  title: {title}");
+                let _ = writeln!(
+                    out,
+                    "  episode: {}  season: {}  group: {}",
+                    count_text(last.episode),
+                    count_text(last.season),
+                    last.release_group.as_deref().unwrap_or(NOT_APPLICABLE)
+                );
+                let _ = writeln!(
+                    out,
+                    "  entry: {}  confidence: {}  outcome: {}",
+                    last.entry
+                        .map_or_else(|| NOT_APPLICABLE.to_owned(), |id| id.to_string()),
+                    last.confidence.tag(),
+                    last.outcome.tag()
+                );
+                let _ = writeln!(
+                    out,
+                    "  player: {}  at: {}",
+                    last.player,
+                    last.at
+                        .duration_since(UNIX_EPOCH)
+                        .map_or(0, |elapsed| elapsed.as_secs())
+                );
+            }
+            None => {
+                let _ = writeln!(out, "Last match: none");
+            }
+        }
         let _ = writeln!(out);
         let _ = writeln!(out, "Media sessions:");
         match &self.sessions {
@@ -156,6 +199,11 @@ impl Report {
         }
         out
     }
+}
+
+/// A count, or the em dash when absent.
+fn count_text(value: Option<u32>) -> String {
+    value.map_or_else(|| NOT_APPLICABLE.to_owned(), |n| n.to_string())
 }
 
 /// `app_id | title | status | player`, the player as `-` when unmatched.
@@ -620,7 +668,7 @@ fn selected_index(filter: EventLevelFilter) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use ryuuji_core::{ByteSize, DataDir, Opened, Store};
+    use ryuuji_core::{ByteSize, Confidence, DataDir, MatchOutcome, Opened, ProposedMatch, Store};
 
     use super::*;
 
@@ -692,7 +740,20 @@ mod tests {
                 player: None,
             },
         ];
-        let report = Report::new(core.clone(), events, Ok(sessions));
+        let last = ProposedMatch {
+            raw_title: "[Subs] Show - 03.mkv".to_owned(),
+            parsed_title: "Show".to_owned(),
+            episode: Some(3),
+            season: None,
+            release_group: Some("Subs".to_owned()),
+            entry: None,
+            confidence: Confidence::Unmatched,
+            outcome: MatchOutcome::Proposed,
+            player: "mpv".to_owned(),
+            at: UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+            elements: Vec::new(),
+        };
+        let report = Report::new(core.clone(), Some(last), events, Ok(sessions));
 
         let text = report.to_text();
         assert!(text.starts_with(&format!("Ryuuji {} (", env!("CARGO_PKG_VERSION"))));
@@ -716,6 +777,12 @@ mod tests {
         assert!(text.contains(&format!("Logs: {}\n", dir.logs().display())));
         assert!(text.contains("Current log: none\n"));
         assert!(text.contains(
+            "Last match:\n  raw: [Subs] Show - 03.mkv\n  title: Show\n  \
+             episode: 3  season: \u{2014}  group: Subs\n  \
+             entry: \u{2014}  confidence: unmatched  outcome: proposed\n  \
+             player: mpv  at: 1700000000\n"
+        ));
+        assert!(text.contains(
             "Media sessions:\n  mpv.exe | Sousou no Frieren - 01 | Playing | mpv\n  \
              Spotify.exe |  | Paused | -\n"
         ));
@@ -732,10 +799,11 @@ mod tests {
         let Opened { store, .. } = Store::open(&dir).unwrap();
         let core = Diagnostics::gather(&dir, &store);
 
-        let text = Report::new(core.clone(), Vec::new(), Ok(Vec::new())).to_text();
+        let text = Report::new(core.clone(), None, Vec::new(), Ok(Vec::new())).to_text();
+        assert!(text.contains("Current log: none\nLast match: none\n"));
         assert!(text.contains("Media sessions:\n  none\n\nRecent events (0):\n"));
 
-        let text = Report::new(core, Vec::new(), Err("no manager".to_owned())).to_text();
+        let text = Report::new(core, None, Vec::new(), Err("no manager".to_owned())).to_text();
         assert!(text.contains("Media sessions:\n  unavailable: no manager\n"));
     }
 
