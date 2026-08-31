@@ -18,11 +18,28 @@ pub(crate) fn is_mostly_latin(text: &str) -> bool {
     latin * 2 >= total
 }
 
-pub(crate) fn trim_dashes_and_spaces(text: &str) -> &str {
-    text.trim_matches(|c: char| c == ' ' || c == '-' || ('\u{2010}'..='\u{2015}').contains(&c))
+fn is_dash_char(c: char) -> bool {
+    c == '-' || ('\u{2010}'..='\u{2015}').contains(&c)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn is_dash(text: &str) -> bool {
+    let mut chars = text.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) => is_dash_char(c),
+        _ => false,
+    }
+}
+
+pub(crate) fn leading_number(text: &str) -> u32 {
+    text.chars()
+        .map_while(|c| c.to_digit(10))
+        .fold(0, |acc, digit| acc.saturating_mul(10).saturating_add(digit))
+}
+
+pub(crate) fn trim_dashes_and_spaces(text: &str) -> &str {
+    text.trim_matches(|c: char| c == ' ' || is_dash_char(c))
+}
+
 pub(crate) fn build_element(tokens: &[Token], keep_delimiters: bool) -> String {
     let mut element = String::new();
     for token in tokens {

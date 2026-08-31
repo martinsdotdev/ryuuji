@@ -190,6 +190,22 @@ impl Elements {
         self.items.retain(|(k, _)| *k != kind);
     }
 
+    pub(crate) fn remove_value(&mut self, kind: ElementKind, value: &str) {
+        if let Some(position) = self
+            .items
+            .iter()
+            .position(|(k, v)| *k == kind && v == value)
+        {
+            self.items.remove(position);
+        }
+    }
+
+    pub(crate) fn retag_first(&mut self, from: ElementKind, to: ElementKind) {
+        if let Some(item) = self.items.iter_mut().find(|(k, _)| *k == from) {
+            item.0 = to;
+        }
+    }
+
     pub fn episode_number(&self) -> Option<u32> {
         leading_number(self.get(ElementKind::EpisodeNumber)?)
     }

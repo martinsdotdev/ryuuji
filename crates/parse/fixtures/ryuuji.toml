@@ -1,5 +1,5 @@
-# Ryuuji's own conformance cases for the keyword pass. Comparison ignores
-# file_name; a case with strict = false is only checked on the kinds it lists.
+# Ryuuji's own conformance cases. Comparison ignores file_name; a case with
+# strict = false is only checked on the kinds it lists.
 
 [[case]]
 name = "extension resolution and checksum"
@@ -9,6 +9,10 @@ input = "[Taka]_Fullmetal_Alchemist_(2009)_04_[720p][40F2A957].mp4"
 file_extension = "mp4"
 video_resolution = "720p"
 file_checksum = "40F2A957"
+release_group = "Taka"
+anime_title = "Fullmetal Alchemist"
+anime_year = "2009"
+episode_number = "04"
 
 [[case]]
 name = "thora with bluray audio and video terms"
@@ -21,6 +25,8 @@ source = "BluRay"
 video_term = "x264"
 audio_term = "DTS-ES"
 release_group = "THORA"
+anime_title = "Evangelion 1.11 You Are (Not) Alone"
+anime_year = "2009"
 
 [[case]]
 name = "dual audio preidentified alongside flac"
@@ -30,15 +36,19 @@ input = "[Coalgirls]_Spirited_Away_(1080p_FLAC)_Dual Audio.mkv"
 file_extension = "mkv"
 video_resolution = "1080p"
 audio_term = ["FLAC", "Dual Audio"]
+release_group = "Coalgirls"
+anime_title = "Spirited Away"
 
 [[case]]
-name = "ova anime type"
+name = "ova anime type stays in the title"
 input = "[HorribleSubs] Boku no Hero Academia - OVA [720p].mkv"
 
 [case.elements]
 file_extension = "mkv"
 anime_type = "OVA"
 video_resolution = "720p"
+release_group = "HorribleSubs"
+anime_title = "Boku no Hero Academia - OVA"
 
 [[case]]
 name = "invalid anime type keyword is still recorded"
@@ -49,6 +59,7 @@ file_extension = "mkv"
 anime_type = "NCOP"
 source = "BD"
 video_resolution = "1440x1080"
+anime_title = "Suzumiya Haruhi no Yuuutsu NCOP"
 
 [[case]]
 name = "release version and batch"
@@ -61,6 +72,8 @@ release_information = "Batch"
 source = "BD"
 video_resolution = "1080p"
 audio_term = "FLAC"
+release_group = "Group"
+anime_title = "Kara no Kyoukai"
 
 [[case]]
 name = "language and hardsubs"
@@ -71,15 +84,19 @@ file_extension = "avi"
 language = "VOSTFR"
 subtitles = "HardSub"
 video_resolution = "480p"
+release_group = "Foo"
+anime_title = "Cowboy Bebop"
 
 [[case]]
-name = "device compatibility"
+name = "device compatibility with last number episode"
 input = "Sword Art Online II 05 (PS3) [1080p].mkv"
 
 [case.elements]
 file_extension = "mkv"
 device_compatibility = "PS3"
 video_resolution = "1080p"
+anime_title = "Sword Art Online II"
+episode_number = "05"
 
 [[case]]
 name = "other terms and explicit dimensions"
@@ -90,6 +107,8 @@ file_extension = "mkv"
 other = ["Remastered", "WS"]
 source = "DVD"
 video_resolution = "640x480"
+anime_title = "Cardcaptor Sakura"
+episode_number = "12"
 
 [[case]]
 name = "extension parsing disabled"
@@ -100,6 +119,7 @@ parse_file_extension = false
 
 [case.elements]
 video_resolution = "720p"
+anime_title = "Gintama"
 
 [[case]]
 name = "release group parsing disabled"
@@ -112,6 +132,7 @@ parse_release_group = false
 file_extension = "mkv"
 source = "BD"
 video_resolution = "1080p"
+anime_title = "Gintama"
 
 [[case]]
 name = "eight digit numeric checksum"
@@ -120,6 +141,9 @@ input = "[Foo] Bar - 07 [12345678].mkv"
 [case.elements]
 file_extension = "mkv"
 file_checksum = "12345678"
+release_group = "Foo"
+anime_title = "Bar"
+episode_number = "07"
 
 [[case]]
 name = "ignored strings unlock a keyword"
@@ -142,6 +166,7 @@ file_extension = "mkv"
 video_resolution = "2160p"
 audio_term = ["TrueHD", "Atmos"]
 video_term = "HEVC"
+anime_title = "Akira"
 
 [[case]]
 name = "loose comparison checks only the listed kinds"
@@ -151,3 +176,454 @@ strict = false
 [case.elements]
 source = "BD"
 file_checksum = "ABCD1234"
+
+[[case]]
+name = "plain group title episode resolution"
+input = "[SubGroup] Anime Title - 01 [1080p].mkv"
+
+[case.elements]
+file_extension = "mkv"
+release_group = "SubGroup"
+anime_title = "Anime Title"
+episode_number = "01"
+video_resolution = "1080p"
+
+[[case]]
+name = "underscores with year version and episode title"
+input = "[TaigaSubs]_Toradora!_(2008)_-_01v2_-_Tiger_and_Dragon_[1280x720_H.264_FLAC][1234ABCD].mkv"
+
+[case.elements]
+file_extension = "mkv"
+release_group = "TaigaSubs"
+anime_title = "Toradora!"
+anime_year = "2008"
+episode_number = "01"
+release_version = "2"
+episode_title = "Tiger and Dragon"
+video_resolution = "1280x720"
+video_term = "H.264"
+audio_term = "FLAC"
+file_checksum = "1234ABCD"
+
+[[case]]
+name = "season x episode"
+input = "Anime 2x01.mkv"
+
+[case.elements]
+file_extension = "mkv"
+anime_season = "2"
+episode_number = "01"
+anime_title = "Anime"
+
+[[case]]
+name = "season and episode with prefixes"
+input = "Anime S01E03.mkv"
+
+[case.elements]
+file_extension = "mkv"
+anime_season = "01"
+episode_number = "03"
+anime_title = "Anime"
+
+[[case]]
+name = "season and episode ranges"
+input = "Anime S01-02xE001-150.mkv"
+
+[case.elements]
+file_extension = "mkv"
+anime_season = ["01", "02"]
+episode_number = ["001", "150"]
+anime_title = "Anime"
+
+[[case]]
+name = "episode prefix keyword with extent"
+input = "Anime Ep. 01.mkv"
+
+[case.elements]
+file_extension = "mkv"
+episode_number = "01"
+anime_title = "Anime"
+
+[[case]]
+name = "episode prefix range without extension"
+input = "Chrono Crusade ep. 1-5"
+
+[case.elements]
+episode_number = ["1", "5"]
+anime_title = "Chrono Crusade"
+
+[[case]]
+name = "japanese counter with prefix"
+input = "Yuru Yuri 第10話.mkv"
+
+[case.elements]
+file_extension = "mkv"
+episode_number = "10"
+anime_title = "Yuru Yuri"
+
+[[case]]
+name = "number sign episode"
+input = "Anime #01.mkv"
+
+[case.elements]
+file_extension = "mkv"
+episode_number = "01"
+anime_title = "Anime"
+
+[[case]]
+name = "number sign range with version"
+input = "Anime #02-03v2.mkv"
+
+[case.elements]
+file_extension = "mkv"
+episode_number = ["02", "03"]
+release_version = "2"
+anime_title = "Anime"
+
+[[case]]
+name = "multi episode range"
+input = "Anime 01-02.mkv"
+
+[case.elements]
+file_extension = "mkv"
+episode_number = ["01", "02"]
+anime_title = "Anime"
+
+[[case]]
+name = "partial episode with letter suffix"
+input = "Anime 4a.mkv"
+
+[case.elements]
+file_extension = "mkv"
+episode_number = "4a"
+anime_title = "Anime"
+
+[[case]]
+name = "fractional episode"
+input = "Anime 07.5.mkv"
+
+[case.elements]
+file_extension = "mkv"
+episode_number = "07.5"
+anime_title = "Anime"
+
+[[case]]
+name = "anime type and episode split keeps the type word"
+input = "[Coalgirls]_Toradora_ED2_(704x480_DVD_AAC)_[3B65D1E6].mkv"
+
+[case.elements]
+file_extension = "mkv"
+release_group = "Coalgirls"
+anime_title = "Toradora ED"
+anime_type = "ED"
+episode_number = "2"
+video_resolution = "704x480"
+source = "DVD"
+audio_term = "AAC"
+file_checksum = "3B65D1E6"
+
+[[case]]
+name = "ova title with separated episode"
+input = "[Seto_Otaku]_AIKa_ZERO_OVA_-_01_[BD][1920x1080_H264-Flac][6730D40A].mkv"
+
+[case.elements]
+file_extension = "mkv"
+release_group = "Seto_Otaku"
+anime_title = "AIKa ZERO OVA"
+anime_type = "OVA"
+episode_number = "01"
+source = "BD"
+video_resolution = "1920x1080"
+video_term = "H264"
+audio_term = "Flac"
+file_checksum = "6730D40A"
+
+[[case]]
+name = "parenthesized group stays in the title"
+input = "Aria the Animation (TV).mkv"
+
+[case.elements]
+file_extension = "mkv"
+anime_type = "TV"
+anime_title = "Aria the Animation (TV)"
+
+[[case]]
+name = "movie number is not an episode"
+input = "[KAF-TEAM]_One_Piece_Movie_9_vostfr_HD.avi"
+
+[case.elements]
+file_extension = "avi"
+release_group = "KAF-TEAM"
+anime_title = "One Piece Movie 9"
+anime_type = "Movie"
+language = "vostfr"
+video_term = "HD"
+
+[[case]]
+name = "part number is not an episode"
+input = "Fairy Tail Part 2.mkv"
+
+[case.elements]
+file_extension = "mkv"
+anime_title = "Fairy Tail Part 2"
+
+[[case]]
+name = "last number fallback"
+input = "Magical Girl Series 07.mkv"
+
+[case.elements]
+file_extension = "mkv"
+episode_number = "07"
+anime_title = "Magical Girl Series"
+
+[[case]]
+name = "leading number is not an episode"
+input = "05 Anime.mkv"
+
+[case.elements]
+file_extension = "mkv"
+anime_title = "05 Anime"
+
+[[case]]
+name = "isolated bracketed episode"
+input = "[Group] Anime [12].mkv"
+
+[case.elements]
+file_extension = "mkv"
+release_group = "Group"
+anime_title = "Anime"
+episode_number = "12"
+
+[[case]]
+name = "isolated year"
+input = "Anime (2008).mkv"
+
+[case.elements]
+file_extension = "mkv"
+anime_year = "2008"
+anime_title = "Anime"
+
+[[case]]
+name = "isolated resolution number without suffix"
+input = "[Group] Anime - 05 [720].mkv"
+
+[case.elements]
+file_extension = "mkv"
+release_group = "Group"
+anime_title = "Anime"
+episode_number = "05"
+video_resolution = "720"
+
+[[case]]
+name = "ampersand episode pair"
+input = "Anime 8 & 10.mkv"
+
+[case.elements]
+file_extension = "mkv"
+episode_number = ["8", "10"]
+anime_title = "Anime"
+
+[[case]]
+name = "number before total count"
+input = "Anime 01 of 24.mkv"
+
+[case.elements]
+file_extension = "mkv"
+episode_number = "01"
+anime_title = "Anime"
+
+[[case]]
+name = "volume prefix glued with separated episode"
+input = "Anime Vol.1 - 05.mkv"
+
+[case.elements]
+file_extension = "mkv"
+volume_number = "1"
+episode_number = "05"
+anime_title = "Anime"
+
+[[case]]
+name = "volume prefix keyword with extent"
+input = "Anime Vol. 2.mkv"
+
+[case.elements]
+file_extension = "mkv"
+volume_number = "2"
+anime_title = "Anime"
+
+[[case]]
+name = "ordinal season prefix"
+input = "Anime 2nd Season - 03.mkv"
+
+[case.elements]
+file_extension = "mkv"
+anime_season = "2"
+episode_number = "03"
+anime_title = "Anime"
+
+[[case]]
+name = "season prefix with number and episode title"
+input = "Mobile_Suit_Gundam_00_Season_2_Ep07_A_Reunion_and_a_Parting_[1080p,BluRay,x264]_-_THORA.mkv"
+
+[case.elements]
+file_extension = "mkv"
+anime_season = "2"
+anime_title = "Mobile Suit Gundam 00"
+episode_number = "07"
+episode_title = "A Reunion and a Parting"
+video_resolution = "1080p"
+source = "BluRay"
+video_term = "x264"
+release_group = "THORA"
+
+[[case]]
+name = "episode prefix glued with version"
+input = "Ghost_in_the_Shell_Stand_Alone_Complex_2nd_GIG_Ep05v2_EXCAVATION_[720p,HDTV,x264,AAC_5.1]_-_THORA.mkv"
+
+[case.elements]
+file_extension = "mkv"
+anime_title = "Ghost in the Shell Stand Alone Complex 2nd GIG"
+episode_number = "05"
+release_version = "2"
+episode_title = "EXCAVATION"
+video_resolution = "720p"
+source = "HDTV"
+video_term = "x264"
+audio_term = ["AAC", "5.1"]
+release_group = "THORA"
+
+[[case]]
+name = "title with inner dashes"
+input = "[HorribleSubs] Tower of Druaga - Sword of Uruk - 04 [480p].mkv"
+
+[case.elements]
+file_extension = "mkv"
+release_group = "HorribleSubs"
+anime_title = "Tower of Druaga - Sword of Uruk"
+episode_number = "04"
+video_resolution = "480p"
+
+[[case]]
+name = "episode title before brackets"
+input = "K-ON!_Ep03_Training!_[1080p,BluRay,x264]_-_THORA.mkv"
+
+[case.elements]
+file_extension = "mkv"
+anime_title = "K-ON!"
+episode_number = "03"
+episode_title = "Training!"
+video_resolution = "1080p"
+source = "BluRay"
+video_term = "x264"
+release_group = "THORA"
+
+[[case]]
+name = "short dash run is not an episode title"
+input = "[RaX]Mezzo(DSA)_-_05_-_[x264_ogg]_[585d9971].mkv"
+
+[case.elements]
+file_extension = "mkv"
+release_group = "RaX"
+anime_title = "Mezzo(DSA)"
+episode_number = "05"
+video_term = "x264"
+audio_term = "ogg"
+file_checksum = "585d9971"
+
+[[case]]
+name = "japanese brackets"
+input = "【Group】Anime 第02話.mkv"
+
+[case.elements]
+file_extension = "mkv"
+release_group = "Group"
+anime_title = "Anime"
+episode_number = "02"
+
+[[case]]
+name = "larger number becomes the alternative episode"
+input = "[Group] Anime Ep. 05 - 08v2 [720p].mkv"
+
+[case.elements]
+file_extension = "mkv"
+release_group = "Group"
+anime_title = "Anime"
+episode_number = "05"
+episode_number_alt = "08"
+release_version = "2"
+video_resolution = "720p"
+
+[[case]]
+name = "smaller number takes over the episode"
+input = "[Group] Anime Ep. 08 - 05v2 [720p].mkv"
+
+[case.elements]
+file_extension = "mkv"
+release_group = "Group"
+anime_title = "Anime"
+episode_number = "05"
+episode_number_alt = "08"
+release_version = "2"
+video_resolution = "720p"
+
+[[case]]
+name = "tv keyword enclosed with terms"
+input = "[E-HARO Raws] Kore wa Zombie desu ka - 03 (TV 1280x720 h264 AAC) [888E4991].mkv"
+
+[case.elements]
+file_extension = "mkv"
+release_group = "E-HARO Raws"
+anime_title = "Kore wa Zombie desu ka"
+episode_number = "03"
+anime_type = "TV"
+video_resolution = "1280x720"
+video_term = "h264"
+audio_term = "AAC"
+file_checksum = "888E4991"
+
+[[case]]
+name = "title keeps a trailing dash trimmed"
+input = "[Conclave-Mendoi]_Mobile_Suit_Gundam_00_S2_-_01v2_[1280x720_H.264_AAC][4863FBE8].mkv"
+
+[case.elements]
+file_extension = "mkv"
+release_group = "Conclave-Mendoi"
+anime_title = "Mobile Suit Gundam 00 S2"
+episode_number = "01"
+release_version = "2"
+video_resolution = "1280x720"
+video_term = "H.264"
+audio_term = "AAC"
+file_checksum = "4863FBE8"
+
+[[case]]
+name = "opening type with episode split"
+input = "Anime OP4.mkv"
+
+[case.elements]
+file_extension = "mkv"
+anime_title = "Anime OP"
+anime_type = "OP"
+episode_number = "4"
+
+[[case]]
+name = "episode title equal to an anime type is removed"
+input = "[Group] Anime - 01 - OVA.mkv"
+
+[case.elements]
+file_extension = "mkv"
+release_group = "Group"
+anime_title = "Anime"
+episode_number = "01"
+anime_type = "OVA"
+
+[[case]]
+name = "anime type contained in the episode title is removed"
+input = "[Group] Anime - 01 - The Movie Begins.mkv"
+
+[case.elements]
+file_extension = "mkv"
+release_group = "Group"
+anime_title = "Anime"
+episode_number = "01"
+episode_title = "The Movie Begins"
