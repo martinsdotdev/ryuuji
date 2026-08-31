@@ -115,12 +115,14 @@ impl Parser<'_> {
             return;
         }
         let value = self.tokens[next].content.clone();
-        self.elements.insert(kind, value);
-        self.tokens[index].category = TokenCategory::Identifier;
-        self.tokens[next].category = TokenCategory::Identifier;
         if kind == ElementKind::EpisodeNumber {
-            self.found_episode_keyword = true;
+            if !self.match_episode_patterns(&value, next) {
+                self.set_episode(&value, next, false);
+            }
+        } else if !self.match_volume_patterns(&value, next) {
+            self.set_volume(&value, next, false);
         }
+        self.tokens[index].category = TokenCategory::Identifier;
     }
 }
 

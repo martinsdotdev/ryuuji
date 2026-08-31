@@ -13,7 +13,6 @@ pub(crate) enum TokenCategory {
 pub(crate) struct Token {
     pub(crate) category: TokenCategory,
     pub(crate) content: String,
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) enclosed: bool,
     /// Set only for pre-identified tokens.
     pub(crate) kind: Option<ElementKind>,
