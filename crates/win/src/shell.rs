@@ -119,7 +119,12 @@ impl Component for Shell {
                 let sessions = Result::as_ref(&watcher)
                     .map(Watcher::sessions)
                     .map_err(|err| error_chain(err));
-                let report = Report::new(core.borrow().diagnostics(), events, sessions);
+                let report = Report::new(
+                    core.borrow().diagnostics(),
+                    core.borrow().state().last_match.clone(),
+                    events,
+                    sessions,
+                );
                 debug::page(
                     &report,
                     filter,
