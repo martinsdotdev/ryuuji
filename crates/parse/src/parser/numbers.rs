@@ -89,6 +89,17 @@ impl<'a> Scanner<'a> {
     fn done(&self) -> bool {
         self.pos == self.chars.len()
     }
+
+    /// Runs `parse` and rewinds if it fails, so a partial match leaves the
+    /// cursor where it started.
+    fn attempt<T>(&mut self, parse: impl FnOnce(&mut Scanner<'a>) -> Option<T>) -> Option<T> {
+        let saved = self.pos;
+        let parsed = parse(self);
+        if parsed.is_none() {
+            self.pos = saved;
+        }
+        parsed
+    }
 }
 
 /// A digit run that overflows `u32` compares as larger than every bound, so
@@ -98,23 +109,22 @@ fn leading_value(text: &str) -> u32 {
 }
 
 fn version(scanner: &mut Scanner) -> Option<String> {
-    let saved = scanner.pos;
-    if scanner.eat_any(&['v', 'V'])
-        && let Some(digit) = scanner.digits(1)
-    {
-        return Some(digit);
-    }
-    scanner.pos = saved;
-    None
+    scanner.attempt(|scanner| {
+        scanner
+            .eat_any(&['v', 'V'])
+            .then(|| scanner.digits(1))
+            .flatten()
+    })
 }
 
 fn eat_episode_separator(scanner: &mut Scanner) -> bool {
-    let saved = scanner.pos;
-    if scanner.eat_any(&[' ', '.', '_', '-', 'x', 'X']) && scanner.eat_any(&['E', 'e']) {
-        return true;
-    }
-    scanner.pos = saved;
-    scanner.eat_any(&['E', 'e', 'x', 'X'])
+    let separated = scanner
+        .attempt(|scanner| {
+            (scanner.eat_any(&[' ', '.', '_', '-', 'x', 'X']) && scanner.eat_any(&['E', 'e']))
+                .then_some(())
+        })
+        .is_some();
+    separated || scanner.eat_any(&['E', 'e', 'x', 'X'])
 }
 
 impl Parser<'_> {
@@ -275,37 +285,18 @@ impl Parser<'_> {
             return false;
         }
         let chars: Vec<char> = word.chars().collect();
-        let numeric_front = chars[0].is_ascii_digit();
-        let numeric_back = chars[chars.len() - 1].is_ascii_digit();
-
-        if numeric_front && numeric_back && self.match_single(extent, &chars, index) {
-            return true;
-        }
-        if numeric_front && numeric_back && self.match_multi(extent, &chars, index) {
+        if self.match_single(extent, &chars, index) || self.match_multi(extent, &chars, index) {
             return true;
         }
         if extent == Extent::Volume {
             return false;
         }
-        if numeric_back && self.match_season_and_episode(&chars, index) {
-            return true;
-        }
-        if !numeric_front && self.match_type_and_episode(word, index) {
-            return true;
-        }
-        if numeric_front && numeric_back && self.match_fractional_episode(&chars, word, index) {
-            return true;
-        }
-        if numeric_front && !numeric_back && self.match_partial_episode(&chars, word, index) {
-            return true;
-        }
-        if numeric_back && self.match_number_sign(&chars, index) {
-            return true;
-        }
-        if numeric_front && self.match_japanese_counter(&chars, index) {
-            return true;
-        }
-        false
+        self.match_season_and_episode(&chars, index)
+            || self.match_type_and_episode(word, index)
+            || self.match_fractional_episode(&chars, word, index)
+            || self.match_partial_episode(&chars, word, index)
+            || self.match_number_sign(&chars, index)
+            || self.match_japanese_counter(&chars, index)
     }
 
     fn match_single(&mut self, extent: Extent, chars: &[char], index: usize) -> bool {
@@ -367,30 +358,24 @@ impl Parser<'_> {
         let Some(first_season) = scanner.digits(2) else {
             return false;
         };
-        let mut second_season = None;
-        let saved = scanner.pos;
-        if scanner.eat('-') {
-            scanner.eat_any(&['S', 's']);
-            match scanner.digits(2) {
-                Some(digits) => second_season = Some(digits),
-                None => scanner.pos = saved,
-            }
-        }
+        let second_season = scanner.attempt(|scanner| {
+            scanner.eat('-').then(|| {
+                scanner.eat_any(&['S', 's']);
+                scanner.digits(2)
+            })?
+        });
         if !eat_episode_separator(&mut scanner) {
             return false;
         }
         let Some(first_episode) = scanner.digits(4) else {
             return false;
         };
-        let mut second_episode = None;
-        let saved = scanner.pos;
-        if scanner.eat('-') {
-            scanner.eat_any(&['E', 'e']);
-            match scanner.digits(4) {
-                Some(digits) => second_episode = Some(digits),
-                None => scanner.pos = saved,
-            }
-        }
+        let second_episode = scanner.attempt(|scanner| {
+            scanner.eat('-').then(|| {
+                scanner.eat_any(&['E', 'e']);
+                scanner.digits(4)
+            })?
+        });
         version(&mut scanner);
         if !scanner.done() {
             return false;
@@ -473,14 +458,11 @@ impl Parser<'_> {
         let Some(first) = scanner.digits(4) else {
             return false;
         };
-        let mut second = None;
-        let saved = scanner.pos;
-        if scanner.eat_any(&['-', '~', '&', '+']) {
-            match scanner.digits(4) {
-                Some(digits) => second = Some(digits),
-                None => scanner.pos = saved,
-            }
-        }
+        let second = scanner.attempt(|scanner| {
+            scanner
+                .eat_any(&['-', '~', '&', '+'])
+                .then(|| scanner.digits(4))?
+        });
         let release_version = version(&mut scanner);
         if !scanner.done() {
             return false;
