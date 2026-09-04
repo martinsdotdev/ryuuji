@@ -8,42 +8,17 @@ use std::time::SystemTime;
 
 use ryuuji_parse::{ElementKind, Options, parse};
 
+use crate::tagged::tagged_enum;
 use crate::{EntryId, LibraryEntry, PlaybackEvent};
 
-/// How sure the matcher is that a proposal names a library entry.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Confidence {
-    Exact,
-    Likely,
-    Unmatched,
-}
-
-impl Confidence {
-    /// Every confidence, strongest first.
-    pub const ALL: [Confidence; 3] = [Confidence::Exact, Confidence::Likely, Confidence::Unmatched];
-
-    /// Stable identifier stored in the database.
-    pub fn tag(self) -> &'static str {
-        match self {
-            Confidence::Exact => "exact",
-            Confidence::Likely => "likely",
-            Confidence::Unmatched => "unmatched",
-        }
-    }
-
-    /// Inverse of [`Confidence::tag`].
-    pub fn from_tag(tag: &str) -> Option<Confidence> {
-        Confidence::ALL
-            .into_iter()
-            .find(|confidence| confidence.tag() == tag)
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Confidence::Exact => "Exact match",
-            Confidence::Likely => "Likely match",
-            Confidence::Unmatched => "No library entry",
-        }
+tagged_enum! {
+    /// How sure the matcher is that a proposal names a library entry,
+    /// strongest first. Tags are stored in the database.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Confidence {
+        Exact => "exact", "Exact match",
+        Likely => "likely", "Likely match",
+        Unmatched => "unmatched", "No library entry",
     }
 }
 
@@ -381,14 +356,6 @@ mod tests {
     fn resolve_never_calls_a_short_needle_likely() {
         let library = library(&["abcz"]);
         assert_eq!(resolve("abcd", &library), (None, Confidence::Unmatched));
-    }
-
-    #[test]
-    fn confidence_tags_round_trip() {
-        for confidence in Confidence::ALL {
-            assert_eq!(Confidence::from_tag(confidence.tag()), Some(confidence));
-        }
-        assert_eq!(Confidence::from_tag("nope"), None);
     }
 
     #[test]

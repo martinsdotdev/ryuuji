@@ -13,6 +13,7 @@ mod matching;
 mod playback;
 mod settings;
 mod store;
+mod tagged;
 
 use std::fmt;
 use std::path::PathBuf;
@@ -26,41 +27,17 @@ pub use playback::{PlaybackEvent, PlaybackSource, PlaybackStatus};
 // Shells depend on this crate alone, so the parser reaches them through here.
 pub use ryuuji_parse::{ElementKind, Options, parse};
 pub use store::{DbError, Opened, Recovered, SchemaVersion, Store, StoreError};
+use tagged::tagged_enum;
 
-/// Every destination in the navigation pane, so the variant list is the pane
-/// list. A view reached from a page rather than from the pane is a [`Detail`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Page {
-    Library,
-    NowPlaying,
-    Settings,
-}
-
-impl Page {
-    /// The navigation pane items, in order.
-    pub const ALL: [Page; 3] = [Page::Library, Page::NowPlaying, Page::Settings];
-
-    /// Stable identifier used as the navigation item tag.
-    pub fn tag(self) -> &'static str {
-        match self {
-            Page::Library => "library",
-            Page::NowPlaying => "now-playing",
-            Page::Settings => "settings",
-        }
-    }
-
-    /// Inverse of [`Page::tag`].
-    pub fn from_tag(tag: &str) -> Option<Page> {
-        Page::ALL.into_iter().find(|page| page.tag() == tag)
-    }
-
-    /// Human-readable label.
-    pub fn label(self) -> &'static str {
-        match self {
-            Page::Library => "Library",
-            Page::NowPlaying => "Now playing",
-            Page::Settings => "Settings",
-        }
+tagged_enum! {
+    /// Every destination in the navigation pane, in pane order, so the
+    /// variant list is the pane list. A view reached from a page rather than
+    /// from the pane is a [`Detail`]. Tags are the navigation item tags.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Page {
+        Library => "library", "Library",
+        NowPlaying => "now-playing", "Now playing",
+        Settings => "settings", "Settings",
     }
 }
 
@@ -81,95 +58,29 @@ impl Detail {
     }
 }
 
-/// Where a show sits in the user's library.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WatchStatus {
-    Watching,
-    Completed,
-    OnHold,
-    Dropped,
-    PlanToWatch,
-}
-
-impl WatchStatus {
-    /// Every status, in the order the UI lists them.
-    pub const ALL: [WatchStatus; 5] = [
-        WatchStatus::Watching,
-        WatchStatus::Completed,
-        WatchStatus::OnHold,
-        WatchStatus::Dropped,
-        WatchStatus::PlanToWatch,
-    ];
-
-    /// Stable identifier stored in the library database.
-    pub fn tag(self) -> &'static str {
-        match self {
-            WatchStatus::Watching => "watching",
-            WatchStatus::Completed => "completed",
-            WatchStatus::OnHold => "on-hold",
-            WatchStatus::Dropped => "dropped",
-            WatchStatus::PlanToWatch => "plan-to-watch",
-        }
-    }
-
-    /// Inverse of [`WatchStatus::tag`].
-    pub fn from_tag(tag: &str) -> Option<WatchStatus> {
-        WatchStatus::ALL
-            .into_iter()
-            .find(|status| status.tag() == tag)
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            WatchStatus::Watching => "Watching",
-            WatchStatus::Completed => "Completed",
-            WatchStatus::OnHold => "On hold",
-            WatchStatus::Dropped => "Dropped",
-            WatchStatus::PlanToWatch => "Plan to watch",
-        }
+tagged_enum! {
+    /// Where a show sits in the user's library, in the order the UI lists
+    /// them. Tags are stored in the library database.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum WatchStatus {
+        Watching => "watching", "Watching",
+        Completed => "completed", "Completed",
+        OnHold => "on-hold", "On hold",
+        Dropped => "dropped", "Dropped",
+        PlanToWatch => "plan-to-watch", "Plan to watch",
     }
 }
 
-/// Which colour theme the shell should request from the platform.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum ThemePreference {
-    /// Follow the operating system setting.
-    #[default]
-    System,
-    Light,
-    Dark,
-}
-
-impl ThemePreference {
-    /// Every preference, in the order the UI lists them.
-    pub const ALL: [ThemePreference; 3] = [
-        ThemePreference::System,
-        ThemePreference::Light,
-        ThemePreference::Dark,
-    ];
-
-    /// Stable identifier written to `settings.toml`.
-    pub fn tag(self) -> &'static str {
-        match self {
-            ThemePreference::System => "system",
-            ThemePreference::Light => "light",
-            ThemePreference::Dark => "dark",
-        }
-    }
-
-    /// Inverse of [`ThemePreference::tag`].
-    pub fn from_tag(tag: &str) -> Option<ThemePreference> {
-        ThemePreference::ALL
-            .into_iter()
-            .find(|theme| theme.tag() == tag)
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            ThemePreference::System => "System",
-            ThemePreference::Light => "Light",
-            ThemePreference::Dark => "Dark",
-        }
+tagged_enum! {
+    /// Which colour theme the shell should request from the platform, in the
+    /// order the UI lists them. Tags are written to `settings.toml`.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+    pub enum ThemePreference {
+        /// Follow the operating system setting.
+        #[default]
+        System => "system", "System",
+        Light => "light", "Light",
+        Dark => "dark", "Dark",
     }
 }
 
@@ -327,30 +238,6 @@ pub fn error_chain(err: &dyn std::error::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn page_tags_round_trip() {
-        for page in Page::ALL {
-            assert_eq!(Page::from_tag(page.tag()), Some(page));
-        }
-        assert_eq!(Page::from_tag("nope"), None);
-    }
-
-    #[test]
-    fn watch_status_tags_round_trip() {
-        for status in WatchStatus::ALL {
-            assert_eq!(WatchStatus::from_tag(status.tag()), Some(status));
-        }
-        assert_eq!(WatchStatus::from_tag("nope"), None);
-    }
-
-    #[test]
-    fn theme_tags_round_trip() {
-        for theme in ThemePreference::ALL {
-            assert_eq!(ThemePreference::from_tag(theme.tag()), Some(theme));
-        }
-        assert_eq!(ThemePreference::from_tag("blue"), None);
-    }
 
     #[test]
     fn playback_status_labels() {
