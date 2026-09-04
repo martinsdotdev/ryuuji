@@ -1,36 +1,29 @@
-# Keywords are matched against upper-cased tokens. Group order matters: when
-# one value sits under two kinds (TS, AVI, FLAC, ...), the keyword pass takes
-# the group that appears first in this file.
-#
-# flags: default                    -> identifiable, searchable, valid
-#        invalid                    -> identifiable, searchable
-#        unidentifiable             -> searchable, valid
-#        unidentifiable_invalid     -> searchable
-#        unidentifiable_unsearchable -> valid only
+# Keywords are matched against upper-cased tokens.
 
 [[keyword]]
 kind = "anime_season_prefix"
-flags = "unidentifiable"
+identifiable = false
 values = ["SAISON", "SEASON"]
 
 [[keyword]]
 kind = "anime_type"
-flags = "unidentifiable"
+identifiable = false
 values = ["GEKIJOUBAN", "MOVIE", "OAD", "OAV", "ONA", "OVA", "SPECIAL", "SPECIALS", "TV"]
 
 [[keyword]]
 kind = "anime_type"
-flags = "unidentifiable_unsearchable"
+identifiable = false
+searchable = false
 values = ["SP"]
 
 [[keyword]]
 kind = "anime_type"
-flags = "unidentifiable_invalid"
+identifiable = false
+valid = false
 values = ["ED", "ENDING", "NCED", "NCOP", "OP", "OPENING", "PREVIEW", "PV"]
 
 [[keyword]]
 kind = "audio_term"
-flags = "default"
 values = [
     "2.0CH", "2CH", "5.1", "5.1CH", "7.1", "7.1CH",
     "DTS", "DTS-ES", "DTS5.1", "DOLBY TRUEHD", "TRUEHD", "TRUEHD5.1",
@@ -41,22 +34,20 @@ values = [
 
 [[keyword]]
 kind = "audio_term"
-flags = "unidentifiable"
+identifiable = false
 values = ["OPUS"]
 
 [[keyword]]
 kind = "device_compatibility"
-flags = "default"
 values = ["IPAD3", "IPHONE5", "IPOD", "PS3", "XBOX", "XBOX360"]
 
 [[keyword]]
 kind = "device_compatibility"
-flags = "unidentifiable"
+identifiable = false
 values = ["ANDROID"]
 
 [[keyword]]
 kind = "episode_prefix"
-flags = "default"
 values = [
     "EP", "EP.", "EPS", "EPS.", "EPISODE", "EPISODE.", "EPISODES",
     "CAPITULO", "EPISODIO", "EPISÓDIO", "FOLGE",
@@ -64,12 +55,12 @@ values = [
 
 [[keyword]]
 kind = "episode_prefix"
-flags = "invalid"
+valid = false
 values = ["E", "第"]
 
 [[keyword]]
 kind = "file_extension"
-flags = "default"
+searchable = false
 values = [
     "3GP", "AVI", "DIVX", "FLV", "M2TS", "MKV", "MOV", "MP4", "MPG",
     "OGM", "RM", "RMVB", "TS", "WEBM", "WMV",
@@ -77,7 +68,8 @@ values = [
 
 [[keyword]]
 kind = "file_extension"
-flags = "invalid"
+searchable = false
+valid = false
 values = [
     "AAC", "AIFF", "FLAC", "M4A", "MP3", "MKA", "OGG", "WAV", "WMA",
     "7Z", "RAR", "ZIP", "ASS", "SRT",
@@ -85,42 +77,36 @@ values = [
 
 [[keyword]]
 kind = "language"
-flags = "default"
 values = ["ENG", "ENGLISH", "ESPANOL", "JAP", "PT-BR", "SPANISH", "VOSTFR"]
 
 [[keyword]]
 kind = "language"
-flags = "unidentifiable"
+identifiable = false
 values = ["ESP", "ITA"]
 
 [[keyword]]
 kind = "other"
-flags = "default"
 values = ["REMASTER", "REMASTERED", "UNCENSORED", "UNCUT", "TS", "VFR", "WIDESCREEN", "WS"]
 
 [[keyword]]
 kind = "release_group"
-flags = "default"
 values = ["THORA"]
 
 [[keyword]]
 kind = "release_information"
-flags = "default"
 values = ["BATCH", "COMPLETE", "PATCH", "REMUX"]
 
 [[keyword]]
 kind = "release_information"
-flags = "unidentifiable"
+identifiable = false
 values = ["END", "FINAL"]
 
 [[keyword]]
 kind = "release_version"
-flags = "default"
 values = ["V0", "V1", "V2", "V3", "V4"]
 
 [[keyword]]
 kind = "source"
-flags = "default"
 values = [
     "BD", "BDRIP", "BLURAY", "BLU-RAY", "DVD", "DVD5", "DVD9", "DVD-R2J",
     "DVDRIP", "DVD-RIP", "R2DVD", "R2J", "R2JDVD", "R2JDVDRIP",
@@ -129,7 +115,6 @@ values = [
 
 [[keyword]]
 kind = "subtitles"
-flags = "default"
 values = [
     "ASS", "BIG5", "DUB", "DUBBED", "HARDSUB", "HARDSUBS", "RAW",
     "SOFTSUB", "SOFTSUBS", "SUB", "SUBBED", "SUBTITLED", "MULTISUB", "MULTI SUB",
@@ -137,7 +122,6 @@ values = [
 
 [[keyword]]
 kind = "video_term"
-flags = "default"
 values = [
     "23.976FPS", "24FPS", "29.97FPS", "30FPS", "60FPS", "120FPS",
     "8BIT", "8-BIT", "10BIT", "10BITS", "10-BIT", "10-BITS",
@@ -151,7 +135,6 @@ values = [
 
 [[keyword]]
 kind = "volume_prefix"
-flags = "default"
 values = ["VOL", "VOL.", "VOLUME"]
 
 [[preidentified]]

@@ -29,14 +29,11 @@ impl Parser<'_> {
 
             let mut kind = None;
             let mut identifiable = true;
-            if let Some(keyword) = self.table.find_any(&upper) {
+            if let Some(keyword) = self.table.find_searchable(&upper) {
                 if keyword.kind == ElementKind::ReleaseGroup && !self.options.parse_release_group {
                     continue;
                 }
-                if !keyword.kind.is_searchable() || !keyword.searchable {
-                    continue;
-                }
-                if !keyword.kind.is_multi_valued() && self.elements.contains(keyword.kind) {
+                if keyword.kind.is_singular() && self.elements.contains(keyword.kind) {
                     continue;
                 }
                 match keyword.kind {

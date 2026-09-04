@@ -173,7 +173,7 @@ fn run_anitomy() -> (usize, usize, Vec<String>) {
     (cases.len(), passed, failures)
 }
 
-const ANITOMY_BASELINE: usize = 131;
+const ANITOMY_BASELINE: usize = 134;
 
 #[test]
 #[ignore]
