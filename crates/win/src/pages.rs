@@ -3,8 +3,8 @@
 //! the data folder and the way into Diagnostics, and Now playing shows the
 //! last playback observation on a card, or a placeholder in the symbolic
 //! empty-state style the UI-direction research settled on (heading required,
-//! neutral tone). The Diagnostics body itself is built by the caller, so this
-//! module never sees the core handle or the log buffer.
+//! neutral tone). An open detail is built by the caller and handed in, so
+//! this module never sees the core handle or the log buffer.
 
 use std::time::{Duration, SystemTime};
 
@@ -21,16 +21,17 @@ use crate::ui::{
 
 const PAGE_PADDING: f64 = 24.0;
 
-/// Renders the notice bar and the body for the currently selected page.
+/// Renders the notice bar and the body: the open `detail`, or the currently
+/// selected page when nothing is open over it.
 pub fn render(
     state: &AppState,
     dispatch: Dispatch<Command>,
     dir: &DataDir,
     detection_down: bool,
-    debug: impl FnOnce() -> Element,
+    detail: Option<Element>,
 ) -> Element {
-    let page: Element = match state.detail {
-        Some(Detail::Diagnostics) => debug(),
+    let page: Element = match detail {
+        Some(detail) => detail,
         None => match state.page {
             Page::Library => library(&state.library),
             Page::NowPlaying => component(
