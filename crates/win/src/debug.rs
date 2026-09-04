@@ -142,11 +142,10 @@ impl Report {
                 );
                 let _ = writeln!(
                     out,
-                    "  entry: {}  confidence: {}  outcome: {}",
+                    "  entry: {}  confidence: {}",
                     last.entry
                         .map_or_else(|| NOT_APPLICABLE.to_owned(), |id| id.to_string()),
-                    last.confidence.tag(),
-                    last.outcome.tag()
+                    last.confidence.tag()
                 );
                 let _ = writeln!(
                     out,
@@ -541,7 +540,7 @@ fn level_brush(level: Level) -> ThemeRef {
 
 #[cfg(test)]
 mod tests {
-    use ryuuji_core::{ByteSize, Confidence, DataDir, MatchOutcome, Opened, ProposedMatch, Store};
+    use ryuuji_core::{ByteSize, Confidence, DataDir, Opened, ProposedMatch, Store};
 
     use super::*;
 
@@ -621,10 +620,8 @@ mod tests {
             release_group: Some("Subs".to_owned()),
             entry: None,
             confidence: Confidence::Unmatched,
-            outcome: MatchOutcome::Proposed,
             player: "mpv".to_owned(),
             at: UNIX_EPOCH + Duration::from_secs(1_700_000_000),
-            elements: Vec::new(),
         };
         let report = Report::new(core.clone(), Some(last), events, Ok(sessions));
 
@@ -642,7 +639,7 @@ mod tests {
             "Library: {} ({len}, modified ",
             core.library.path.display()
         )));
-        assert!(text.contains("Schema version: 2\n"));
+        assert!(text.contains("Schema version: 3\n"));
         assert!(text.contains(&format!(
             "Settings: {} (missing)",
             core.settings.path.display()
@@ -652,7 +649,7 @@ mod tests {
         assert!(text.contains(
             "Last match:\n  raw: [Subs] Show - 03.mkv\n  title: Show\n  \
              episode: 3  season: \u{2014}  group: Subs\n  \
-             entry: \u{2014}  confidence: unmatched  outcome: proposed\n  \
+             entry: \u{2014}  confidence: unmatched\n  \
              player: mpv  at: 1700000000\n"
         ));
         assert!(text.contains(

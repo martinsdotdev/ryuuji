@@ -9,8 +9,8 @@
 use std::time::{Duration, SystemTime};
 
 use ryuuji_core::{
-    AppState, Command, Confidence, DataDir, LibraryEntry, Notice, NowPlaying, Page, ProposedMatch,
-    Settings, StoreError, ThemePreference, error_chain,
+    AppState, Command, Confidence, DataDir, LibraryEntry, Notice, NowPlaying, Options, Page,
+    ProposedMatch, Settings, StoreError, ThemePreference, error_chain, parse,
 };
 use windows_reactor::*;
 
@@ -222,7 +222,7 @@ fn proposal_card(
     now: SystemTime,
     dispatch: Dispatch<Command>,
 ) -> Element {
-    let title = text_block(match_title(m, library))
+    let title = text_block(m.title_in(library))
         .font_size(20.0)
         .semibold()
         .wrap();
@@ -243,21 +243,6 @@ fn proposal_card(
     card_frame(vstack(children).spacing(4.0)).into()
 }
 
-/// The library entry's title when the proposal resolves to one, else the
-/// parsed title, else the raw player title.
-fn match_title(m: &ProposedMatch, library: &[LibraryEntry]) -> String {
-    let entry = m
-        .entry
-        .and_then(|id| library.iter().find(|entry| entry.id == id));
-    if let Some(entry) = entry {
-        entry.title.clone()
-    } else if !m.parsed_title.is_empty() {
-        m.parsed_title.clone()
-    } else {
-        m.raw_title.clone()
-    }
-}
-
 fn match_caption(m: &ProposedMatch, idle: bool, now: SystemTime) -> String {
     let mut parts = Vec::new();
     if let Some(episode) = m.episode {
@@ -271,30 +256,13 @@ fn match_caption(m: &ProposedMatch, idle: bool, now: SystemTime) -> String {
     parts.join(" \u{b7} ")
 }
 
-/// Every parsed element, or the persisted scalars after a reload has
-/// emptied `elements`.
+/// Every element the parser finds in the raw player title. Re-parsed here
+/// rather than carried on the proposal, so a reloaded one reads the same.
 fn fact_rows(m: &ProposedMatch) -> Vec<(String, String)> {
-    if !m.elements.is_empty() {
-        return m
-            .elements
-            .iter()
-            .map(|(label, value)| (fact_label(label), value.clone()))
-            .collect();
-    }
-    let mut rows = Vec::new();
-    if !m.parsed_title.is_empty() {
-        rows.push(("Title".to_owned(), m.parsed_title.clone()));
-    }
-    if let Some(episode) = m.episode {
-        rows.push(("Episode".to_owned(), episode.to_string()));
-    }
-    if let Some(season) = m.season {
-        rows.push(("Season".to_owned(), season.to_string()));
-    }
-    if let Some(group) = &m.release_group {
-        rows.push(("Group".to_owned(), group.clone()));
-    }
-    rows
+    parse(&m.raw_title, &Options::default())
+        .iter()
+        .map(|(kind, value)| (fact_label(kind.label()), value.to_owned()))
+        .collect()
 }
 
 fn fact_label(label: &str) -> String {
@@ -412,7 +380,7 @@ fn placeholder(heading: impl Into<String>, body: impl Into<String>) -> Element {
 
 #[cfg(test)]
 mod tests {
-    use ryuuji_core::{Confidence, MatchOutcome, NewEntry, Ryuuji, WatchStatus};
+    use ryuuji_core::Confidence;
 
     use super::*;
 
@@ -438,10 +406,8 @@ mod tests {
             release_group: None,
             entry: None,
             confidence: Confidence::Exact,
-            outcome: MatchOutcome::Proposed,
             player: "mpv".to_owned(),
             at: std::time::SystemTime::UNIX_EPOCH,
-            elements: Vec::new(),
         }
     }
 
@@ -490,58 +456,15 @@ mod tests {
     }
 
     #[test]
-    fn match_title_prefers_the_entry_then_parsed_then_raw() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = DataDir::at(tmp.path()).unwrap();
-        let mut app = Ryuuji::open(&dir).unwrap();
-        app.dispatch(Command::AddEntry(NewEntry {
-            title: "Frieren: Beyond Journey's End".to_owned(),
-            status: WatchStatus::Watching,
-            progress: 0,
-            total: None,
-        }));
-        let library = app.state().library.clone();
-        let entry = ProposedMatch {
-            entry: Some(library[0].id),
-            ..proposal()
-        };
-        assert_eq!(
-            match_title(&entry, &library),
-            "Frieren: Beyond Journey's End"
-        );
-        assert_eq!(match_title(&proposal(), &library), "Parsed");
-        let raw = ProposedMatch {
-            parsed_title: String::new(),
-            ..proposal()
-        };
-        assert_eq!(match_title(&raw, &library), "raw.mkv");
-    }
-
-    #[test]
-    fn fact_rows_fall_back_to_scalars_when_elements_are_empty() {
+    fn fact_rows_re_parse_the_raw_title() {
         let m = ProposedMatch {
-            episode: Some(3),
-            season: Some(2),
-            release_group: Some("Subs".to_owned()),
+            raw_title: "[Subs] Show - 03 (1080p).mkv".to_owned(),
             ..proposal()
         };
-        assert_eq!(
-            fact_rows(&m),
-            vec![
-                ("Title".to_owned(), "Parsed".to_owned()),
-                ("Episode".to_owned(), "3".to_owned()),
-                ("Season".to_owned(), "2".to_owned()),
-                ("Group".to_owned(), "Subs".to_owned()),
-            ]
-        );
-        let m = ProposedMatch {
-            elements: vec![("anime_title".to_owned(), "Show".to_owned())],
-            ..m
-        };
-        assert_eq!(
-            fact_rows(&m),
-            vec![("Anime title".to_owned(), "Show".to_owned())]
-        );
+        let rows = fact_rows(&m);
+        assert!(rows.contains(&("Release group".to_owned(), "Subs".to_owned())));
+        assert!(rows.contains(&("Anime title".to_owned(), "Show".to_owned())));
+        assert!(rows.contains(&("Episode number".to_owned(), "03".to_owned())));
     }
 
     #[test]

@@ -21,8 +21,10 @@ use std::time::Duration;
 pub use app::Ryuuji;
 pub use data_dir::{DataDir, DataDirError, DataDirSource};
 pub use diagnostics::{ByteSize, Diagnostics, FileFacts, FileStat, ProbeFailed};
-pub use matching::{Confidence, MatchOutcome, ProposedMatch, normalize_title, propose, similarity};
+pub use matching::{Confidence, ProposedMatch, normalize_title, propose, similarity};
 pub use playback::{PlaybackEvent, PlaybackSource, PlaybackStatus};
+// Shells depend on this crate alone, so the parser reaches them through here.
+pub use ryuuji_parse::{ElementKind, Options, parse};
 pub use store::{DbError, Opened, Recovered, SchemaVersion, Store, StoreError};
 
 /// Every page the shell can show. The first three sit in the navigation
@@ -268,7 +270,7 @@ pub struct AppState {
     pub library: Vec<LibraryEntry>,
     pub now_playing: NowPlaying,
     /// The latest playback title's proposal against the library. Survives
-    /// restarts via the store, though a reloaded value has empty `elements`.
+    /// restarts via the store.
     pub last_match: Option<ProposedMatch>,
     pub settings: Settings,
     /// Oldest first; the shell shows the front one.

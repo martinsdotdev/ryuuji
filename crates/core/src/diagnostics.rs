@@ -160,7 +160,7 @@ mod tests {
             diagnostics.library.stat,
             FileStat::Present { len, modified: Some(_) } if len > ByteSize(0)
         ));
-        assert_eq!(diagnostics.schema, Ok(SchemaVersion(2)));
+        assert_eq!(diagnostics.schema, Ok(SchemaVersion(3)));
         assert_eq!(diagnostics.logs, dir.logs());
     }
 

@@ -47,47 +47,6 @@ impl Confidence {
     }
 }
 
-/// What has happened to a proposal so far.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MatchOutcome {
-    Proposed,
-    Confirmed,
-    Dismissed,
-}
-
-impl MatchOutcome {
-    /// Every outcome, in lifecycle order.
-    pub const ALL: [MatchOutcome; 3] = [
-        MatchOutcome::Proposed,
-        MatchOutcome::Confirmed,
-        MatchOutcome::Dismissed,
-    ];
-
-    /// Stable identifier stored in the database.
-    pub fn tag(self) -> &'static str {
-        match self {
-            MatchOutcome::Proposed => "proposed",
-            MatchOutcome::Confirmed => "confirmed",
-            MatchOutcome::Dismissed => "dismissed",
-        }
-    }
-
-    /// Inverse of [`MatchOutcome::tag`].
-    pub fn from_tag(tag: &str) -> Option<MatchOutcome> {
-        MatchOutcome::ALL
-            .into_iter()
-            .find(|outcome| outcome.tag() == tag)
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            MatchOutcome::Proposed => "Proposed",
-            MatchOutcome::Confirmed => "Confirmed",
-            MatchOutcome::Dismissed => "Dismissed",
-        }
-    }
-}
-
 /// One playback title's decision against the library.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProposedMatch {
@@ -99,12 +58,27 @@ pub struct ProposedMatch {
     pub release_group: Option<String>,
     pub entry: Option<EntryId>,
     pub confidence: Confidence,
-    pub outcome: MatchOutcome,
     pub player: String,
     pub at: SystemTime,
-    /// (ElementKind label, value) for every parsed element; memory only,
-    /// empty after reload.
-    pub elements: Vec<(String, String)>,
+}
+
+impl ProposedMatch {
+    /// What to call this proposal without a library to consult: the parsed
+    /// title, else the raw player title.
+    pub fn shown_title(&self) -> &str {
+        if self.parsed_title.is_empty() {
+            &self.raw_title
+        } else {
+            &self.parsed_title
+        }
+    }
+
+    /// The matched entry's title, else [`ProposedMatch::shown_title`].
+    pub fn title_in<'a>(&'a self, library: &'a [LibraryEntry]) -> &'a str {
+        self.entry
+            .and_then(|id| library.iter().find(|entry| entry.id == id))
+            .map_or_else(|| self.shown_title(), |entry| entry.title.as_str())
+    }
 }
 
 /// Folds a title to the loose form matching compares: lowercase ASCII
@@ -286,13 +260,8 @@ pub fn propose(event: &PlaybackEvent, library: &[LibraryEntry]) -> ProposedMatch
         release_group: parsed.get(ElementKind::ReleaseGroup).map(str::to_owned),
         entry,
         confidence,
-        outcome: MatchOutcome::Proposed,
         player: event.player.clone(),
         at: event.observed_at,
-        elements: parsed
-            .iter()
-            .map(|(kind, value)| (kind.label().to_owned(), value.to_owned()))
-            .collect(),
     }
 }
 
@@ -423,27 +392,31 @@ mod tests {
     }
 
     #[test]
-    fn match_outcome_tags_round_trip() {
-        for outcome in MatchOutcome::ALL {
-            assert_eq!(MatchOutcome::from_tag(outcome.tag()), Some(outcome));
-        }
-        assert_eq!(MatchOutcome::from_tag("nope"), None);
-    }
-
-    #[test]
-    fn propose_carries_player_at_and_elements() {
+    fn propose_carries_player_and_at() {
         let event = event("[Subs] Show - 03 (1080p).mkv");
         let proposal = propose(&event, &[]);
         assert_eq!(proposal.raw_title, event.title);
         assert_eq!(proposal.player, "mpv");
         assert_eq!(proposal.at, event.observed_at);
-        assert_eq!(proposal.outcome, MatchOutcome::Proposed);
-        let expected: Vec<(String, String)> = parse(&event.title, &Options::default())
-            .iter()
-            .map(|(kind, value)| (kind.label().to_owned(), value.to_owned()))
-            .collect();
-        assert!(!expected.is_empty());
-        assert_eq!(proposal.elements, expected);
+    }
+
+    #[test]
+    fn title_in_prefers_the_entry_then_parsed_then_raw() {
+        let library = library(&["Frieren: Beyond Journey's End"]);
+        let proposal = propose(&event("[Subs] Show - 03.mkv"), &library);
+        assert_eq!(proposal.shown_title(), "Show");
+        assert_eq!(proposal.title_in(&library), "Show");
+        let matched = ProposedMatch {
+            entry: Some(library[0].id),
+            ..proposal.clone()
+        };
+        assert_eq!(matched.title_in(&library), "Frieren: Beyond Journey's End");
+        let raw = ProposedMatch {
+            parsed_title: String::new(),
+            ..proposal
+        };
+        assert_eq!(raw.shown_title(), "[Subs] Show - 03.mkv");
+        assert_eq!(raw.title_in(&library), "[Subs] Show - 03.mkv");
     }
 
     #[test]
