@@ -4,20 +4,21 @@
 use serde::Deserialize;
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
-pub struct Player {
+pub(crate) struct Player {
     pub name: String,
-    /// Case-insensitive substrings of the SMTC source app user model id.
+    /// Substrings of the SMTC source app user model id, lowercased by
+    /// [`PlayerTable::parse`] so a match only has to lowercase the app id.
     #[serde(default)]
     pub smtc_app_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PlayerTable {
+pub(crate) struct PlayerTable {
     players: Vec<Player>,
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum TableError {
+pub(crate) enum TableError {
     #[error("players.toml does not parse")]
     Parse(#[source] toml::de::Error),
     #[error("player {name:?} has an smtc_app_id shorter than 3 characters: {pattern:?}")]
@@ -36,13 +37,13 @@ struct Document {
 
 impl PlayerTable {
     /// The embedded table; a parse failure is a build defect covered by a test.
-    pub fn builtin() -> PlayerTable {
+    pub(crate) fn builtin() -> PlayerTable {
         PlayerTable::parse(include_str!("players.toml")).expect("embedded players.toml is valid")
     }
 
-    pub fn parse(text: &str) -> Result<PlayerTable, TableError> {
+    pub(crate) fn parse(text: &str) -> Result<PlayerTable, TableError> {
         let document: Document = toml::from_str(text).map_err(TableError::Parse)?;
-        let players = document.player;
+        let mut players = document.player;
         for (index, player) in players.iter().enumerate() {
             if let Some(pattern) = player
                 .smtc_app_ids
@@ -63,22 +64,26 @@ impl PlayerTable {
                 });
             }
         }
+        for pattern in players.iter_mut().flat_map(|p| &mut p.smtc_app_ids) {
+            *pattern = pattern.to_lowercase();
+        }
         Ok(PlayerTable { players })
     }
 
-    pub fn players(&self) -> &[Player] {
+    #[cfg(test)]
+    pub(crate) fn players(&self) -> &[Player] {
         &self.players
     }
 
     /// Case-insensitive substring match of any pattern against the app id;
     /// first table entry wins.
-    pub fn match_smtc(&self, app_id: &str) -> Option<&Player> {
+    pub(crate) fn match_smtc(&self, app_id: &str) -> Option<&Player> {
         let app_id = app_id.to_lowercase();
         self.players.iter().find(|player| {
             player
                 .smtc_app_ids
                 .iter()
-                .any(|pattern| app_id.contains(&pattern.to_lowercase()))
+                .any(|pattern| app_id.contains(pattern))
         })
     }
 }
@@ -109,6 +114,20 @@ mod tests {
                 Some("mpv")
             );
         }
+    }
+
+    #[test]
+    fn parse_lowercases_patterns_so_an_uppercase_entry_still_matches() {
+        let table =
+            PlayerTable::parse("[[player]]\nname = \"MPV\"\nsmtc_app_ids = [\"MPV.EXE\"]\n")
+                .unwrap();
+        assert_eq!(table.players()[0].smtc_app_ids, ["mpv.exe"]);
+        assert_eq!(
+            table
+                .match_smtc("C:\\tools\\mpv.exe")
+                .map(|p| p.name.as_str()),
+            Some("MPV")
+        );
     }
 
     #[test]

@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime};
 
 use ryuuji_core::{PlaybackEvent, PlaybackSource, PlaybackStatus};
 
-use crate::Player;
+use crate::players::Player;
 
 /// `GlobalSystemMediaTransportControlsSessionPlaybackStatus` as it comes off
 /// the wire, in declaration order.
@@ -50,7 +50,6 @@ impl RawStatus {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SessionSnapshot {
-    pub app_id: String,
     pub title: String,
     pub status: RawStatus,
     pub start: Duration,
@@ -178,7 +177,6 @@ mod tests {
 
     fn snapshot(status: RawStatus) -> SessionSnapshot {
         SessionSnapshot {
-            app_id: "mpv.exe".to_owned(),
             title: "Episode 3".to_owned(),
             status,
             start: Duration::ZERO,
