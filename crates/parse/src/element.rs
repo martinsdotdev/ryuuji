@@ -1,3 +1,5 @@
+use crate::string::leading_number;
+
 /// A category of information extracted from a filename.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ElementKind {
@@ -187,11 +189,6 @@ impl Elements {
     pub fn season_number(&self) -> Option<u32> {
         leading_number(self.get(ElementKind::AnimeSeason)?)
     }
-}
-
-fn leading_number(value: &str) -> Option<u32> {
-    let digits: String = value.chars().take_while(char::is_ascii_digit).collect();
-    digits.parse().ok()
 }
 
 #[cfg(test)]

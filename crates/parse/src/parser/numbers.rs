@@ -53,6 +53,12 @@ impl<'a> Scanner<'a> {
     }
 }
 
+/// A digit run that overflows `u32` compares as larger than every bound, so
+/// the validation checks reject it.
+fn leading_value(text: &str) -> u32 {
+    string::leading_number(text).unwrap_or(u32::MAX)
+}
+
 fn version(scanner: &mut Scanner) -> Option<String> {
     let saved = scanner.pos;
     if scanner.eat_any(&['v', 'V'])
@@ -82,7 +88,9 @@ impl Parser<'_> {
             {
                 continue;
             }
-            let number = string::leading_number(&self.tokens[index].content);
+            let Some(number) = string::leading_number(&self.tokens[index].content) else {
+                continue;
+            };
             if (ANIME_YEAR_MIN..=ANIME_YEAR_MAX).contains(&number)
                 && !self.elements.contains(ElementKind::AnimeYear)
             {
@@ -312,7 +320,7 @@ impl Parser<'_> {
         if !scanner.done() {
             return false;
         }
-        if string::leading_number(&lower) >= string::leading_number(&upper) {
+        if leading_value(&lower) >= leading_value(&upper) {
             return false;
         }
         if !self.set_episode(&lower, index, true) {
@@ -362,7 +370,7 @@ impl Parser<'_> {
         if !scanner.done() {
             return false;
         }
-        if string::leading_number(&first_season) == 0 {
+        if leading_value(&first_season) == 0 {
             return false;
         }
         self.elements.insert(ElementKind::AnimeSeason, first_season);
@@ -535,7 +543,7 @@ impl Parser<'_> {
         if !scanner.done() {
             return false;
         }
-        if string::leading_number(&lower) >= string::leading_number(&upper) {
+        if leading_value(&lower) >= leading_value(&upper) {
             return false;
         }
         if !self.set_volume(&lower, index, true) {
@@ -606,7 +614,7 @@ impl Parser<'_> {
     }
 
     pub(super) fn set_episode(&mut self, number: &str, index: usize, validate: bool) -> bool {
-        if validate && string::leading_number(number) > EPISODE_NUMBER_MAX {
+        if validate && leading_value(number) > EPISODE_NUMBER_MAX {
             return false;
         }
         self.tokens[index].category = TokenCategory::Identifier;
@@ -614,8 +622,8 @@ impl Parser<'_> {
         if self.found_episode_keyword
             && let Some(existing) = self.elements.get(ElementKind::EpisodeNumber)
         {
-            let new = string::leading_number(number);
-            let old = string::leading_number(existing);
+            let new = leading_value(number);
+            let old = leading_value(existing);
             if new > old {
                 kind = ElementKind::EpisodeNumberAlt;
             } else if new < old {
@@ -630,7 +638,7 @@ impl Parser<'_> {
     }
 
     pub(super) fn set_volume(&mut self, number: &str, index: usize, validate: bool) -> bool {
-        if validate && string::leading_number(number) > VOLUME_NUMBER_MAX {
+        if validate && leading_value(number) > VOLUME_NUMBER_MAX {
             return false;
         }
         self.elements.insert(ElementKind::VolumeNumber, number);

@@ -8,16 +8,6 @@ pub(crate) fn is_hex(text: &str) -> bool {
     !text.is_empty() && text.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn is_mostly_latin(text: &str) -> bool {
-    let total = text.chars().count();
-    if total == 0 {
-        return false;
-    }
-    let latin = text.chars().filter(|&c| c <= '\u{024F}').count();
-    latin * 2 >= total
-}
-
 fn is_dash_char(c: char) -> bool {
     c == '-' || ('\u{2010}'..='\u{2015}').contains(&c)
 }
@@ -30,10 +20,11 @@ pub(crate) fn is_dash(text: &str) -> bool {
     }
 }
 
-pub(crate) fn leading_number(text: &str) -> u32 {
-    text.chars()
-        .map_while(|c| c.to_digit(10))
-        .fold(0, |acc, digit| acc.saturating_mul(10).saturating_add(digit))
+/// The value of the leading digit run, or `None` when there is no run or it
+/// does not fit a `u32`.
+pub(crate) fn leading_number(text: &str) -> Option<u32> {
+    let digits: String = text.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
 }
 
 pub(crate) fn trim_dashes_and_spaces(text: &str) -> &str {
@@ -108,11 +99,12 @@ mod tests {
     }
 
     #[test]
-    fn mostly_latin_needs_at_least_half_latin_chars() {
-        assert!(is_mostly_latin("Toradora"));
-        assert!(!is_mostly_latin("\u{3068}\u{3089}\u{30c9}\u{30e9}"));
-        assert!(is_mostly_latin("ab\u{3068}\u{3089}"));
-        assert!(!is_mostly_latin(""));
+    fn leading_number_reads_the_digit_run() {
+        assert_eq!(leading_number("01v2"), Some(1));
+        assert_eq!(leading_number("7.5"), Some(7));
+        assert_eq!(leading_number("v2"), None);
+        assert_eq!(leading_number(""), None);
+        assert_eq!(leading_number("99999999999"), None);
     }
 
     #[test]
