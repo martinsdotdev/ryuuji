@@ -14,9 +14,9 @@ use ryuuji_core::{
 };
 use windows_reactor::*;
 
-use crate::debug;
 use crate::ui::{
-    CONTENT_MAX_WIDTH, FOLDER_GLYPH, REPAIR_GLYPH, age_of, caption, card, card_frame, section,
+    self, APP_VERSION, BUILD_PROFILE, CONTENT_MAX_WIDTH, FOLDER_GLYPH, REPAIR_GLYPH, age_of,
+    caption, card, card_frame, enum_picker, section, table,
 };
 
 const PAGE_PADDING: f64 = 24.0;
@@ -60,7 +60,7 @@ pub fn render(
     };
 
     grid((
-        notice(&state.notices, dispatch).grid_row(0),
+        notice(&state.notices, dispatch),
         border(page)
             .padding(Thickness::uniform(PAGE_PADDING))
             .grid_row(1),
@@ -83,9 +83,12 @@ pub fn boot_failed(err: &StoreError, dir: &DataDir) -> Element {
     .into()
 }
 
-/// Shows the oldest notice. Keyed on the queue length so a dismissal
-/// remounts the bar: `IsOpen` is diffed, and WinUI has already closed it.
-fn notice(notices: &[Notice], dispatch: Dispatch<Command>) -> InfoBar {
+/// Shows the oldest notice, or nothing at all when the queue is empty.
+/// Keyed on the queue length so a dismissal remounts the bar: `IsOpen` is
+/// diffed, and WinUI has already closed it. That key only distinguishes one
+/// notice from the next because the queue is FIFO and only ever loses its
+/// head, so a push and a pop cannot land on the same length.
+fn notice(notices: &[Notice], dispatch: Dispatch<Command>) -> Element {
     let (severity, title, message) = match notices.first() {
         Some(Notice::SaveFailed { detail }) => (
             InfoBarSeverity::Error,
@@ -105,14 +108,16 @@ fn notice(notices: &[Notice], dispatch: Dispatch<Command>) -> InfoBar {
                 backup.display()
             ),
         ),
-        None => (InfoBarSeverity::Informational, "", String::new()),
+        None => return Element::Empty,
     };
     InfoBar::new(title)
         .message(message)
         .severity(severity)
-        .is_open(!notices.is_empty())
+        .is_open(true)
         .on_closed(move || dispatch.call(Command::DismissNotice))
         .with_key(notices.len().to_string())
+        .grid_row(0)
+        .into()
 }
 
 fn library(entries: &[LibraryEntry]) -> Element {
@@ -196,7 +201,7 @@ fn now_playing(
 
 /// The Now playing placeholder copy: the plain idle pair, or the
 /// detection-down pair when the watcher never started.
-pub(crate) fn idle_placeholder_copy(detection_down: bool) -> (&'static str, &'static str) {
+fn idle_placeholder_copy(detection_down: bool) -> (&'static str, &'static str) {
     if detection_down {
         (
             "Detection isn't running",
@@ -240,7 +245,7 @@ fn proposal_card(
 
 /// The library entry's title when the proposal resolves to one, else the
 /// parsed title, else the raw player title.
-pub(crate) fn match_title(m: &ProposedMatch, library: &[LibraryEntry]) -> String {
+fn match_title(m: &ProposedMatch, library: &[LibraryEntry]) -> String {
     let entry = m
         .entry
         .and_then(|id| library.iter().find(|entry| entry.id == id));
@@ -253,7 +258,7 @@ pub(crate) fn match_title(m: &ProposedMatch, library: &[LibraryEntry]) -> String
     }
 }
 
-pub(crate) fn match_caption(m: &ProposedMatch, idle: bool, now: SystemTime) -> String {
+fn match_caption(m: &ProposedMatch, idle: bool, now: SystemTime) -> String {
     let mut parts = Vec::new();
     if let Some(episode) = m.episode {
         parts.push(format!("Episode {episode}"));
@@ -268,7 +273,7 @@ pub(crate) fn match_caption(m: &ProposedMatch, idle: bool, now: SystemTime) -> S
 
 /// Every parsed element, or the persisted scalars after a reload has
 /// emptied `elements`.
-pub(crate) fn fact_rows(m: &ProposedMatch) -> Vec<(String, String)> {
+fn fact_rows(m: &ProposedMatch) -> Vec<(String, String)> {
     if !m.elements.is_empty() {
         return m
             .elements
@@ -301,26 +306,12 @@ fn fact_label(label: &str) -> String {
 }
 
 fn facts_grid(rows: &[(String, String)]) -> Element {
-    let cells: Vec<Element> = rows
-        .iter()
-        .enumerate()
-        .flat_map(|(index, (label, value))| {
-            let row = index as i32;
-            [
-                caption(label.clone()).grid_row(row).grid_column(0).into(),
-                text_block(value.clone())
-                    .wrap()
-                    .grid_row(row)
-                    .grid_column(1)
-                    .into(),
-            ]
-        })
-        .collect();
-    grid(cells)
-        .rows(std::iter::repeat_n(GridLength::Auto, rows.len()))
-        .columns([GridLength::Auto, GridLength::STAR])
-        .row_spacing(6.0)
-        .column_spacing(16.0)
+    table([GridLength::Auto, GridLength::STAR])
+        .spacing(6.0, 16.0)
+        .rows(
+            rows.iter()
+                .map(|(label, value)| [caption(label.clone()), text_block(value.clone()).wrap()]),
+        )
         .into()
 }
 
@@ -352,12 +343,11 @@ fn settings(
     set_folder_action: SetState<Option<String>>,
 ) -> Element {
     let root = dir.root().to_path_buf();
-    let open_folder = move || set_folder_action.call(Some(debug::open_folder(&root)));
+    let open_folder = move || set_folder_action.call(Some(ui::open_folder(&root)));
     let open_diagnostics = {
         let dispatch = dispatch.clone();
         move || dispatch.call(Command::SelectPage(Page::Debug))
     };
-    let app = debug::AppInfo::current();
     scroll_viewer(
         vstack((
             vstack((section("Appearance"), theme_card(settings.theme, dispatch))).spacing(8.0),
@@ -383,7 +373,7 @@ fn settings(
                 ),
             ))
             .spacing(8.0),
-            caption(format!("Ryuuji {} · {} build", app.version, app.profile)),
+            caption(format!("Ryuuji {APP_VERSION} · {BUILD_PROFILE} build")),
         ))
         .spacing(24.0)
         .max_width(CONTENT_MAX_WIDTH),
@@ -393,31 +383,19 @@ fn settings(
 
 /// The theme picker, a drop-down like Windows Settings' "Choose your mode".
 fn theme_card(theme: ThemePreference, dispatch: Dispatch<Command>) -> Border {
-    let combo = ComboBox::new(ThemePreference::ALL.map(ThemePreference::label))
-        .selected_index(theme_index(theme))
-        .on_selection_changed(move |index: i32| {
-            let chosen = usize::try_from(index)
-                .ok()
-                .and_then(|index| ThemePreference::ALL.get(index));
-            if let Some(chosen) = chosen {
-                dispatch.call(Command::SetTheme(*chosen));
-            }
-        })
-        .min_width(160.0);
+    let combo = enum_picker(
+        &ThemePreference::ALL,
+        ThemePreference::label,
+        theme,
+        move |chosen| dispatch.call(Command::SetTheme(chosen)),
+    )
+    .min_width(160.0);
     card(
         None,
         "Theme",
         "Follow Windows, or pick light or dark.",
         combo.into(),
     )
-}
-
-fn theme_index(theme: ThemePreference) -> i32 {
-    ThemePreference::ALL
-        .iter()
-        .position(|candidate| *candidate == theme)
-        .and_then(|index| i32::try_from(index).ok())
-        .unwrap_or(-1)
 }
 
 /// Symbolic placeholder: a heading and one line of body text on a card.
@@ -437,14 +415,6 @@ mod tests {
     use ryuuji_core::{Confidence, MatchOutcome, NewEntry, Ryuuji, WatchStatus};
 
     use super::*;
-
-    #[test]
-    fn theme_index_round_trips_over_every_preference() {
-        for theme in ThemePreference::ALL {
-            let index = usize::try_from(theme_index(theme)).unwrap();
-            assert_eq!(ThemePreference::ALL[index], theme);
-        }
-    }
 
     #[test]
     fn clock_text_formats_minutes_and_hours() {

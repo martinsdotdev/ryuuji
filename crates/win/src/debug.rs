@@ -3,7 +3,6 @@
 
 use std::fmt::Write as _;
 use std::path::Path;
-use std::process::Command as Process;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ryuuji_core::{
@@ -15,7 +14,10 @@ use tracing::{Level, warn};
 use windows_reactor::*;
 
 use crate::logging::EventRecord;
-use crate::ui::{CONTENT_MAX_WIDTH, FOLDER_GLYPH, age_of, caption, card, card_frame, section};
+use crate::ui::{
+    APP_VERSION, BUILD_PROFILE, CONTENT_MAX_WIDTH, FOLDER_GLYPH, age_of, caption, card, card_frame,
+    enum_picker, open_folder, section, table,
+};
 
 const MONO_FONT: &str = "Cascadia Mono";
 const NOT_APPLICABLE: &str = "—";
@@ -69,29 +71,11 @@ impl EventLevelFilter {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AppInfo {
-    pub version: &'static str,
-    pub profile: &'static str,
-}
-
-impl AppInfo {
-    pub(crate) fn current() -> AppInfo {
-        AppInfo {
-            version: env!("CARGO_PKG_VERSION"),
-            profile: if cfg!(debug_assertions) {
-                "debug"
-            } else {
-                "release"
-            },
-        }
-    }
-}
-
 /// Everything the page shows, gathered at one moment.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Report {
-    pub app: AppInfo,
+    /// When the report was gathered; every age it prints is relative to this.
+    pub now: SystemTime,
     pub core: Diagnostics,
     /// The core's latest proposal, as shown on Now playing.
     pub last_match: Option<ProposedMatch>,
@@ -108,7 +92,7 @@ impl Report {
         sessions: std::result::Result<Vec<SessionFacts>, String>,
     ) -> Report {
         Report {
-            app: AppInfo::current(),
+            now: SystemTime::now(),
             core,
             last_match,
             events,
@@ -120,10 +104,10 @@ impl Report {
     /// like the log it excerpts. Every event is included whatever the page's
     /// level filter shows.
     pub fn to_text(&self) -> String {
-        let now = SystemTime::now();
+        let now = self.now;
         let core = &self.core;
         let mut out = String::new();
-        let _ = writeln!(out, "Ryuuji {} ({})", self.app.version, self.app.profile);
+        let _ = writeln!(out, "Ryuuji {APP_VERSION} ({BUILD_PROFILE})");
         let _ = writeln!(
             out,
             "Data directory: {} [{}]",
@@ -206,14 +190,15 @@ fn count_text(value: Option<u32>) -> String {
     value.map_or_else(|| NOT_APPLICABLE.to_owned(), |n| n.to_string())
 }
 
-/// `app_id | title | status | player`, the player as `-` when unmatched.
+/// `app_id | title | status | player`, the player as [`NOT_APPLICABLE`] when
+/// unmatched, matching the sessions card.
 fn session_line(session: &SessionFacts) -> String {
     format!(
         "{} | {} | {} | {}",
         session.app_id,
         session.title,
         session.status,
-        session.player.as_deref().unwrap_or("-")
+        session.player.as_deref().unwrap_or(NOT_APPLICABLE)
     )
 }
 
@@ -280,8 +265,7 @@ fn stat_text(stat: &FileStat, now: SystemTime) -> String {
         FileStat::Present { len, modified } => {
             format!("{len}, modified {}", modified_text(*modified, now))
         }
-        FileStat::Missing => "missing".to_owned(),
-        FileStat::Unreadable(kind) => format!("unreadable: {kind}"),
+        other => size_text(other),
     }
 }
 
@@ -310,17 +294,6 @@ pub fn copy_to_clipboard(text: &str) -> String {
         Err(err) => {
             warn!(%err, "clipboard write failed");
             format!("Copy failed: {err}")
-        }
-    }
-}
-
-/// Opens `root` in Explorer and describes the outcome for the page.
-pub fn open_folder(root: &Path) -> String {
-    match Process::new("explorer").arg(root).spawn() {
-        Ok(_) => "Opened data folder".to_owned(),
-        Err(err) => {
-            warn!(%err, path = %root.display(), "could not open the data folder");
-            format!("Could not open folder: {err}")
         }
     }
 }
@@ -363,10 +336,8 @@ pub fn page(
         Some(FOLDER_GLYPH),
         &core.data_dir.display().to_string(),
         format!(
-            "{} · Ryuuji {} · {} build",
-            source_text(core.data_dir_source),
-            report.app.version,
-            report.app.profile
+            "{} · Ryuuji {APP_VERSION} · {BUILD_PROFILE} build",
+            source_text(core.data_dir_source)
         ),
         button("Open folder").on_click(open).into(),
     );
@@ -397,7 +368,7 @@ pub fn page(
         vstack((
             actions_row,
             vstack((section("Data directory"), directory_card)).spacing(8.0),
-            vstack((section("Files"), files_card(core))).spacing(8.0),
+            vstack((section("Files"), files_card(core, report.now))).spacing(8.0),
             vstack((section("Playback"), playback_card)).spacing(8.0),
             vstack((section("Media sessions"), sessions_card(&report.sessions))).spacing(8.0),
             vstack((events_header, events_card(report, filter))).spacing(8.0),
@@ -409,17 +380,13 @@ pub fn page(
 }
 
 fn level_picker(filter: EventLevelFilter, set_filter: SetState<EventLevelFilter>) -> ComboBox {
-    ComboBox::new(EventLevelFilter::ALL.map(EventLevelFilter::label))
-        .selected_index(selected_index(filter))
-        .on_selection_changed(move |index: i32| {
-            let chosen = usize::try_from(index)
-                .ok()
-                .and_then(|index| EventLevelFilter::ALL.get(index));
-            if let Some(chosen) = chosen {
-                set_filter.call(*chosen);
-            }
-        })
-        .min_width(200.0)
+    enum_picker(
+        &EventLevelFilter::ALL,
+        EventLevelFilter::label,
+        filter,
+        move |chosen| set_filter.call(chosen),
+    )
+    .min_width(200.0)
 }
 
 /// One line of the Files table.
@@ -449,25 +416,17 @@ impl FileRow {
         }
     }
 
-    fn cells(self, row: i32) -> [Element; 4] {
+    fn cells(self) -> [TextBlock; 4] {
         [
-            text_block(self.name)
-                .selectable()
-                .grid_row(row)
-                .grid_column(0)
-                .into(),
-            text_block(self.size).grid_row(row).grid_column(1).into(),
-            text_block(self.modified)
-                .grid_row(row)
-                .grid_column(2)
-                .into(),
-            text_block(self.note).grid_row(row).grid_column(3).into(),
+            text_block(self.name).selectable(),
+            text_block(self.size),
+            text_block(self.modified),
+            text_block(self.note),
         ]
     }
 }
 
-fn files_card(core: &Diagnostics) -> Border {
-    let now = SystemTime::now();
+fn files_card(core: &Diagnostics, now: SystemTime) -> Border {
     let root = core.data_dir.as_path();
     let log = match &core.current_log {
         Some(facts) => FileRow::of(facts, root, "current log".to_owned(), now),
@@ -483,28 +442,16 @@ fn files_card(core: &Diagnostics) -> Border {
         FileRow::of(&core.settings, root, NOT_APPLICABLE.to_owned(), now),
         log,
     ];
-    let header = ["Name", "Size", "Modified", "Note"]
-        .into_iter()
-        .enumerate()
-        .map(|(column, title)| caption(title).grid_row(0).grid_column(column as i32).into());
-    let cells: Vec<Element> = header
-        .chain(
-            rows.into_iter()
-                .enumerate()
-                .flat_map(|(index, row)| row.cells(index as i32 + 1)),
-        )
-        .collect();
     card_frame(
-        grid(cells)
-            .rows(std::iter::repeat_n(GridLength::Auto, 4))
-            .columns([
-                GridLength::STAR,
-                GridLength::Auto,
-                GridLength::Auto,
-                GridLength::Auto,
-            ])
-            .row_spacing(6.0)
-            .column_spacing(16.0),
+        table([
+            GridLength::STAR,
+            GridLength::Auto,
+            GridLength::Auto,
+            GridLength::Auto,
+        ])
+        .spacing(6.0, 16.0)
+        .header(["Name", "Size", "Modified", "Note"])
+        .rows(rows.into_iter().map(FileRow::cells)),
     )
 }
 
@@ -516,52 +463,25 @@ fn sessions_card(sessions: &std::result::Result<Vec<SessionFacts>, String>) -> B
         Ok(sessions) => sessions,
         Err(err) => return card_frame(caption(format!("Detection unavailable: {err}"))),
     };
-    let header = ["App id", "Title", "Status", "Player"]
-        .into_iter()
-        .enumerate()
-        .map(|(column, title)| caption(title).grid_row(0).grid_column(column as i32).into());
-    let cells: Vec<Element> = header
-        .chain(
-            sessions
-                .iter()
-                .enumerate()
-                .flat_map(|(index, session)| session_cells(session, index as i32 + 1)),
-        )
-        .collect();
     card_frame(
-        grid(cells)
-            .rows(std::iter::repeat_n(GridLength::Auto, sessions.len() + 1))
-            .columns([
-                GridLength::Auto,
-                GridLength::STAR,
-                GridLength::Auto,
-                GridLength::Auto,
-            ])
-            .row_spacing(6.0)
-            .column_spacing(16.0),
+        table([
+            GridLength::Auto,
+            GridLength::STAR,
+            GridLength::Auto,
+            GridLength::Auto,
+        ])
+        .spacing(6.0, 16.0)
+        .header(["App id", "Title", "Status", "Player"])
+        .rows(sessions.iter().map(session_cells)),
     )
 }
 
-fn session_cells(session: &SessionFacts, row: i32) -> [Element; 4] {
+fn session_cells(session: &SessionFacts) -> [TextBlock; 4] {
     [
-        mono(session.app_id.clone())
-            .selectable()
-            .grid_row(row)
-            .grid_column(0)
-            .into(),
-        text_block(session.title.clone())
-            .wrap()
-            .grid_row(row)
-            .grid_column(1)
-            .into(),
-        text_block(session.status.clone())
-            .grid_row(row)
-            .grid_column(2)
-            .into(),
-        text_block(session.player.as_deref().unwrap_or(NOT_APPLICABLE))
-            .grid_row(row)
-            .grid_column(3)
-            .into(),
+        mono(session.app_id.clone()).selectable(),
+        text_block(session.title.clone()).wrap(),
+        text_block(session.status.clone()),
+        text_block(session.player.as_deref().unwrap_or(NOT_APPLICABLE)),
     ]
 }
 
@@ -583,49 +503,26 @@ fn events_card(report: &Report, filter: EventLevelFilter) -> Border {
     if events.is_empty() {
         return card_frame(caption("Nothing at this level yet."));
     }
-    let row_count = events.len();
-    let cells: Vec<Element> = events
-        .into_iter()
-        .enumerate()
-        .flat_map(|(index, event)| event_cells(event, index as i32))
-        .collect();
     card_frame(
-        grid(cells)
-            .rows(std::iter::repeat_n(GridLength::Auto, row_count))
-            .columns([
-                GridLength::Auto,
-                GridLength::Auto,
-                GridLength::Auto,
-                GridLength::STAR,
-            ])
-            .row_spacing(4.0)
-            .column_spacing(12.0),
+        table([
+            GridLength::Auto,
+            GridLength::Auto,
+            GridLength::Auto,
+            GridLength::STAR,
+        ])
+        .spacing(4.0, 12.0)
+        .rows(events.into_iter().map(event_cells)),
     )
 }
 
-fn event_cells(event: &EventRecord, row: i32) -> [Element; 4] {
+fn event_cells(event: &EventRecord) -> [TextBlock; 4] {
     [
-        mono(clock(event.at))
-            .foreground(ThemeRef::SecondaryText)
-            .grid_row(row)
-            .grid_column(0)
-            .into(),
+        mono(clock(event.at)).foreground(ThemeRef::SecondaryText),
         mono(event.level.to_string())
             .semibold()
-            .foreground(level_brush(event.level))
-            .grid_row(row)
-            .grid_column(1)
-            .into(),
-        mono(event.target.clone())
-            .foreground(ThemeRef::SecondaryText)
-            .grid_row(row)
-            .grid_column(2)
-            .into(),
-        text_block(event.message.clone())
-            .wrap()
-            .grid_row(row)
-            .grid_column(3)
-            .into(),
+            .foreground(level_brush(event.level)),
+        mono(event.target.clone()).foreground(ThemeRef::SecondaryText),
+        text_block(event.message.clone()).wrap(),
     ]
 }
 
@@ -640,14 +537,6 @@ fn level_brush(level: Level) -> ThemeRef {
         Level::WARN => ThemeRef::SystemCaution,
         _ => ThemeRef::SecondaryText,
     }
-}
-
-fn selected_index(filter: EventLevelFilter) -> i32 {
-    EventLevelFilter::ALL
-        .iter()
-        .position(|candidate| *candidate == filter)
-        .and_then(|index| i32::try_from(index).ok())
-        .unwrap_or(-1)
 }
 
 #[cfg(test)]
@@ -768,7 +657,7 @@ mod tests {
         ));
         assert!(text.contains(
             "Media sessions:\n  mpv.exe | Sousou no Frieren - 01 | Playing | mpv\n  \
-             Spotify.exe |  | Paused | -\n"
+             Spotify.exe |  | Paused | \u{2014}\n"
         ));
         assert!(text.contains("Recent events (2):\n"));
         assert!(text.contains(" INFO  ryuuji_core::store info event\n"));

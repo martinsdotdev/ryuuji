@@ -46,28 +46,24 @@ impl Component for Shell {
             Err(err) => return pages::boot_failed(err, &self.dir),
         };
 
-        // Runs once, during the first render: the host only accepts theme
-        // requests while rendering, and this lands before the first commit.
-        cx.use_memo((), {
-            let theme = core.borrow().state().settings.theme;
-            move || set_requested_theme(requested_theme(theme))
-        });
-
         let (state, dispatch) = cx.use_reducer_fn(
             {
                 let core = core.clone();
                 move |_prev: AppState, command: Command| {
-                    let before = core.borrow().state().settings.theme;
                     core.borrow_mut().dispatch(command);
-                    let state = core.borrow().state().clone();
-                    if state.settings.theme != before {
-                        set_requested_theme(requested_theme(state.settings.theme));
-                    }
-                    state
+                    core.borrow().state().clone()
                 }
             },
             core.borrow().state().clone(),
         );
+        // A memo, not an effect: the host only accepts theme requests while
+        // rendering, and d72b518 recorded a post-commit effect painting the
+        // first frame in the system theme. Keyed on the preference, so it
+        // fires on the first render and on every change after it.
+        let theme = state.settings.theme;
+        cx.use_memo(theme, move || {
+            set_requested_theme(requested_theme(theme));
+        });
         // The watcher lives for the Shell's life; process exit ends its worker.
         let (latest, set_latest) = cx.use_async_state::<Option<PlaybackEvent>>(None);
         let watcher: Rc<Result<Watcher, WatchError>> = cx.use_memo((), move || {
