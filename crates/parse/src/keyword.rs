@@ -1,5 +1,5 @@
-//! The keyword table: fixed terms the parser recognises and the flags that
-//! control how each behaves. The table ships embedded in the binary.
+//! The keyword table: fixed terms the parser recognises and the properties
+//! that control how each behaves. The table ships embedded in the binary.
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -32,8 +32,6 @@ pub(crate) enum TableError {
     Parse(#[source] toml::de::Error),
     #[error("unknown element kind {kind:?}")]
     UnknownKind { kind: String },
-    #[error("unknown flags {flags:?}")]
-    UnknownFlags { flags: String },
     #[error("empty value under kind {kind:?}")]
     EmptyValue { kind: String },
     #[error("keyword {value:?} is not upper-case")]
@@ -43,6 +41,7 @@ pub(crate) enum TableError {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Document {
     #[serde(default)]
     keyword: Vec<KeywordGroup>,
@@ -51,16 +50,27 @@ struct Document {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct KeywordGroup {
     kind: String,
-    flags: String,
+    #[serde(default = "default_true")]
+    identifiable: bool,
+    #[serde(default = "default_true")]
+    searchable: bool,
+    #[serde(default = "default_true")]
+    valid: bool,
     values: Vec<String>,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PreidentifiedEntry {
     text: String,
     kind: String,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn parse_kind(label: &str) -> Result<ElementKind, TableError> {
@@ -84,14 +94,6 @@ impl KeywordTable {
         let mut by_text: HashMap<String, Vec<Keyword>> = HashMap::new();
         for group in document.keyword {
             let kind = parse_kind(&group.kind)?;
-            let (identifiable, searchable, valid) = match group.flags.as_str() {
-                "default" => (true, true, true),
-                "invalid" => (true, true, false),
-                "unidentifiable" => (false, true, true),
-                "unidentifiable_invalid" => (false, true, false),
-                "unidentifiable_unsearchable" => (false, false, true),
-                _ => return Err(TableError::UnknownFlags { flags: group.flags }),
-            };
             for value in group.values {
                 if value.is_empty() {
                     return Err(TableError::EmptyValue { kind: group.kind });
@@ -108,9 +110,9 @@ impl KeywordTable {
                 }
                 entries.push(Keyword {
                     kind,
-                    identifiable,
-                    searchable,
-                    valid,
+                    identifiable: group.identifiable,
+                    searchable: group.searchable,
+                    valid: group.valid,
                 });
             }
         }
@@ -136,10 +138,14 @@ impl KeywordTable {
             .find(|keyword| keyword.kind == kind)
     }
 
-    /// The first keyword for this text in table order; a value listed under
-    /// two kinds resolves to whichever group appears first in keywords.toml.
-    pub(crate) fn find_any(&self, upper: &str) -> Option<Keyword> {
-        self.by_text.get(upper)?.first().copied()
+    /// The keyword the keyword pass may match this text against; a value
+    /// listed under two kinds is searchable under at most one of them.
+    pub(crate) fn find_searchable(&self, upper: &str) -> Option<Keyword> {
+        self.by_text
+            .get(upper)?
+            .iter()
+            .copied()
+            .find(|keyword| keyword.searchable)
     }
 
     pub(crate) fn preidentified(&self) -> &[(String, ElementKind)] {
@@ -170,10 +176,12 @@ mod tests {
     }
 
     #[test]
-    fn duplicated_text_keeps_both_kinds_in_table_order() {
+    fn duplicated_text_keeps_both_kinds() {
         let table = KeywordTable::builtin();
         assert_eq!(
-            table.find_any("TS").map(|keyword| keyword.kind),
+            table
+                .find(ElementKind::FileExtension, "TS")
+                .map(|keyword| keyword.kind),
             Some(ElementKind::FileExtension)
         );
         assert_eq!(
@@ -183,9 +191,29 @@ mod tests {
             Some(ElementKind::Other)
         );
         assert_eq!(
-            table.find_any("FLAC").map(|keyword| keyword.kind),
+            table.find_searchable("TS").map(|keyword| keyword.kind),
+            Some(ElementKind::Other)
+        );
+        assert_eq!(
+            table.find_searchable("ASS").map(|keyword| keyword.kind),
+            Some(ElementKind::Subtitles)
+        );
+        assert_eq!(
+            table.find_searchable("FLAC").map(|keyword| keyword.kind),
             Some(ElementKind::AudioTerm)
         );
+    }
+
+    #[test]
+    fn no_text_is_searchable_under_two_kinds() {
+        let table = KeywordTable::builtin();
+        for (text, keywords) in &table.by_text {
+            let searchable = keywords.iter().filter(|keyword| keyword.searchable).count();
+            assert!(
+                searchable <= 1,
+                "{text:?} is searchable under {searchable} kinds"
+            );
+        }
     }
 
     #[test]
@@ -196,36 +224,35 @@ mod tests {
 
     #[test]
     fn unknown_kind_is_rejected() {
-        let text = "[[keyword]]\nkind = \"nope\"\nflags = \"default\"\nvalues = [\"X\"]\n";
+        let text = "[[keyword]]\nkind = \"nope\"\nvalues = [\"X\"]\n";
         let error = KeywordTable::parse(text).unwrap_err();
         assert!(matches!(error, TableError::UnknownKind { kind } if kind == "nope"));
     }
 
     #[test]
-    fn unknown_flags_are_rejected() {
-        let text = "[[keyword]]\nkind = \"source\"\nflags = \"bogus\"\nvalues = [\"X\"]\n";
+    fn unknown_field_is_rejected() {
+        let text = "[[keyword]]\nkind = \"source\"\nflags = \"default\"\nvalues = [\"X\"]\n";
         let error = KeywordTable::parse(text).unwrap_err();
-        assert!(matches!(error, TableError::UnknownFlags { flags } if flags == "bogus"));
+        assert!(matches!(error, TableError::Parse(_)));
     }
 
     #[test]
     fn empty_value_is_rejected() {
-        let text = "[[keyword]]\nkind = \"source\"\nflags = \"default\"\nvalues = [\"\"]\n";
+        let text = "[[keyword]]\nkind = \"source\"\nvalues = [\"\"]\n";
         let error = KeywordTable::parse(text).unwrap_err();
         assert!(matches!(error, TableError::EmptyValue { kind } if kind == "source"));
     }
 
     #[test]
     fn lowercase_value_is_rejected() {
-        let text = "[[keyword]]\nkind = \"source\"\nflags = \"default\"\nvalues = [\"Bd\"]\n";
+        let text = "[[keyword]]\nkind = \"source\"\nvalues = [\"Bd\"]\n";
         let error = KeywordTable::parse(text).unwrap_err();
         assert!(matches!(error, TableError::NotUppercase { value } if value == "Bd"));
     }
 
     #[test]
     fn duplicate_value_under_one_kind_is_rejected() {
-        let text =
-            "[[keyword]]\nkind = \"source\"\nflags = \"default\"\nvalues = [\"BD\", \"BD\"]\n";
+        let text = "[[keyword]]\nkind = \"source\"\nvalues = [\"BD\", \"BD\"]\n";
         let error = KeywordTable::parse(text).unwrap_err();
         assert!(
             matches!(error, TableError::Duplicate { kind, value } if kind == "source" && value == "BD")

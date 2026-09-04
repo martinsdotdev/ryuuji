@@ -93,8 +93,10 @@ impl ElementKind {
             .find(|kind| kind.label() == label)
     }
 
-    pub(crate) fn is_multi_valued(self) -> bool {
-        matches!(
+    /// A singular kind holds one value per filename, so the keyword pass
+    /// stops looking once one is set.
+    pub(crate) fn is_singular(self) -> bool {
+        !matches!(
             self,
             ElementKind::AnimeSeason
                 | ElementKind::AnimeType
@@ -106,28 +108,6 @@ impl ElementKind {
                 | ElementKind::ReleaseInformation
                 | ElementKind::Source
                 | ElementKind::VideoTerm
-        )
-    }
-
-    pub(crate) fn is_searchable(self) -> bool {
-        matches!(
-            self,
-            ElementKind::AnimeSeasonPrefix
-                | ElementKind::AnimeType
-                | ElementKind::AudioTerm
-                | ElementKind::DeviceCompatibility
-                | ElementKind::EpisodePrefix
-                | ElementKind::FileChecksum
-                | ElementKind::Language
-                | ElementKind::Other
-                | ElementKind::ReleaseGroup
-                | ElementKind::ReleaseInformation
-                | ElementKind::ReleaseVersion
-                | ElementKind::Source
-                | ElementKind::Subtitles
-                | ElementKind::VideoResolution
-                | ElementKind::VideoTerm
-                | ElementKind::VolumePrefix
         )
     }
 }
@@ -175,12 +155,6 @@ impl Elements {
     pub fn insert(&mut self, kind: ElementKind, value: impl Into<String>) {
         let value = value.into();
         if value.is_empty() {
-            return;
-        }
-        if !kind.is_multi_valued()
-            && let Some(item) = self.items.iter_mut().find(|(k, _)| *k == kind)
-        {
-            item.1 = value;
             return;
         }
         self.items.push((kind, value));
@@ -257,24 +231,23 @@ mod tests {
     }
 
     #[test]
-    fn single_valued_insert_replaces() {
-        let mut elements = Elements::default();
-        elements.insert(ElementKind::VideoResolution, "720p");
-        elements.insert(ElementKind::VideoResolution, "1080p");
-        assert_eq!(elements.get(ElementKind::VideoResolution), Some("1080p"));
-        assert_eq!(elements.len(), 1);
-    }
-
-    #[test]
-    fn multi_valued_insert_keeps_both() {
+    fn insert_appends_for_every_kind() {
         let mut elements = Elements::default();
         elements.insert(ElementKind::AudioTerm, "FLAC");
         elements.insert(ElementKind::AudioTerm, "Dual Audio");
+        elements.insert(ElementKind::VideoResolution, "720p");
+        elements.insert(ElementKind::VideoResolution, "1080p");
         assert_eq!(
             elements.get_all(ElementKind::AudioTerm),
             ["FLAC", "Dual Audio"]
         );
         assert_eq!(elements.get(ElementKind::AudioTerm), Some("FLAC"));
+        assert_eq!(
+            elements.get_all(ElementKind::VideoResolution),
+            ["720p", "1080p"]
+        );
+        assert_eq!(elements.get(ElementKind::VideoResolution), Some("720p"));
+        assert_eq!(elements.len(), 4);
     }
 
     #[test]
