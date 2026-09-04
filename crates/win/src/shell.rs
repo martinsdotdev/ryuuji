@@ -1,5 +1,5 @@
 //! The app shell: a NavigationView whose pane lists the core's pages and whose
-//! content area renders whichever page is selected.
+//! content area renders the selected page, or the detail open over it.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -86,8 +86,8 @@ impl Component for Shell {
         let (filter, set_filter) = cx.use_state(EventLevelFilter::All);
         let (last_action, set_last_action) = cx.use_state(None::<String>);
         let (folder_action, set_folder_action) = cx.use_state(None::<String>);
-        let on_debug = state.page == Page::Debug;
-        let wants_timer = on_debug
+        let on_detail = state.detail.is_some();
+        let wants_timer = on_detail
             || (state.page == Page::NowPlaying
                 && matches!(state.now_playing, NowPlaying::Idle)
                 && state.last_match.is_some());
@@ -106,7 +106,7 @@ impl Component for Shell {
             }
         });
 
-        let menu_items = Page::NAV.into_iter().map(|page| {
+        let menu_items = Page::ALL.into_iter().map(|page| {
             NavViewItem::new(page.label())
                 .tag(page.tag())
                 .icon(icon_for(page))
@@ -150,24 +150,30 @@ impl Component for Shell {
             },
         );
 
-        let highlighted = if on_debug { Page::Settings } else { state.page };
         let back = {
             let dispatch = dispatch.clone();
-            move || dispatch.call(Command::SelectPage(Page::Settings))
+            move || dispatch.call(Command::CloseDetail)
+        };
+        let header = match state.detail {
+            Some(detail) => detail.label(),
+            None => state.page.label(),
         };
 
         NavigationView::new(menu_items, body)
-            .header(state.page.label())
-            .selected_tag(highlighted.tag())
+            .header(header)
+            .selected_tag(state.page.tag())
             .on_selection_changed(move |tag: String| {
                 if let Some(page) = Page::from_tag(&tag) {
                     dispatch.call(Command::SelectPage(page));
                 }
             })
-            // The toolkit only pushes IsBackButtonVisible when it is false, so
-            // a later `true` never re-shows the arrow; keep it visible and gate
-            // it through `back_enabled` instead.
-            .back_enabled(on_debug)
+            // A collapsed back button reserves no layout space, so toggling
+            // visibility would shift the pane under the pointer; Microsoft's
+            // guidance is to leave the arrow up and disable it instead, "to
+            // minimize UI elements moving around". The toolkit forces the same
+            // shape anyway: it only pushes IsBackButtonVisible when it is
+            // false, so a later `true` never re-shows the arrow.
+            .back_enabled(on_detail)
             .on_back_requested(back)
             .pane_display_mode(NavigationViewPaneDisplayMode::Left)
             // Settings is one of our own pages so it routes like the others.
@@ -189,6 +195,5 @@ fn icon_for(page: Page) -> Symbol {
         Page::Library => Symbol::Library,
         Page::NowPlaying => Symbol::Play,
         Page::Settings => Symbol::Setting,
-        Page::Debug => Symbol::Repair,
     }
 }

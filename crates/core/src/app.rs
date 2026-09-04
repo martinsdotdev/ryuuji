@@ -61,7 +61,12 @@ impl Ryuuji {
 
     pub fn dispatch(&mut self, command: Command) {
         match command {
-            Command::SelectPage(page) => self.state.page = page,
+            Command::SelectPage(page) => {
+                self.state.page = page;
+                self.state.detail = None;
+            }
+            Command::OpenDetail(detail) => self.state.detail = Some(detail),
+            Command::CloseDetail => self.state.detail = None,
             Command::SetTheme(theme) => self.set_theme(theme),
             Command::DismissNotice => {
                 if !self.state.notices.is_empty() {
@@ -247,7 +252,7 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     use super::*;
-    use crate::{EntryId, Page, PlaybackSource};
+    use crate::{Detail, EntryId, Page, PlaybackSource};
 
     fn open_tmp() -> (tempfile::TempDir, DataDir) {
         let tmp = tempfile::tempdir().unwrap();
@@ -331,6 +336,26 @@ mod tests {
     }
 
     #[test]
+    fn detail_opens_over_the_page_and_closes_on_back_or_selection() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::SelectPage(Page::Settings));
+
+        app.dispatch(Command::OpenDetail(Detail::Diagnostics));
+        assert_eq!(app.state().detail, Some(Detail::Diagnostics));
+        assert_eq!(app.state().page, Page::Settings);
+
+        app.dispatch(Command::CloseDetail);
+        assert_eq!(app.state().detail, None);
+        assert_eq!(app.state().page, Page::Settings);
+
+        app.dispatch(Command::OpenDetail(Detail::Diagnostics));
+        app.dispatch(Command::SelectPage(Page::Library));
+        assert_eq!(app.state().detail, None);
+        assert_eq!(app.state().page, Page::Library);
+    }
+
+    #[test]
     fn select_page_changes_only_the_page() {
         let (_tmp, dir) = open_tmp();
         let mut app = Ryuuji::open(&dir).unwrap();
@@ -340,6 +365,7 @@ mod tests {
         app.dispatch(Command::SelectPage(Page::Settings));
         let after = app.state();
         assert_eq!(after.page, Page::Settings);
+        assert_eq!(after.detail, before.detail);
         assert_eq!(after.library, before.library);
         assert_eq!(after.now_playing, before.now_playing);
         assert_eq!(after.settings, before.settings);
