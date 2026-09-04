@@ -7,9 +7,7 @@ use rusqlite::{Connection, OptionalExtension, Row, ToSql, params};
 use rusqlite_migration::Migrations;
 use tracing::{debug, info, info_span, warn};
 
-use crate::{
-    Confidence, DataDir, EntryId, LibraryEntry, MatchOutcome, NewEntry, ProposedMatch, WatchStatus,
-};
+use crate::{Confidence, DataDir, EntryId, LibraryEntry, NewEntry, ProposedMatch, WatchStatus};
 
 /// The schema, compiled in from `migrations/`, one numbered directory per
 /// version.
@@ -257,14 +255,9 @@ impl Store {
         let _span = info_span!("store.save_last_match").entered();
         self.conn
             .execute(
-                "INSERT INTO last_match (id, raw_title, parsed_title, episode, season, \
-                 release_group, entry_id, confidence, outcome, player, at) \
-                 VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
-                 ON CONFLICT(id) DO UPDATE SET raw_title=excluded.raw_title, \
-                 parsed_title=excluded.parsed_title, episode=excluded.episode, \
-                 season=excluded.season, release_group=excluded.release_group, \
-                 entry_id=excluded.entry_id, confidence=excluded.confidence, \
-                 outcome=excluded.outcome, player=excluded.player, at=excluded.at",
+                "INSERT OR REPLACE INTO last_match (id, raw_title, parsed_title, episode, \
+                 season, release_group, entry_id, confidence, player, at) \
+                 VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     m.raw_title,
                     m.parsed_title,
@@ -273,7 +266,6 @@ impl Store {
                     m.release_group,
                     m.entry.map(EntryId::as_i64),
                     m.confidence.tag(),
-                    m.outcome.tag(),
                     m.player,
                     unix_secs(m.at),
                 ],
@@ -283,14 +275,13 @@ impl Store {
         Ok(())
     }
 
-    /// The stored last match, if any. Its `elements` are always empty; they
-    /// live only in memory.
+    /// The stored last match, if any.
     pub fn last_match(&self) -> Result<Option<ProposedMatch>, StoreError> {
         let _span = info_span!("store.last_match").entered();
         self.conn
             .query_row(
                 "SELECT raw_title, parsed_title, episode, season, release_group, \
-                 entry_id, confidence, outcome, player, at \
+                 entry_id, confidence, player, at \
                  FROM last_match WHERE id = 1",
                 [],
                 RawLastMatch::read,
@@ -417,7 +408,6 @@ struct RawLastMatch {
     release_group: Option<String>,
     entry_id: Option<i64>,
     confidence: String,
-    outcome: String,
     player: String,
     at: i64,
 }
@@ -432,9 +422,8 @@ impl RawLastMatch {
             release_group: row.get(4)?,
             entry_id: row.get(5)?,
             confidence: row.get(6)?,
-            outcome: row.get(7)?,
-            player: row.get(8)?,
-            at: row.get(9)?,
+            player: row.get(7)?,
+            at: row.get(8)?,
         })
     }
 
@@ -457,11 +446,9 @@ impl RawLastMatch {
             entry: self.entry_id.map(EntryId),
             confidence: Confidence::from_tag(&self.confidence)
                 .ok_or_else(|| invalid("confidence"))?,
-            outcome: MatchOutcome::from_tag(&self.outcome).ok_or_else(|| invalid("outcome"))?,
             player: self.player,
             at: UNIX_EPOCH
                 + Duration::from_secs(u64::try_from(self.at).map_err(|_| invalid("at"))?),
-            elements: Vec::new(),
         })
     }
 }
@@ -526,13 +513,13 @@ mod tests {
     }
 
     #[test]
-    fn open_creates_the_database_at_schema_v2_without_recovery() {
+    fn open_creates_the_database_at_schema_v3_without_recovery() {
         let (_tmp, dir) = open_tmp();
         let store = open(&dir);
         assert!(dir.root().join("library.sqlite").is_file());
-        assert_eq!(schema_version(&store), SchemaVersion(2));
+        assert_eq!(schema_version(&store), SchemaVersion(3));
         drop(store);
-        assert_eq!(schema_version(&open(&dir)), SchemaVersion(2));
+        assert_eq!(schema_version(&open(&dir)), SchemaVersion(3));
     }
 
     #[test]
@@ -559,7 +546,7 @@ mod tests {
         let recovered = recovered.expect("recovery reported");
         assert_backup_name(&backup_name(&recovered));
         assert_eq!(fs::read(&recovered.backup).unwrap(), garbage);
-        assert_eq!(schema_version(&store), SchemaVersion(2));
+        assert_eq!(schema_version(&store), SchemaVersion(3));
         assert_eq!(store.entries().unwrap(), vec![]);
         drop(store);
 
@@ -656,22 +643,13 @@ mod tests {
             release_group: Some("Subs".into()),
             entry: None,
             confidence: Confidence::Unmatched,
-            outcome: MatchOutcome::Proposed,
             player: "mpv".into(),
             at: UNIX_EPOCH + Duration::from_secs(1_700_000_000),
-            elements: vec![("file_name".into(), raw.into())],
-        }
-    }
-
-    fn stored(m: &ProposedMatch) -> ProposedMatch {
-        ProposedMatch {
-            elements: Vec::new(),
-            ..m.clone()
         }
     }
 
     #[test]
-    fn v1_library_migrates_to_v2_and_keeps_entries() {
+    fn v1_library_migrates_to_v3_and_keeps_entries() {
         let (_tmp, dir) = open_tmp();
         let conn = Connection::open(dir.library_db()).unwrap();
         conn.execute_batch(include_str!("../migrations/01-entries/up.sql"))
@@ -686,13 +664,37 @@ mod tests {
         drop(conn);
 
         let store = open(&dir);
-        assert_eq!(schema_version(&store), SchemaVersion(2));
+        assert_eq!(schema_version(&store), SchemaVersion(3));
         let entries = store.entries().unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].title, "Show");
         assert_eq!(entries[0].progress, 3);
         assert_eq!(entries[0].total, Some(12));
         assert_eq!(store.last_match().unwrap(), None);
+    }
+
+    #[test]
+    fn v2_last_match_survives_the_outcome_drop() {
+        let (_tmp, dir) = open_tmp();
+        let conn = Connection::open(dir.library_db()).unwrap();
+        conn.execute_batch(include_str!("../migrations/01-entries/up.sql"))
+            .unwrap();
+        conn.execute_batch(include_str!("../migrations/02-last_match/up.sql"))
+            .unwrap();
+        conn.execute(
+            "INSERT INTO last_match (id, raw_title, parsed_title, episode, season, \
+             release_group, entry_id, confidence, outcome, player, at) \
+             VALUES (1, 'Show - 03.mkv', 'Show', 3, 2, 'Subs', NULL, 'unmatched', \
+             'proposed', 'mpv', 1700000000)",
+            [],
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 2).unwrap();
+        drop(conn);
+
+        let store = open(&dir);
+        assert_eq!(schema_version(&store), SchemaVersion(3));
+        assert_eq!(store.last_match().unwrap(), Some(proposed("Show - 03.mkv")));
     }
 
     #[test]
@@ -721,7 +723,7 @@ mod tests {
             ..proposed("second.mkv")
         };
         store.save_last_match(&second).unwrap();
-        assert_eq!(store.last_match().unwrap(), Some(stored(&second)));
+        assert_eq!(store.last_match().unwrap(), Some(second));
         let rows: i64 = store
             .conn
             .query_row("SELECT COUNT(*) FROM last_match", [], |row| row.get(0))
@@ -736,7 +738,7 @@ mod tests {
         let m = proposed("Show - 03.mkv");
         store.save_last_match(&m).unwrap();
         drop(store);
-        assert_eq!(open(&dir).last_match().unwrap(), Some(stored(&m)));
+        assert_eq!(open(&dir).last_match().unwrap(), Some(m));
     }
 
     #[test]

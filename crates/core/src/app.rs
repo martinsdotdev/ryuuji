@@ -170,11 +170,7 @@ impl Ryuuji {
         else {
             return;
         };
-        let title = if last.parsed_title.is_empty() {
-            last.raw_title.clone()
-        } else {
-            last.parsed_title.clone()
-        };
+        let title = last.shown_title().to_owned();
         let outcome = self.store.add(NewEntry {
             title,
             status: WatchStatus::Watching,
@@ -251,7 +247,7 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     use super::*;
-    use crate::{EntryId, MatchOutcome, Page, PlaybackSource};
+    use crate::{EntryId, Page, PlaybackSource};
 
     fn open_tmp() -> (tempfile::TempDir, DataDir) {
         let tmp = tempfile::tempdir().unwrap();
@@ -526,17 +522,10 @@ mod tests {
         assert_eq!(original.raw_title, "Show - 03.mkv");
         assert_eq!(original.player, "mpv");
         assert_eq!(original.at, SystemTime::UNIX_EPOCH);
-        assert_eq!(original.outcome, MatchOutcome::Proposed);
         drop(app);
 
         let reopened = Ryuuji::open(&dir).unwrap();
-        assert_eq!(
-            reopened.state().last_match,
-            Some(ProposedMatch {
-                elements: Vec::new(),
-                ..original
-            })
-        );
+        assert_eq!(reopened.state().last_match, Some(original));
     }
 
     #[test]
@@ -631,13 +620,7 @@ mod tests {
 
         let reopened = Ryuuji::open(&dir).unwrap();
         assert_eq!(reopened.state().library, added);
-        assert_eq!(
-            reopened.state().last_match,
-            Some(ProposedMatch {
-                elements: Vec::new(),
-                ..relinked
-            })
-        );
+        assert_eq!(reopened.state().last_match, Some(relinked));
     }
 
     #[test]
@@ -744,7 +727,6 @@ mod tests {
 
         drop(app);
         let reopened = Ryuuji::open(&dir).unwrap();
-        // `elements` is memory-only, so compare what the row actually holds.
         let stored = reopened.state().last_match.clone().unwrap();
         assert_eq!(stored.entry, Some(id));
         assert_eq!(stored.confidence, Confidence::Exact);
