@@ -222,7 +222,10 @@ fn levenshtein(a: &[char], b: &[char]) -> usize {
 }
 
 /// The matching decision for an already-parsed title.
-fn resolve(parsed_title: &str, library: &[LibraryEntry]) -> (Option<EntryId>, Confidence) {
+pub(crate) fn resolve(
+    parsed_title: &str,
+    library: &[LibraryEntry],
+) -> (Option<EntryId>, Confidence) {
     let needle = normalize_title(parsed_title);
     if needle.is_empty() {
         return (None, Confidence::Unmatched);
