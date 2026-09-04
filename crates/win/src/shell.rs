@@ -80,7 +80,6 @@ impl Component for Shell {
         });
         let (filter, set_filter) = cx.use_state(EventLevelFilter::All);
         let (last_action, set_last_action) = cx.use_state(None::<String>);
-        let (folder_action, set_folder_action) = cx.use_state(None::<String>);
         let on_detail = state.detail.is_some();
         let wants_timer = on_detail
             || (state.page == Page::NowPlaying
@@ -102,8 +101,6 @@ impl Component for Shell {
             pages::Env {
                 detection_down,
                 now: SystemTime::now(),
-                folder_action,
-                set_folder_action,
             },
             {
                 let core = core.clone();
