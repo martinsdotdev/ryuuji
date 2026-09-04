@@ -1,7 +1,7 @@
 use super::Parser;
 use crate::element::ElementKind;
 use crate::string;
-use crate::token::{self, Token, TokenCategory};
+use crate::token::{self, TokenCategory};
 
 const ANIME_YEAR_MIN: u32 = 1900;
 const ANIME_YEAR_MAX: u32 = 2050;
@@ -11,7 +11,7 @@ const VOLUME_NUMBER_MAX: u32 = 20;
 /// A number counted off against a prefix. Episodes and volumes differ only in
 /// their bounds and in whether a second number retags the first.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum Extent {
+pub(in crate::parser) enum Extent {
     Episode,
     Volume,
 }
@@ -46,89 +46,17 @@ impl Extent {
     }
 }
 
-struct Scanner<'a> {
-    chars: &'a [char],
-    pos: usize,
-}
-
-impl<'a> Scanner<'a> {
-    fn new(chars: &'a [char]) -> Scanner<'a> {
-        Scanner { chars, pos: 0 }
-    }
-
-    fn peek(&self) -> Option<char> {
-        self.chars.get(self.pos).copied()
-    }
-
-    fn eat(&mut self, expected: char) -> bool {
-        if self.peek() == Some(expected) {
-            self.pos += 1;
-            true
-        } else {
-            false
-        }
-    }
-
-    fn eat_any(&mut self, options: &[char]) -> bool {
-        if self.peek().is_some_and(|c| options.contains(&c)) {
-            self.pos += 1;
-            true
-        } else {
-            false
-        }
-    }
-
-    fn digits(&mut self, max: usize) -> Option<String> {
-        let start = self.pos;
-        while self.pos - start < max && self.peek().is_some_and(|c| c.is_ascii_digit()) {
-            self.pos += 1;
-        }
-        (self.pos > start).then(|| self.chars[start..self.pos].iter().collect())
-    }
-
-    fn done(&self) -> bool {
-        self.pos == self.chars.len()
-    }
-
-    /// Runs `parse` and rewinds if it fails, so a partial match leaves the
-    /// cursor where it started.
-    fn attempt<T>(&mut self, parse: impl FnOnce(&mut Scanner<'a>) -> Option<T>) -> Option<T> {
-        let saved = self.pos;
-        let parsed = parse(self);
-        if parsed.is_none() {
-            self.pos = saved;
-        }
-        parsed
-    }
-}
+mod patterns;
+mod scanner;
 
 /// A digit run that overflows `u32` compares as larger than every bound, so
 /// the validation checks reject it.
-fn leading_value(text: &str) -> u32 {
+pub(super) fn leading_value(text: &str) -> u32 {
     string::leading_number(text).unwrap_or(u32::MAX)
 }
 
-fn version(scanner: &mut Scanner) -> Option<String> {
-    scanner.attempt(|scanner| {
-        scanner
-            .eat_any(&['v', 'V'])
-            .then(|| scanner.digits(1))
-            .flatten()
-    })
-}
-
-fn eat_episode_separator(scanner: &mut Scanner) -> bool {
-    let separated = scanner
-        .attempt(|scanner| {
-            (scanner.eat_any(&[' ', '.', '_', '-', 'x', 'X']) && scanner.eat_any(&['E', 'e']))
-                .then_some(())
-        })
-        .is_some();
-    separated || scanner.eat_any(&['E', 'e', 'x', 'X'])
-}
-
 impl Parser<'_> {
-    pub(super) fn search_isolated_numbers(&mut self) {
+    pub(in crate::parser) fn search_isolated_numbers(&mut self) {
         for index in 0..self.tokens.len() {
             if self.tokens[index].category != TokenCategory::Unknown
                 || !string::is_numeric(&self.tokens[index].content)
@@ -157,7 +85,7 @@ impl Parser<'_> {
         }
     }
 
-    pub(super) fn search_episode_number(&mut self) {
+    pub(in crate::parser) fn search_episode_number(&mut self) {
         let candidates: Vec<usize> = (0..self.tokens.len())
             .filter(|&index| {
                 self.tokens[index].category == TokenCategory::Unknown
@@ -197,7 +125,7 @@ impl Parser<'_> {
         self.search_last_number(&numeric);
     }
 
-    fn is_isolated(&self, index: usize) -> bool {
+    pub(super) fn is_isolated(&self, index: usize) -> bool {
         let is_bracket = |index: Option<usize>| {
             index.is_some_and(|index| self.tokens[index].category == TokenCategory::Bracket)
         };
@@ -275,225 +203,6 @@ impl Parser<'_> {
         self.tokens[other].category = TokenCategory::Identifier;
         true
     }
-
-    fn match_patterns(&mut self, extent: Extent, word: &str, index: usize) -> bool {
-        if string::is_numeric(word) {
-            return false;
-        }
-        let word = word.trim_matches([' ', '-']);
-        if word.is_empty() {
-            return false;
-        }
-        let chars: Vec<char> = word.chars().collect();
-        if self.match_single(extent, &chars, index) || self.match_multi(extent, &chars, index) {
-            return true;
-        }
-        if extent == Extent::Volume {
-            return false;
-        }
-        self.match_season_and_episode(&chars, index)
-            || self.match_type_and_episode(word, index)
-            || self.match_fractional_episode(&chars, word, index)
-            || self.match_partial_episode(&chars, word, index)
-            || self.match_number_sign(&chars, index)
-            || self.match_japanese_counter(&chars, index)
-    }
-
-    fn match_single(&mut self, extent: Extent, chars: &[char], index: usize) -> bool {
-        let mut scanner = Scanner::new(chars);
-        let Some(number) = scanner.digits(extent.max_digits()) else {
-            return false;
-        };
-        if !scanner.eat_any(&['v', 'V']) {
-            return false;
-        }
-        let Some(release_version) = scanner.digits(1) else {
-            return false;
-        };
-        if !scanner.done() {
-            return false;
-        }
-        self.set_number(extent, &number, index, false);
-        self.elements
-            .insert(ElementKind::ReleaseVersion, release_version);
-        true
-    }
-
-    fn match_multi(&mut self, extent: Extent, chars: &[char], index: usize) -> bool {
-        let mut scanner = Scanner::new(chars);
-        let Some(lower) = scanner.digits(extent.max_digits()) else {
-            return false;
-        };
-        // Only an episode range carries a version on its lower bound.
-        let lower_version = match extent {
-            Extent::Episode => version(&mut scanner),
-            Extent::Volume => None,
-        };
-        if !scanner.eat_any(&['-', '~', '&', '+']) {
-            return false;
-        }
-        let Some(upper) = scanner.digits(extent.max_digits()) else {
-            return false;
-        };
-        let upper_version = version(&mut scanner);
-        if !scanner.done() {
-            return false;
-        }
-        if leading_value(&lower) >= leading_value(&upper) {
-            return false;
-        }
-        if !self.set_number(extent, &lower, index, true) {
-            return false;
-        }
-        self.set_number(extent, &upper, index, false);
-        for value in [lower_version, upper_version].into_iter().flatten() {
-            self.elements.insert(ElementKind::ReleaseVersion, value);
-        }
-        true
-    }
-
-    fn match_season_and_episode(&mut self, chars: &[char], index: usize) -> bool {
-        let mut scanner = Scanner::new(chars);
-        scanner.eat_any(&['S', 's']);
-        let Some(first_season) = scanner.digits(2) else {
-            return false;
-        };
-        let second_season = scanner.attempt(|scanner| {
-            scanner.eat('-').then(|| {
-                scanner.eat_any(&['S', 's']);
-                scanner.digits(2)
-            })?
-        });
-        if !eat_episode_separator(&mut scanner) {
-            return false;
-        }
-        let Some(first_episode) = scanner.digits(4) else {
-            return false;
-        };
-        let second_episode = scanner.attempt(|scanner| {
-            scanner.eat('-').then(|| {
-                scanner.eat_any(&['E', 'e']);
-                scanner.digits(4)
-            })?
-        });
-        version(&mut scanner);
-        if !scanner.done() {
-            return false;
-        }
-        if leading_value(&first_season) == 0 {
-            return false;
-        }
-        self.elements.insert(ElementKind::AnimeSeason, first_season);
-        if let Some(season) = second_season {
-            self.elements.insert(ElementKind::AnimeSeason, season);
-        }
-        self.set_number(Extent::Episode, &first_episode, index, false);
-        if let Some(episode) = second_episode {
-            self.set_number(Extent::Episode, &episode, index, false);
-        }
-        true
-    }
-
-    fn match_type_and_episode(&mut self, word: &str, index: usize) -> bool {
-        let Some(digit_pos) = word.find(|c: char| c.is_ascii_digit()) else {
-            return false;
-        };
-        let prefix = &word[..digit_pos];
-        let Some(keyword) = self
-            .table
-            .find(ElementKind::AnimeType, &prefix.to_uppercase())
-        else {
-            return false;
-        };
-        let prefix = prefix.to_owned();
-        let number = word[digit_pos..].to_owned();
-        self.elements.insert(ElementKind::AnimeType, prefix.clone());
-        if self.claim_number(Extent::Episode, &number, index) {
-            let enclosed = self.tokens[index].enclosed;
-            self.tokens[index].content = number;
-            self.tokens.insert(
-                index,
-                Token {
-                    category: if keyword.identifiable {
-                        TokenCategory::Identifier
-                    } else {
-                        TokenCategory::Unknown
-                    },
-                    content: prefix,
-                    enclosed,
-                    kind: None,
-                },
-            );
-            return true;
-        }
-        false
-    }
-
-    fn match_fractional_episode(&mut self, chars: &[char], word: &str, index: usize) -> bool {
-        let mut scanner = Scanner::new(chars);
-        if scanner.digits(usize::MAX).is_none()
-            || !scanner.eat('.')
-            || !scanner.eat('5')
-            || !scanner.done()
-        {
-            return false;
-        }
-        self.set_number(Extent::Episode, word, index, true)
-    }
-
-    fn match_partial_episode(&mut self, chars: &[char], word: &str, index: usize) -> bool {
-        let digits = chars.iter().take_while(|c| c.is_ascii_digit()).count();
-        let suffix = &chars[digits..];
-        if suffix.len() == 1 && matches!(suffix[0], 'A'..='C' | 'a'..='c') {
-            return self.set_number(Extent::Episode, word, index, true);
-        }
-        false
-    }
-
-    fn match_number_sign(&mut self, chars: &[char], index: usize) -> bool {
-        if chars.first() != Some(&'#') {
-            return false;
-        }
-        let mut scanner = Scanner::new(&chars[1..]);
-        let Some(first) = scanner.digits(4) else {
-            return false;
-        };
-        let second = scanner.attempt(|scanner| {
-            scanner
-                .eat_any(&['-', '~', '&', '+'])
-                .then(|| scanner.digits(4))?
-        });
-        let release_version = version(&mut scanner);
-        if !scanner.done() {
-            return false;
-        }
-        if !self.set_number(Extent::Episode, &first, index, true) {
-            return false;
-        }
-        if let Some(episode) = second {
-            self.set_number(Extent::Episode, &episode, index, true);
-        }
-        if let Some(value) = release_version {
-            self.elements.insert(ElementKind::ReleaseVersion, value);
-        }
-        true
-    }
-
-    fn match_japanese_counter(&mut self, chars: &[char], index: usize) -> bool {
-        if chars.last() != Some(&'話') {
-            return false;
-        }
-        let mut scanner = Scanner::new(chars);
-        let Some(episode) = scanner.digits(4) else {
-            return false;
-        };
-        if !scanner.eat('話') || !scanner.done() {
-            return false;
-        }
-        self.set_number(Extent::Episode, &episode, index, false);
-        true
-    }
-
     fn search_separated_numbers(&mut self, numeric: &[usize]) -> bool {
         for &index in numeric {
             let Some(prev) = token::find_prev(&self.tokens, index, token::is_not_delimiter) else {
@@ -551,7 +260,13 @@ impl Parser<'_> {
         false
     }
 
-    fn set_number(&mut self, extent: Extent, number: &str, index: usize, validate: bool) -> bool {
+    pub(super) fn set_number(
+        &mut self,
+        extent: Extent,
+        number: &str,
+        index: usize,
+        validate: bool,
+    ) -> bool {
         if validate && leading_value(number) > extent.max_value() {
             return false;
         }
@@ -578,7 +293,12 @@ impl Parser<'_> {
 
     /// Reads the number through the pattern matchers, falling back to taking
     /// it whole.
-    pub(super) fn claim_number(&mut self, extent: Extent, word: &str, index: usize) -> bool {
+    pub(in crate::parser) fn claim_number(
+        &mut self,
+        extent: Extent,
+        word: &str,
+        index: usize,
+    ) -> bool {
         self.match_patterns(extent, word, index) || self.set_number(extent, word, index, false)
     }
 }
