@@ -22,13 +22,10 @@ use crate::ui::{
 const PAGE_PADDING: f64 = 24.0;
 
 /// What the shell threads into the pages beyond the core state: whether the
-/// watcher came up, the render instant for relative ages, and the Settings
-/// folder-action outcome and its setter.
+/// watcher came up, and the render instant for relative ages.
 pub struct Env {
     pub detection_down: bool,
     pub now: SystemTime,
-    pub folder_action: Option<String>,
-    pub set_folder_action: SetState<Option<String>>,
 }
 
 /// Renders the notice bar and the body for the currently selected page.
@@ -51,12 +48,13 @@ pub fn render(
                 env.now,
                 dispatch.clone(),
             ),
-            Page::Settings => settings(
-                &state.settings,
-                dir,
-                dispatch.clone(),
-                env.folder_action,
-                env.set_folder_action,
+            Page::Settings => component(
+                settings,
+                SettingsProps {
+                    settings: state.settings.clone(),
+                    dir: dir.clone(),
+                    dispatch: dispatch.clone(),
+                },
             ),
         },
     };
@@ -305,13 +303,21 @@ fn duration_text(value: Duration) -> String {
     }
 }
 
-fn settings(
-    settings: &Settings,
-    dir: &DataDir,
+/// What Settings shows. The outcome of the last folder action is the page's
+/// own, so it lives in the page rather than in the shell.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SettingsProps {
+    settings: Settings,
+    dir: DataDir,
     dispatch: Dispatch<Command>,
-    folder_action: Option<String>,
-    set_folder_action: SetState<Option<String>>,
-) -> Element {
+}
+
+fn settings(props: &SettingsProps, cx: &mut RenderCx) -> Element {
+    let (folder_action, set_folder_action) = cx.use_state(None::<String>);
+
+    let settings = &props.settings;
+    let dir = &props.dir;
+    let dispatch = props.dispatch.clone();
     let root = dir.root().to_path_buf();
     let open_folder = move || set_folder_action.call(Some(ui::open_folder(&root)));
     let open_diagnostics = {
