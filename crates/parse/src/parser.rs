@@ -52,6 +52,29 @@ impl<'a> Parser<'a> {
         self.elements
     }
 
+    /// Each run of unknown tokens carrying the given `enclosed` flag, ending
+    /// at the next bracket, identifier, or the end of the token list.
+    fn unknown_spans(&self, enclosed: bool) -> impl Iterator<Item = (usize, usize)> + '_ {
+        let len = self.tokens.len();
+        let mut search_from = 0;
+        std::iter::from_fn(move || {
+            let begin = (search_from..len).find(|&index| {
+                self.tokens[index].enclosed == enclosed
+                    && self.tokens[index].category == TokenCategory::Unknown
+            })?;
+            let end = (begin..len)
+                .find(|&index| {
+                    matches!(
+                        self.tokens[index].category,
+                        TokenCategory::Bracket | TokenCategory::Identifier
+                    )
+                })
+                .unwrap_or(len);
+            search_from = end;
+            Some((begin, end))
+        })
+    }
+
     /// Builds an element from the span, then retires its unknown tokens so
     /// later passes cannot claim them again.
     fn build_and_insert(
