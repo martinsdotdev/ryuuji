@@ -177,6 +177,32 @@ pub(crate) fn open_folder(root: &Path) -> String {
     }
 }
 
+/// How often a page showing live values redraws itself.
+const REFRESH: Duration = Duration::from_secs(2);
+
+/// Rerenders the calling component every [`REFRESH`] while `running`. The
+/// bumped counter has no reader; forcing the rerender is the whole point, so
+/// the page gathers fresh values and its relative ages stay current. The dep
+/// is a plain bool, so the timer is created on the flip to true and dropped
+/// by the cleanup on the flip to false or when the page unmounts.
+pub(crate) fn use_refresh(cx: &mut RenderCx, running: bool) {
+    let (_tick, bump) = cx.use_reducer(0u32);
+    cx.use_effect_with_cleanup(running, move || {
+        if !running {
+            return None;
+        }
+        match DispatcherTimer::new(REFRESH, move || {
+            bump.call(|n| n.wrapping_add(1));
+        }) {
+            Ok(timer) => Some(move || drop(timer)),
+            Err(err) => {
+                warn!(%err, "refresh timer not started");
+                None
+            }
+        }
+    });
+}
+
 /// "2 h ago"-style age of `modified` at `now`.
 pub(crate) fn age_of(modified: SystemTime, now: SystemTime) -> String {
     now.duration_since(modified)

@@ -3,7 +3,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use ryuuji_core::{
     AppState, Command, DataDir, NowPlaying, Page, PlaybackEvent, Ryuuji, StoreError,
@@ -11,15 +11,14 @@ use ryuuji_core::{
 };
 use ryuuji_detect::{WatchError, Watcher};
 use windows_reactor::{
-    Component, DispatcherTimer, Element, NavViewItem, NavigationView,
-    NavigationViewPaneDisplayMode, RenderCx, RequestedTheme, Symbol, set_requested_theme,
+    Component, Element, NavViewItem, NavigationView, NavigationViewPaneDisplayMode, RenderCx,
+    RequestedTheme, Symbol, set_requested_theme,
 };
 
 use crate::debug::{self, EventLevelFilter, Report};
 use crate::logging::RecentEvents;
 use crate::pages;
-
-const DIAGNOSTICS_REFRESH: Duration = Duration::from_secs(2);
+use crate::ui;
 
 /// Root component. Owns the core for the life of the window; the reducer
 /// hook mirrors its state so the tree rerenders after every command.
@@ -79,10 +78,6 @@ impl Component for Shell {
                 }
             }
         });
-        // The tick has no reader; each bump only forces a rerender so the
-        // diagnostics page gathers fresh values and the idle proposal's age
-        // stays current.
-        let (_tick, bump) = cx.use_reducer(0u32);
         let (filter, set_filter) = cx.use_state(EventLevelFilter::All);
         let (last_action, set_last_action) = cx.use_state(None::<String>);
         let (folder_action, set_folder_action) = cx.use_state(None::<String>);
@@ -91,20 +86,7 @@ impl Component for Shell {
             || (state.page == Page::NowPlaying
                 && matches!(state.now_playing, NowPlaying::Idle)
                 && state.last_match.is_some());
-        cx.use_effect_with_cleanup(wants_timer, move || {
-            if !wants_timer {
-                return None;
-            }
-            match DispatcherTimer::new(DIAGNOSTICS_REFRESH, move || {
-                bump.call(|n| n.wrapping_add(1));
-            }) {
-                Ok(timer) => Some(move || drop(timer)),
-                Err(err) => {
-                    tracing::warn!(%err, "diagnostics timer not started");
-                    None
-                }
-            }
-        });
+        ui::use_refresh(cx, wants_timer);
 
         let menu_items = Page::ALL.into_iter().map(|page| {
             NavViewItem::new(page.label())
