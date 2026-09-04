@@ -154,17 +154,14 @@ fn split_by_delimiters(chars: &[char], enclosed: bool, options: &Options, tokens
 }
 
 fn validate_delimiters(tokens: &mut Vec<Token>) {
-    fn is_unknown(tokens: &[Token], index: Option<usize>) -> bool {
-        index.is_some_and(|index| tokens[index].category == TokenCategory::Unknown)
+    fn is_unknown(token: &Token) -> bool {
+        token.category == TokenCategory::Unknown
     }
-    fn is_delimiter(tokens: &[Token], index: Option<usize>) -> bool {
-        index.is_some_and(|index| tokens[index].category == TokenCategory::Delimiter)
+    fn is_delimiter(token: &Token) -> bool {
+        token.category == TokenCategory::Delimiter
     }
-    fn is_single_char(tokens: &[Token], index: Option<usize>) -> bool {
-        is_unknown(tokens, index)
-            && index.is_some_and(|index| {
-                tokens[index].content.chars().count() == 1 && tokens[index].content != "-"
-            })
+    fn is_single_char(token: &Token) -> bool {
+        is_unknown(token) && token.content.chars().count() == 1 && token.content != "-"
     }
     fn first_char(tokens: &[Token], index: usize) -> char {
         tokens[index].content.chars().next().unwrap_or(' ')
@@ -184,15 +181,13 @@ fn validate_delimiters(tokens: &mut Vec<Token>) {
         let mut next = token::find_next(tokens, index, token::is_valid);
 
         if delimiter != ' ' && delimiter != '_' {
-            if is_single_char(tokens, prev) {
-                let prev = prev.expect("single-char check implies an index");
+            if let Some(prev) = prev.filter(|&prev| is_single_char(&tokens[prev])) {
                 append_to(tokens, index, prev);
-                while is_unknown(tokens, next) {
-                    let unknown = next.expect("unknown check implies an index");
+                while let Some(unknown) = next.filter(|&next| is_unknown(&tokens[next])) {
                     append_to(tokens, unknown, prev);
                     next = token::find_next(tokens, unknown, token::is_valid);
                     if let Some(candidate) = next
-                        && tokens[candidate].category == TokenCategory::Delimiter
+                        && is_delimiter(&tokens[candidate])
                         && first_char(tokens, candidate) == delimiter
                     {
                         append_to(tokens, candidate, prev);
@@ -201,49 +196,43 @@ fn validate_delimiters(tokens: &mut Vec<Token>) {
                 }
                 continue;
             }
-            if is_single_char(tokens, next)
+            if let Some(next) = next.filter(|&next| is_single_char(&tokens[next]))
                 && let Some(prev) = prev
             {
                 append_to(tokens, index, prev);
-                append_to(
-                    tokens,
-                    next.expect("single-char check implies an index"),
-                    prev,
-                );
+                append_to(tokens, next, prev);
                 continue;
             }
         }
 
-        if is_unknown(tokens, prev) && is_delimiter(tokens, next) {
-            let next = next.expect("delimiter check implies an index");
+        if let Some(prev) = prev.filter(|&prev| is_unknown(&tokens[prev]))
+            && let Some(next) = next.filter(|&next| is_delimiter(&tokens[next]))
+        {
             let next_delimiter = first_char(tokens, next);
             if delimiter != next_delimiter
                 && delimiter != ','
                 && (next_delimiter == ' ' || next_delimiter == '_')
             {
-                append_to(tokens, index, prev.expect("unknown check implies an index"));
+                append_to(tokens, index, prev);
                 continue;
             }
-        } else if is_delimiter(tokens, prev) && is_delimiter(tokens, next) {
-            let prev_delimiter = first_char(tokens, prev.expect("checked"));
-            let next_delimiter = first_char(tokens, next.expect("checked"));
-            if prev_delimiter == next_delimiter && prev_delimiter != delimiter {
+        } else if let Some(prev) = prev.filter(|&prev| is_delimiter(&tokens[prev]))
+            && let Some(next) = next.filter(|&next| is_delimiter(&tokens[next]))
+        {
+            let prev_delimiter = first_char(tokens, prev);
+            if prev_delimiter == first_char(tokens, next) && prev_delimiter != delimiter {
                 tokens[index].category = TokenCategory::Unknown;
             }
         }
 
         if (delimiter == '&' || delimiter == '+')
-            && is_unknown(tokens, prev)
-            && is_unknown(tokens, next)
+            && let Some(prev) = prev.filter(|&prev| is_unknown(&tokens[prev]))
+            && let Some(next) = next.filter(|&next| is_unknown(&tokens[next]))
+            && string::is_numeric(&tokens[prev].content)
+            && string::is_numeric(&tokens[next].content)
         {
-            let prev = prev.expect("unknown check implies an index");
-            let next = next.expect("unknown check implies an index");
-            if string::is_numeric(&tokens[prev].content)
-                && string::is_numeric(&tokens[next].content)
-            {
-                append_to(tokens, index, prev);
-                append_to(tokens, next, prev);
-            }
+            append_to(tokens, index, prev);
+            append_to(tokens, next, prev);
         }
     }
     tokens.retain(|token| token.category != TokenCategory::Invalid);
