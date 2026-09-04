@@ -16,6 +16,14 @@ fn parsed_map(elements: &Elements) -> BTreeMap<String, Vec<String>> {
     map
 }
 
+/// The expected elements of a case, in the same shape `parsed_map` returns.
+fn expected_map(elements: &BTreeMap<String, OneOrMany>) -> BTreeMap<String, Vec<String>> {
+    elements
+        .iter()
+        .map(|(label, values)| (label.clone(), values.to_vec()))
+        .collect()
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Document {
@@ -30,7 +38,7 @@ struct Case {
     #[serde(default = "default_true")]
     strict: bool,
     #[serde(default)]
-    options: CaseOptions,
+    options: Options,
     elements: BTreeMap<String, OneOrMany>,
 }
 
@@ -38,46 +46,13 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-struct CaseOptions {
-    allowed_delimiters: Option<String>,
-    ignored_strings: Option<Vec<String>>,
-    parse_episode_number: Option<bool>,
-    parse_episode_title: Option<bool>,
-    parse_file_extension: Option<bool>,
-    parse_release_group: Option<bool>,
-}
-
-impl CaseOptions {
-    fn build(&self) -> Options {
-        let mut options = Options::default();
-        if let Some(value) = &self.allowed_delimiters {
-            options.allowed_delimiters = value.clone();
-        }
-        if let Some(value) = &self.ignored_strings {
-            options.ignored_strings = value.clone();
-        }
-        if let Some(value) = self.parse_episode_number {
-            options.parse_episode_number = value;
-        }
-        if let Some(value) = self.parse_episode_title {
-            options.parse_episode_title = value;
-        }
-        if let Some(value) = self.parse_file_extension {
-            options.parse_file_extension = value;
-        }
-        if let Some(value) = self.parse_release_group {
-            options.parse_release_group = value;
-        }
-        options
-    }
-}
-
+/// A fixture value: one string, one bare number, or a list. anitomy's JSON
+/// spells some counts unquoted, so the number arm is not optional.
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum OneOrMany {
     One(String),
+    Number(i64),
     Many(Vec<String>),
 }
 
@@ -85,6 +60,7 @@ impl OneOrMany {
     fn to_vec(&self) -> Vec<String> {
         match self {
             OneOrMany::One(value) => vec![value.clone()],
+            OneOrMany::Number(value) => vec![value.to_string()],
             OneOrMany::Many(values) => values.clone(),
         }
     }
@@ -96,17 +72,15 @@ fn ryuuji_fixtures_parse_exactly() {
         toml::from_str(include_str!("../fixtures/ryuuji.toml")).expect("ryuuji.toml parses");
     let mut mismatches = Vec::new();
     for case in &document.case {
-        let mut expected: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        for (label, values) in &case.elements {
+        for label in case.elements.keys() {
             assert!(
                 ElementKind::from_label(label).is_some(),
                 "case {:?} expects unknown kind {label:?}",
                 case.name
             );
-            expected.insert(label.clone(), values.to_vec());
         }
-        let elements = parse(&case.input, &case.options.build());
-        let mut parsed = parsed_map(&elements);
+        let expected = expected_map(&case.elements);
+        let mut parsed = parsed_map(&parse(&case.input, &case.options));
         if !case.strict {
             parsed.retain(|label, _| expected.contains_key(label));
         }
@@ -120,53 +94,51 @@ fn ryuuji_fixtures_parse_exactly() {
     assert!(mismatches.is_empty(), "\n{}", mismatches.join("\n"));
 }
 
+/// One anitomy case. Its option keys carry an `option_` prefix, its `id` is
+/// bookkeeping, and every remaining key is an expected element.
+#[derive(Deserialize)]
+struct AnitomyCase {
+    file_name: String,
+    /// Bookkeeping only, and one case spells it as a list, so take it as-is.
+    #[allow(dead_code)]
+    id: Option<serde_json::Value>,
+    #[serde(rename = "option_allowed_delimiters")]
+    allowed_delimiters: Option<String>,
+    #[serde(rename = "option_ignored_strings")]
+    ignored_strings: Option<Vec<String>>,
+    #[serde(flatten)]
+    expected: BTreeMap<String, OneOrMany>,
+}
+
+impl AnitomyCase {
+    fn options(&self) -> Options {
+        let mut options = Options::default();
+        if let Some(value) = &self.allowed_delimiters {
+            options.allowed_delimiters = value.clone();
+        }
+        if let Some(values) = &self.ignored_strings {
+            options.ignored_strings = values.clone();
+        }
+        options
+    }
+}
+
 fn run_anitomy() -> (usize, usize, Vec<String>) {
-    let data: serde_json::Value = serde_json::from_str(include_str!("../fixtures/anitomy.json"))
+    let cases: Vec<AnitomyCase> = serde_json::from_str(include_str!("../fixtures/anitomy.json"))
         .expect("anitomy.json parses");
-    let cases = data.as_array().expect("anitomy.json is an array");
     let mut passed = 0;
     let mut failures = Vec::new();
-    for case in cases {
-        let object = case.as_object().expect("each case is an object");
-        let input = object["file_name"].as_str().expect("file_name is a string");
-        let mut options = Options::default();
-        if let Some(value) = object
-            .get("option_allowed_delimiters")
-            .and_then(|value| value.as_str())
-        {
-            options.allowed_delimiters = value.to_owned();
-        }
-        if let Some(values) = object
-            .get("option_ignored_strings")
-            .and_then(|value| value.as_array())
-        {
-            options.ignored_strings = values
-                .iter()
-                .map(|value| value.as_str().expect("ignored string").to_owned())
-                .collect();
-        }
-        let mut expected: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        for (key, value) in object {
-            if key == "file_name" || key == "id" || key.starts_with("option_") {
-                continue;
-            }
-            let values = match value {
-                serde_json::Value::String(text) => vec![text.clone()],
-                serde_json::Value::Number(number) => vec![number.to_string()],
-                serde_json::Value::Array(items) => items
-                    .iter()
-                    .map(|item| item.as_str().expect("array of strings").to_owned())
-                    .collect(),
-                other => panic!("unsupported expected value for {key}: {other:?}"),
-            };
-            expected.insert(key.clone(), values);
-        }
-        let parsed = parsed_map(&parse(input, &options));
+    for case in &cases {
+        let expected = expected_map(&case.expected);
+        let parsed = parsed_map(&parse(&case.file_name, &case.options()));
         if parsed == expected {
             passed += 1;
         } else {
+            let input = &case.file_name;
             failures.push(format!(
-                "{input}\n  expected: {expected:?}\n  parsed:   {parsed:?}"
+                "{input}
+  expected: {expected:?}
+  parsed:   {parsed:?}"
             ));
         }
     }
