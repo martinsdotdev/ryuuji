@@ -2,7 +2,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use tempfile::NamedTempFile;
 use tracing::{info, info_span, warn};
 
@@ -59,21 +59,12 @@ impl SettingsError {
 /// A TOML error whose concrete type stays inside this crate.
 #[derive(Debug, thiserror::Error)]
 #[error(transparent)]
-pub(crate) struct TomlError(TomlErrorKind);
+pub(crate) struct TomlError(toml::de::Error);
 
-#[derive(Debug, thiserror::Error)]
-enum TomlErrorKind {
-    #[error(transparent)]
-    De(#[from] toml::de::Error),
-    #[error(transparent)]
-    Ser(#[from] toml::ser::Error),
-}
-
-/// The file as TOML sees it. Every field is optional and unknown keys pass
-/// through, so a hand-edited file survives fields we do not know yet.
-#[derive(Serialize, Deserialize, Default)]
+/// The file as TOML sees it. Every field is optional; unknown keys are ignored
+/// on read and not preserved on write.
+#[derive(Deserialize)]
 struct Document {
-    #[serde(default)]
     theme: Option<String>,
 }
 
@@ -124,7 +115,7 @@ pub(crate) fn save(dir: &DataDir, settings: &Settings) -> Result<(), SettingsErr
 fn parse(path: &Path, text: &str) -> Result<Settings, SettingsError> {
     let document: Document = toml::from_str(text).map_err(|err| SettingsError::Parse {
         path: path.to_path_buf(),
-        source: TomlError(err.into()),
+        source: TomlError(err),
     })?;
     let theme = match document.theme {
         None => ThemePreference::default(),
@@ -137,15 +128,8 @@ fn parse(path: &Path, text: &str) -> Result<Settings, SettingsError> {
     Ok(Settings { theme })
 }
 
-fn render(path: &Path, settings: &Settings) -> Result<String, SettingsError> {
-    let document = Document {
-        theme: Some(settings.theme.tag().to_owned()),
-    };
-    let body = toml::to_string(&document).map_err(|err| SettingsError::Write {
-        path: path.to_path_buf(),
-        source: io::Error::new(io::ErrorKind::InvalidData, TomlError(err.into())),
-    })?;
-    Ok(format!("{}{body}", header()))
+fn render(settings: &Settings) -> String {
+    format!("{}theme = {:?}\n", header(), settings.theme.tag())
 }
 
 fn header() -> String {
@@ -160,7 +144,7 @@ fn header() -> String {
 }
 
 fn write(root: &Path, path: &Path, settings: &Settings) -> Result<(), SettingsError> {
-    let contents = render(path, settings)?;
+    let contents = render(settings);
     write_atomically(root, path, contents.as_bytes()).map_err(|source| SettingsError::Write {
         path: path.to_path_buf(),
         source,

@@ -7,13 +7,14 @@ use crate::{
 
 /// The running application: the store plus the state derived from it.
 ///
-/// Every command writes through to disk first and touches memory only with
-/// what the write returned, so the two never disagree. A failed write becomes
-/// a [`Notice`] in [`AppState::notices`] rather than an error, because the
-/// shells call [`Ryuuji::dispatch`] from UI callbacks that cannot propagate one.
-/// The one exception is a theme change: memory keeps the choice even when
-/// `settings.toml` could not be written, so the window still switches and the
-/// next successful save carries it.
+/// Library rows are write-through: a command writes to disk first and touches
+/// memory only with what the write returned, so the two never disagree. The
+/// theme and the last match are best-effort instead: memory keeps the change
+/// even when the file or the row could not be written, so the window still
+/// switches and the card still shows the proposal, and the next successful
+/// save carries it. Either way a failed write becomes a [`Notice`] in
+/// [`AppState::notices`] rather than an error, because the shells call
+/// [`Ryuuji::dispatch`] from UI callbacks that cannot propagate one.
 pub struct Ryuuji {
     dir: DataDir,
     store: Store,
@@ -73,19 +74,19 @@ impl Ryuuji {
             }
             Command::AddEntry(entry) => {
                 let outcome = self.store.add(entry);
-                if self.absorb(outcome) {
+                if self.absorb(outcome).is_some() {
                     self.match_stale = true;
                 }
             }
             Command::SetProgress { id, progress } => {
                 let outcome = self.store.set_progress(id, progress);
-                if self.absorb(outcome) {
+                if self.absorb(outcome).is_some() {
                     self.match_stale = true;
                 }
             }
             Command::SetStatus { id, status } => {
                 let outcome = self.store.set_status(id, status);
-                if self.absorb(outcome) {
+                if self.absorb(outcome).is_some() {
                     self.match_stale = true;
                 }
             }
@@ -116,12 +117,7 @@ impl Ryuuji {
                     .is_none_or(|m| m.raw_title != event.title));
         if proposes {
             let proposal = matching::propose(&event, &self.state.library);
-            if let Err(err) = self.store.save_last_match(&proposal) {
-                let detail = error_chain(&err);
-                tracing::error!(error = %detail, "last match save failed");
-                self.state.notices.push(Notice::SaveFailed { detail });
-            }
-            self.state.last_match = Some(proposal);
+            self.record_match(proposal);
             self.match_stale = false;
         }
         self.state.now_playing = now_playing_for(event);
@@ -139,19 +135,19 @@ impl Ryuuji {
         self.state.settings = next;
     }
 
-    fn absorb(&mut self, outcome: Result<LibraryEntry, StoreError>) -> bool {
-        match outcome {
-            Ok(entry) => {
-                upsert(&mut self.state.library, entry);
-                true
-            }
-            Err(err) => {
-                let detail = error_chain(&err);
-                tracing::error!(error = %detail, "save failed");
-                self.state.notices.push(Notice::SaveFailed { detail });
-                false
-            }
-        }
+    fn absorb(&mut self, outcome: Result<LibraryEntry, StoreError>) -> Option<LibraryEntry> {
+        let entry = commit(&mut self.state.notices, "entry", outcome)?;
+        upsert(&mut self.state.library, entry.clone());
+        Some(entry)
+    }
+
+    fn record_match(&mut self, proposal: ProposedMatch) {
+        commit(
+            &mut self.state.notices,
+            "last match",
+            self.store.save_last_match(&proposal),
+        );
+        self.state.last_match = Some(proposal);
     }
 
     fn add_proposed(&mut self) {
@@ -168,32 +164,20 @@ impl Ryuuji {
         } else {
             last.parsed_title.clone()
         };
-        let entry = match self.store.add(NewEntry {
+        let outcome = self.store.add(NewEntry {
             title,
             status: WatchStatus::Watching,
             progress: 0,
             total: None,
-        }) {
-            Ok(entry) => entry,
-            Err(err) => {
-                let detail = error_chain(&err);
-                tracing::error!(error = %detail, "save failed");
-                self.state.notices.push(Notice::SaveFailed { detail });
-                return;
-            }
+        });
+        let Some(entry) = self.absorb(outcome) else {
+            return;
         };
-        upsert(&mut self.state.library, entry.clone());
-        let relinked = ProposedMatch {
+        self.record_match(ProposedMatch {
             entry: Some(entry.id),
             confidence: Confidence::Exact,
             ..last
-        };
-        if let Err(err) = self.store.save_last_match(&relinked) {
-            let detail = error_chain(&err);
-            tracing::error!(error = %detail, "last match save failed");
-            self.state.notices.push(Notice::SaveFailed { detail });
-        }
-        self.state.last_match = Some(relinked);
+        });
         self.match_stale = false;
         tracing::info!(entry = entry.id.as_i64(), "proposal added to library");
     }
@@ -201,6 +185,25 @@ impl Ryuuji {
     #[cfg(test)]
     pub(crate) fn store_mut(&mut self) -> &mut Store {
         &mut self.store
+    }
+}
+
+/// Records a failed save as a [`Notice::SaveFailed`] and hands back what the
+/// write returned. Free rather than a method so the caller can pass
+/// `&mut self.state.notices` alongside a `&mut self.store` call.
+fn commit<T>(
+    notices: &mut Vec<Notice>,
+    what: &'static str,
+    outcome: Result<T, impl std::error::Error>,
+) -> Option<T> {
+    match outcome {
+        Ok(value) => Some(value),
+        Err(err) => {
+            let detail = error_chain(&err);
+            tracing::error!(what, error = %detail, "save failed");
+            notices.push(Notice::SaveFailed { detail });
+            None
+        }
     }
 }
 
