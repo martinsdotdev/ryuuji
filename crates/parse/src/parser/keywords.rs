@@ -1,4 +1,5 @@
 use super::Parser;
+use super::numbers::Extent;
 use crate::element::ElementKind;
 use crate::string;
 use crate::token::{self, TokenCategory};
@@ -43,12 +44,12 @@ impl Parser<'_> {
                     }
                     ElementKind::EpisodePrefix => {
                         if keyword.valid {
-                            self.check_extent(index, ElementKind::EpisodeNumber);
+                            self.check_extent(index, Extent::Episode);
                         }
                         continue;
                     }
                     ElementKind::VolumePrefix => {
-                        self.check_extent(index, ElementKind::VolumeNumber);
+                        self.check_extent(index, Extent::Volume);
                         continue;
                     }
                     ElementKind::ReleaseVersion => {
@@ -96,7 +97,7 @@ impl Parser<'_> {
         }
     }
 
-    fn check_extent(&mut self, index: usize, kind: ElementKind) {
+    fn check_extent(&mut self, index: usize, extent: Extent) {
         let Some(next) = token::find_next(&self.tokens, index, token::is_not_delimiter) else {
             return;
         };
@@ -112,13 +113,7 @@ impl Parser<'_> {
             return;
         }
         let value = self.tokens[next].content.clone();
-        if kind == ElementKind::EpisodeNumber {
-            if !self.match_episode_patterns(&value, next) {
-                self.set_episode(&value, next, false);
-            }
-        } else if !self.match_volume_patterns(&value, next) {
-            self.set_volume(&value, next, false);
-        }
+        self.claim_number(extent, &value, next);
         self.tokens[index].category = TokenCategory::Identifier;
     }
 }
