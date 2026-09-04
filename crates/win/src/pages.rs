@@ -21,32 +21,27 @@ use crate::ui::{
 
 const PAGE_PADDING: f64 = 24.0;
 
-/// What the shell threads into the pages beyond the core state: whether the
-/// watcher came up, and the render instant for relative ages.
-pub struct Env {
-    pub detection_down: bool,
-    pub now: SystemTime,
-}
-
 /// Renders the notice bar and the body for the currently selected page.
 pub fn render(
     state: &AppState,
     dispatch: Dispatch<Command>,
     dir: &DataDir,
-    env: Env,
+    detection_down: bool,
     debug: impl FnOnce() -> Element,
 ) -> Element {
     let page: Element = match state.detail {
         Some(Detail::Diagnostics) => debug(),
         None => match state.page {
             Page::Library => library(&state.library),
-            Page::NowPlaying => now_playing(
-                &state.now_playing,
-                state.last_match.as_ref(),
-                &state.library,
-                env.detection_down,
-                env.now,
-                dispatch.clone(),
+            Page::NowPlaying => component(
+                now_playing,
+                NowPlayingProps {
+                    now_playing: state.now_playing.clone(),
+                    last_match: state.last_match.clone(),
+                    library: state.library.clone(),
+                    detection_down,
+                    dispatch: dispatch.clone(),
+                },
             ),
             Page::Settings => component(
                 settings,
@@ -145,17 +140,27 @@ fn status_line(entry: &LibraryEntry) -> String {
     }
 }
 
-fn now_playing(
-    now_playing: &NowPlaying,
-    last_match: Option<&ProposedMatch>,
-    library: &[LibraryEntry],
+/// What Now playing shows. A standing proposal is captioned with its age,
+/// so while nothing is playing the page runs a clock to keep that current.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct NowPlayingProps {
+    now_playing: NowPlaying,
+    last_match: Option<ProposedMatch>,
+    library: Vec<LibraryEntry>,
     detection_down: bool,
-    now: SystemTime,
     dispatch: Dispatch<Command>,
-) -> Element {
+}
+
+fn now_playing(props: &NowPlayingProps, cx: &mut RenderCx) -> Element {
+    let idle = matches!(props.now_playing, NowPlaying::Idle);
+    ui::use_refresh(cx, idle && props.last_match.is_some());
+
+    let now_playing = &props.now_playing;
+    let library = &props.library;
+    let now = SystemTime::now();
     let top: Element = match now_playing {
         NowPlaying::Idle => {
-            let (heading, body) = idle_placeholder_copy(detection_down);
+            let (heading, body) = idle_placeholder_copy(props.detection_down);
             placeholder(heading, body)
         }
         NowPlaying::Detecting => placeholder(
@@ -182,16 +187,10 @@ fn now_playing(
         )
         .into(),
     };
-    match last_match {
+    match &props.last_match {
         Some(m) => vstack((
             top,
-            proposal_card(
-                m,
-                library,
-                matches!(now_playing, NowPlaying::Idle),
-                now,
-                dispatch,
-            ),
+            proposal_card(m, library, idle, now, props.dispatch.clone()),
         ))
         .spacing(8.0)
         .into(),
