@@ -27,19 +27,18 @@ pub use playback::{PlaybackEvent, PlaybackSource, PlaybackStatus};
 pub use ryuuji_parse::{ElementKind, Options, parse};
 pub use store::{DbError, Opened, Recovered, SchemaVersion, Store, StoreError};
 
-/// Every page the shell can show. The first three sit in the navigation
-/// pane; `Debug` is reached from Settings and returns there.
+/// Every destination in the navigation pane, so the variant list is the pane
+/// list. A view reached from a page rather than from the pane is a [`Detail`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Page {
     Library,
     NowPlaying,
     Settings,
-    Debug,
 }
 
 impl Page {
     /// The navigation pane items, in order.
-    pub const NAV: [Page; 3] = [Page::Library, Page::NowPlaying, Page::Settings];
+    pub const ALL: [Page; 3] = [Page::Library, Page::NowPlaying, Page::Settings];
 
     /// Stable identifier used as the navigation item tag.
     pub fn tag(self) -> &'static str {
@@ -47,13 +46,12 @@ impl Page {
             Page::Library => "library",
             Page::NowPlaying => "now-playing",
             Page::Settings => "settings",
-            Page::Debug => "debug",
         }
     }
 
-    /// Inverse of [`Page::tag`] for the navigation items.
+    /// Inverse of [`Page::tag`].
     pub fn from_tag(tag: &str) -> Option<Page> {
-        Page::NAV.into_iter().find(|page| page.tag() == tag)
+        Page::ALL.into_iter().find(|page| page.tag() == tag)
     }
 
     /// Human-readable label.
@@ -62,7 +60,23 @@ impl Page {
             Page::Library => "Library",
             Page::NowPlaying => "Now playing",
             Page::Settings => "Settings",
-            Page::Debug => "Diagnostics",
+        }
+    }
+}
+
+/// A view a page opens over itself. The page underneath stays selected and
+/// closing the detail returns to it. Nothing routes to a detail by name, so
+/// unlike a [`Page`] it needs no tag.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Detail {
+    Diagnostics,
+}
+
+impl Detail {
+    /// Human-readable label.
+    pub fn label(self) -> &'static str {
+        match self {
+            Detail::Diagnostics => "Diagnostics",
         }
     }
 }
@@ -226,7 +240,12 @@ pub enum NowPlaying {
 /// Everything a shell can ask the core to do.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
+    /// Selects a pane destination, closing any open detail.
     SelectPage(Page),
+    /// Opens a detail over the current page.
+    OpenDetail(Detail),
+    /// Returns from the open detail to the page under it.
+    CloseDetail,
     AddEntry(NewEntry),
     SetProgress {
         id: EntryId,
@@ -267,6 +286,8 @@ pub enum Notice {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AppState {
     pub page: Page,
+    /// The detail open over [`AppState::page`], which stays selected under it.
+    pub detail: Option<Detail>,
     pub library: Vec<LibraryEntry>,
     pub now_playing: NowPlaying,
     /// The latest playback title's proposal against the library. Survives
@@ -281,6 +302,7 @@ impl Default for AppState {
     fn default() -> Self {
         AppState {
             page: Page::Library,
+            detail: None,
             library: Vec::new(),
             now_playing: NowPlaying::Idle,
             last_match: None,
@@ -308,10 +330,9 @@ mod tests {
 
     #[test]
     fn page_tags_round_trip() {
-        for page in Page::NAV {
+        for page in Page::ALL {
             assert_eq!(Page::from_tag(page.tag()), Some(page));
         }
-        assert_eq!(Page::from_tag(Page::Debug.tag()), None);
         assert_eq!(Page::from_tag("nope"), None);
     }
 
@@ -342,6 +363,7 @@ mod tests {
     fn default_state_is_empty_library_on_library_page() {
         let state = AppState::default();
         assert_eq!(state.page, Page::Library);
+        assert_eq!(state.detail, None);
         assert!(state.library.is_empty());
         assert_eq!(state.now_playing, NowPlaying::Idle);
         assert_eq!(state.last_match, None);

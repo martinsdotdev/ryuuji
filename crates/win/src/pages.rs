@@ -9,8 +9,8 @@
 use std::time::{Duration, SystemTime};
 
 use ryuuji_core::{
-    AppState, Command, Confidence, DataDir, LibraryEntry, Notice, NowPlaying, Options, Page,
-    ProposedMatch, Settings, StoreError, ThemePreference, error_chain, parse,
+    AppState, Command, Confidence, DataDir, Detail, LibraryEntry, Notice, NowPlaying, Options,
+    Page, ProposedMatch, Settings, StoreError, ThemePreference, error_chain, parse,
 };
 use windows_reactor::*;
 
@@ -39,24 +39,26 @@ pub fn render(
     env: Env,
     debug: impl FnOnce() -> Element,
 ) -> Element {
-    let page: Element = match state.page {
-        Page::Library => library(&state.library),
-        Page::NowPlaying => now_playing(
-            &state.now_playing,
-            state.last_match.as_ref(),
-            &state.library,
-            env.detection_down,
-            env.now,
-            dispatch.clone(),
-        ),
-        Page::Settings => settings(
-            &state.settings,
-            dir,
-            dispatch.clone(),
-            env.folder_action,
-            env.set_folder_action,
-        ),
-        Page::Debug => debug(),
+    let page: Element = match state.detail {
+        Some(Detail::Diagnostics) => debug(),
+        None => match state.page {
+            Page::Library => library(&state.library),
+            Page::NowPlaying => now_playing(
+                &state.now_playing,
+                state.last_match.as_ref(),
+                &state.library,
+                env.detection_down,
+                env.now,
+                dispatch.clone(),
+            ),
+            Page::Settings => settings(
+                &state.settings,
+                dir,
+                dispatch.clone(),
+                env.folder_action,
+                env.set_folder_action,
+            ),
+        },
     };
 
     grid((
@@ -314,7 +316,7 @@ fn settings(
     let open_folder = move || set_folder_action.call(Some(ui::open_folder(&root)));
     let open_diagnostics = {
         let dispatch = dispatch.clone();
-        move || dispatch.call(Command::SelectPage(Page::Debug))
+        move || dispatch.call(Command::OpenDetail(Detail::Diagnostics))
     };
     scroll_viewer(
         vstack((
