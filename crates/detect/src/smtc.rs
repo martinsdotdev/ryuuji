@@ -16,8 +16,9 @@ use windows::Media::Control::{
 };
 use windows::core::EventRevoker;
 
+use crate::SessionFacts;
+use crate::players::PlayerTable;
 use crate::session::{Dedup, Matched, RawStatus, SessionSnapshot, observe};
-use crate::{PlayerTable, SessionFacts};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 /// While a session plays, the timeline is re-read on this cadence even if
@@ -38,6 +39,8 @@ pub enum WatchError {
     StartupTimeout(Duration),
     #[error("could not spawn the SMTC worker thread")]
     Thread(#[source] io::Error),
+    #[error("the SMTC worker exited before reporting")]
+    Exited,
 }
 
 type Sink = Box<dyn Fn(PlaybackEvent) + Send>;
@@ -66,16 +69,13 @@ pub fn watch(sink: impl Fn(PlaybackEvent) + Send + 'static) -> Result<Watcher, W
             facts,
         }),
         Ok(Err(err)) => {
-            warn!(error = %err, "smtc manager unavailable");
             let _ = thread.join();
             Err(WatchError::Manager(err))
         }
         Err(RecvTimeoutError::Timeout) => Err(WatchError::StartupTimeout(STARTUP_TIMEOUT)),
         Err(RecvTimeoutError::Disconnected) => {
             let _ = thread.join();
-            Err(WatchError::Thread(io::Error::other(
-                "the SMTC worker exited before reporting",
-            )))
+            Err(WatchError::Exited)
         }
     }
 }
@@ -140,6 +140,7 @@ impl Spawn {
             table: PlayerTable::builtin(),
             tx: self.tx,
             sessions: Vec::new(),
+            subscriptions_stale: true,
             dedup: Dedup::default(),
             retry: false,
             facts: self.facts,
@@ -158,7 +159,12 @@ struct Worker {
     manager: Manager,
     table: PlayerTable,
     tx: Sender<Msg>,
-    sessions: Vec<Subscribed>,
+    /// One revoker triple per subscribed session; dropping one revokes its
+    /// events.
+    sessions: Vec<[EventRevoker; 3]>,
+    /// The manager announced a change to the session set, so the current
+    /// subscriptions may be attached to sessions that are gone.
+    subscriptions_stale: bool,
     dedup: Dedup,
     /// The last refresh left a matched session unread; poll again soon.
     retry: bool,
@@ -166,15 +172,9 @@ struct Worker {
     sink: Sink,
 }
 
-/// A matched session whose events feed the worker; dropping it revokes them.
-struct Subscribed {
-    app_id: String,
-    _revokers: [EventRevoker; 3],
-}
-
 impl Worker {
     /// Blocks until the next refresh is due. False means stop.
-    fn wait(&self, rx: &Receiver<Msg>) -> bool {
+    fn wait(&mut self, rx: &Receiver<Msg>) -> bool {
         let first = if self.dedup.is_playing() || self.retry {
             match rx.recv_timeout(PLAYING_POLL) {
                 Ok(msg) => msg,
@@ -187,15 +187,28 @@ impl Worker {
                 Err(_) => return false,
             }
         };
-        if matches!(first, Msg::Stop) {
+        if !self.note(first) {
             return false;
         }
         while let Ok(msg) = rx.try_recv() {
-            if matches!(msg, Msg::Stop) {
+            if !self.note(msg) {
                 return false;
             }
         }
         true
+    }
+
+    /// Records what one message means for the next refresh, so a burst
+    /// coalesces without losing the session-set signal. False means stop.
+    fn note(&mut self, msg: Msg) -> bool {
+        match msg {
+            Msg::SessionsChanged => {
+                self.subscriptions_stale = true;
+                true
+            }
+            Msg::SessionChanged => true,
+            Msg::Stop => false,
+        }
     }
 
     fn refresh_and_log(&mut self) {
@@ -224,7 +237,7 @@ impl Worker {
             let player = self.table.match_smtc(&app_id);
             let mut title = String::new();
             if let (Some(player), Some(status)) = (player, status) {
-                match read_snapshot(&session, app_id.clone(), status) {
+                match read_snapshot(&session, status) {
                     Ok(snapshot) => {
                         title = snapshot.title.clone();
                         debug!(
@@ -244,7 +257,7 @@ impl Worker {
                         unreadable += 1;
                     }
                 }
-                live.push((app_id.clone(), session));
+                live.push(session);
             }
             facts.push(SessionFacts {
                 app_id,
@@ -261,7 +274,6 @@ impl Worker {
         }
         let observation = observe(&matched, unreadable, now);
         self.retry = unreadable > 0;
-        self.resubscribe(live)?;
         *self.facts.lock().unwrap_or_else(PoisonError::into_inner) = facts;
         if let Some(event) = self.dedup.admit(observation, now) {
             debug!(
@@ -274,27 +286,23 @@ impl Worker {
             );
             (self.sink)(event);
         }
+        if self.subscriptions_stale || live.len() != self.sessions.len() {
+            self.resubscribe(live)?;
+            self.subscriptions_stale = false;
+        }
         Ok(())
     }
 
-    /// Re-registers session events only when the set of matched app ids
-    /// changed, dropping the stale registrations first.
-    fn resubscribe(&mut self, live: Vec<(String, Session)>) -> windows::core::Result<()> {
-        let unchanged = self.sessions.len() == live.len()
-            && self
-                .sessions
-                .iter()
-                .zip(&live)
-                .all(|(subscribed, (app_id, _))| subscribed.app_id == *app_id);
-        if unchanged {
-            return Ok(());
-        }
-        self.sessions.clear();
-        for (app_id, session) in live {
+    /// Registers the events of every live matched session and drops the
+    /// previous registrations. A failure part way leaves the previous
+    /// registrations in place, so the next refresh retries from a known set.
+    fn resubscribe(&mut self, live: Vec<Session>) -> windows::core::Result<()> {
+        let mut sessions = Vec::with_capacity(live.len());
+        for session in live {
             let media = self.tx.clone();
             let playback = self.tx.clone();
             let timeline = self.tx.clone();
-            let revokers = [
+            sessions.push([
                 session.MediaPropertiesChanged(move |_, _| {
                     let _ = media.send(Msg::SessionChanged);
                 })?,
@@ -304,13 +312,13 @@ impl Worker {
                 session.TimelinePropertiesChanged(move |_, _| {
                     let _ = timeline.send(Msg::SessionChanged);
                 })?,
-            ];
-            debug!(app_id, "subscribed to smtc session events");
-            self.sessions.push(Subscribed {
-                app_id,
-                _revokers: revokers,
-            });
+            ]);
         }
+        self.sessions = sessions;
+        debug!(
+            count = self.sessions.len(),
+            "subscribed to smtc session events"
+        );
         Ok(())
     }
 }
@@ -323,11 +331,7 @@ fn read_session(session: &Session) -> windows::core::Result<(String, i32)> {
 }
 
 /// Media properties and timeline, read only for matched sessions.
-fn read_snapshot(
-    session: &Session,
-    app_id: String,
-    status: RawStatus,
-) -> windows::core::Result<SessionSnapshot> {
+fn read_snapshot(session: &Session, status: RawStatus) -> windows::core::Result<SessionSnapshot> {
     let title = session
         .TryGetMediaPropertiesAsync()?
         .join()?
@@ -335,7 +339,6 @@ fn read_snapshot(
         .to_string_lossy();
     let timeline = session.GetTimelineProperties()?;
     Ok(SessionSnapshot {
-        app_id,
         title,
         status,
         start: span(timeline.StartTime()?),

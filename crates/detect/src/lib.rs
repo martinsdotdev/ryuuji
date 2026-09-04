@@ -9,7 +9,6 @@ mod session;
 #[cfg(windows)]
 mod smtc;
 
-pub use players::{Player, PlayerTable, TableError};
 #[cfg(windows)]
 pub use smtc::{WatchError, Watcher, watch};
 
