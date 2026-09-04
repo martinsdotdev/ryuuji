@@ -15,8 +15,8 @@ use windows_reactor::*;
 
 use crate::logging::EventRecord;
 use crate::ui::{
-    APP_VERSION, BUILD_PROFILE, CONTENT_MAX_WIDTH, FOLDER_GLYPH, age_of, caption, card, card_frame,
-    enum_picker, open_folder, section, table,
+    self, APP_VERSION, BUILD_PROFILE, CONTENT_MAX_WIDTH, FOLDER_GLYPH, age_of, caption, card,
+    card_frame, enum_picker, open_folder, section, table,
 };
 
 const MONO_FONT: &str = "Cascadia Mono";
@@ -297,14 +297,22 @@ pub fn copy_to_clipboard(text: &str) -> String {
     }
 }
 
-pub fn page(
-    report: &Report,
-    filter: EventLevelFilter,
-    set_filter: SetState<EventLevelFilter>,
-    last_action: Option<String>,
-    set_last_action: SetState<Option<String>>,
-    dispatch: Dispatch<Command>,
-) -> Element {
+/// What Diagnostics shows and the way back into the core. The shell gathers
+/// the report because it owns the core handle and the log buffer; the level
+/// filter and the last action's outcome are the view's own.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiagnosticsProps {
+    pub report: Report,
+    pub dispatch: Dispatch<Command>,
+}
+
+pub fn diagnostics(props: &DiagnosticsProps, cx: &mut RenderCx) -> Element {
+    let (filter, set_filter) = cx.use_state(EventLevelFilter::All);
+    let (last_action, set_last_action) = cx.use_state(None::<String>);
+    ui::use_refresh(cx, true);
+
+    let report = &props.report;
+    let dispatch = props.dispatch.clone();
     let core = &report.core;
     let copy = {
         let text = report.to_text();

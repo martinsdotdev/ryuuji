@@ -5,19 +5,18 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use ryuuji_core::{
-    AppState, Command, DataDir, Page, PlaybackEvent, Ryuuji, StoreError, ThemePreference,
+    AppState, Command, DataDir, Detail, Page, PlaybackEvent, Ryuuji, StoreError, ThemePreference,
     error_chain,
 };
 use ryuuji_detect::{WatchError, Watcher};
 use windows_reactor::{
     Component, Element, NavViewItem, NavigationView, NavigationViewPaneDisplayMode, RenderCx,
-    RequestedTheme, Symbol, set_requested_theme,
+    RequestedTheme, Symbol, component, set_requested_theme,
 };
 
-use crate::debug::{self, EventLevelFilter, Report};
+use crate::debug::{self, Report};
 use crate::logging::RecentEvents;
 use crate::pages;
-use crate::ui;
 
 /// Root component. Owns the core for the life of the window; the reducer
 /// hook mirrors its state so the tree rerenders after every command.
@@ -77,10 +76,6 @@ impl Component for Shell {
                 }
             }
         });
-        let (filter, set_filter) = cx.use_state(EventLevelFilter::All);
-        let (last_action, set_last_action) = cx.use_state(None::<String>);
-        let on_detail = state.detail.is_some();
-        ui::use_refresh(cx, on_detail);
 
         let menu_items = Page::ALL.into_iter().map(|page| {
             NavViewItem::new(page.label())
@@ -89,32 +84,29 @@ impl Component for Shell {
         });
 
         let detection_down = watcher.is_err();
-        let body = pages::render(&state, dispatch.clone(), &self.dir, detection_down, {
-            let core = core.clone();
-            let recent = self.recent.clone();
-            let dispatch = dispatch.clone();
-            move || {
-                let events = recent.snapshot();
+        let detail = match state.detail {
+            Some(Detail::Diagnostics) => {
                 let sessions = Result::as_ref(&watcher)
                     .map(Watcher::sessions)
                     .map_err(|err| error_chain(err));
-                let report = Report::new(
-                    core.borrow().diagnostics(),
-                    core.borrow().state().last_match.clone(),
-                    events,
-                    sessions,
-                );
-                debug::page(
-                    &report,
-                    filter,
-                    set_filter,
-                    last_action,
-                    set_last_action,
-                    dispatch.clone(),
-                )
+                Some(component(
+                    debug::diagnostics,
+                    debug::DiagnosticsProps {
+                        report: Report::new(
+                            core.borrow().diagnostics(),
+                            core.borrow().state().last_match.clone(),
+                            self.recent.snapshot(),
+                            sessions,
+                        ),
+                        dispatch: dispatch.clone(),
+                    },
+                ))
             }
-        });
+            None => None,
+        };
+        let body = pages::render(&state, dispatch.clone(), &self.dir, detection_down, detail);
 
+        let on_detail = state.detail.is_some();
         let back = {
             let dispatch = dispatch.clone();
             move || dispatch.call(Command::CloseDetail)
