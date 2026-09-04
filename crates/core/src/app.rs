@@ -19,9 +19,6 @@ pub struct Ryuuji {
     dir: DataDir,
     store: Store,
     state: AppState,
-    /// The library changed since the last proposal, so the next playback
-    /// event re-matches even for an unchanged title.
-    match_stale: bool,
 }
 
 impl Ryuuji {
@@ -43,7 +40,6 @@ impl Ryuuji {
         Ok(Ryuuji {
             dir: dir.clone(),
             store,
-            match_stale: false,
             state: AppState {
                 library,
                 last_match,
@@ -74,21 +70,15 @@ impl Ryuuji {
             }
             Command::AddEntry(entry) => {
                 let outcome = self.store.add(entry);
-                if self.absorb(outcome).is_some() {
-                    self.match_stale = true;
-                }
+                self.absorb(outcome);
             }
             Command::SetProgress { id, progress } => {
                 let outcome = self.store.set_progress(id, progress);
-                if self.absorb(outcome).is_some() {
-                    self.match_stale = true;
-                }
+                self.absorb(outcome);
             }
             Command::SetStatus { id, status } => {
                 let outcome = self.store.set_status(id, status);
-                if self.absorb(outcome).is_some() {
-                    self.match_stale = true;
-                }
+                self.absorb(outcome);
             }
             Command::Playback(event) => self.observe_playback(event),
             Command::AddProposedToLibrary => self.add_proposed(),
@@ -109,16 +99,14 @@ impl Ryuuji {
             event.status,
             PlaybackStatus::Playing | PlaybackStatus::Paused
         ) && !event.title.trim().is_empty()
-            && (self.match_stale
-                || self
-                    .state
-                    .last_match
-                    .as_ref()
-                    .is_none_or(|m| m.raw_title != event.title));
+            && self
+                .state
+                .last_match
+                .as_ref()
+                .is_none_or(|m| m.raw_title != event.title);
         if proposes {
             let proposal = matching::propose(&event, &self.state.library);
             self.record_match(proposal);
-            self.match_stale = false;
         }
         self.state.now_playing = now_playing_for(event);
     }
@@ -138,7 +126,30 @@ impl Ryuuji {
     fn absorb(&mut self, outcome: Result<LibraryEntry, StoreError>) -> Option<LibraryEntry> {
         let entry = commit(&mut self.state.notices, "entry", outcome)?;
         upsert(&mut self.state.library, entry.clone());
+        self.re_resolve();
         Some(entry)
+    }
+
+    /// A library write can turn a standing "No library entry" into a match,
+    /// and the re-match cannot wait for the next playback event: detection
+    /// drops repeat observations, and a paused or stopped player sends none
+    /// at all. A proposal that already names an entry is left alone, because
+    /// nothing deletes an entry and so a link never goes stale.
+    fn re_resolve(&mut self) {
+        let Some(standing) = self.state.last_match.clone() else {
+            return;
+        };
+        if standing.confidence != Confidence::Unmatched {
+            return;
+        }
+        let (entry, confidence) = matching::resolve(&standing.parsed_title, &self.state.library);
+        if entry.is_some() {
+            self.record_match(ProposedMatch {
+                entry,
+                confidence,
+                ..standing
+            });
+        }
     }
 
     fn record_match(&mut self, proposal: ProposedMatch) {
@@ -170,16 +181,20 @@ impl Ryuuji {
             progress: 0,
             total: None,
         });
-        let Some(entry) = self.absorb(outcome) else {
+        // Not `absorb`: the link is known here, so re-resolving first would
+        // save a proposal that the relink below immediately replaces, and a
+        // single click would notice a failed last-match write twice.
+        let Some(entry) = commit(&mut self.state.notices, "entry", outcome) else {
             return;
         };
+        let id = entry.id;
+        upsert(&mut self.state.library, entry);
         self.record_match(ProposedMatch {
-            entry: Some(entry.id),
+            entry: Some(id),
             confidence: Confidence::Exact,
             ..last
         });
-        self.match_stale = false;
-        tracing::info!(entry = entry.id.as_i64(), "proposal added to library");
+        tracing::info!(entry = id.as_i64(), "proposal added to library");
     }
 
     #[cfg(test)]
@@ -637,6 +652,14 @@ mod tests {
         app.dispatch(Command::AddProposedToLibrary);
         assert_eq!(app.state().library.len(), 1);
         assert_eq!(app.state().library[0].title, "[EnigmaBD 1080p].mkv");
+
+        // The relink stands even though `resolve` would call an empty parsed
+        // title Unmatched, because a linked proposal is never re-resolved.
+        let id = app.state().library[0].id;
+        app.dispatch(Command::SetProgress { id, progress: 1 });
+        let linked = app.state().last_match.clone().unwrap();
+        assert_eq!(linked.confidence, Confidence::Exact);
+        assert_eq!(linked.entry, Some(id));
     }
 
     #[test]
@@ -702,50 +725,59 @@ mod tests {
     }
 
     #[test]
-    fn library_change_re_proposes_the_same_title() {
+    fn library_write_re_resolves_the_standing_proposal() {
         let (_tmp, dir) = open_tmp();
         let mut app = Ryuuji::open(&dir).unwrap();
         app.dispatch(Command::Playback(playing("X - 03.mkv")));
+        let before = app.state().last_match.clone().unwrap();
+        assert_eq!(before.confidence, Confidence::Unmatched);
+        assert_eq!(before.entry, None);
+
+        app.dispatch(Command::AddEntry(entry("X")));
+        let after = app.state().last_match.clone().unwrap();
+        let id = app.state().library[0].id;
+        assert_eq!(after.confidence, Confidence::Exact);
+        assert_eq!(after.entry, Some(id));
+        // The proposal was re-resolved, not re-proposed: it still describes the
+        // same observation, so its timestamp does not move.
+        assert_eq!(after.at, before.at);
+
+        drop(app);
+        let reopened = Ryuuji::open(&dir).unwrap();
+        // `elements` is memory-only, so compare what the row actually holds.
+        let stored = reopened.state().last_match.clone().unwrap();
+        assert_eq!(stored.entry, Some(id));
+        assert_eq!(stored.confidence, Confidence::Exact);
+        assert_eq!(stored.at, before.at);
+
+        let mut app = reopened;
+        app.dispatch(Command::SetProgress { id, progress: 5 });
+        assert_eq!(app.state().last_match, Some(stored));
+    }
+
+    #[test]
+    fn paused_player_sees_the_library_edit_without_a_new_event() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::Playback(PlaybackEvent {
+            status: PlaybackStatus::Paused,
+            ..playing("Y - 07.mkv")
+        }));
         assert_eq!(
             app.state().last_match.as_ref().unwrap().confidence,
             Confidence::Unmatched
         );
 
-        app.dispatch(Command::AddEntry(entry("X")));
-        app.dispatch(Command::Playback(PlaybackEvent {
-            observed_at: SystemTime::UNIX_EPOCH + Duration::from_secs(60),
-            ..playing("X - 03.mkv")
-        }));
-        assert_eq!(
-            app.state().last_match.as_ref().unwrap().confidence,
-            Confidence::Exact
-        );
-
-        let id = app.state().library[0].id;
-        app.dispatch(Command::Playback(playing("Other - 01.mkv")));
-        let before = app.state().last_match.clone().unwrap();
-        app.dispatch(Command::SetStatus {
-            id,
-            status: WatchStatus::Watching,
-        });
-        app.dispatch(Command::Playback(PlaybackEvent {
-            observed_at: SystemTime::UNIX_EPOCH + Duration::from_secs(120),
-            ..playing("Other - 01.mkv")
-        }));
-        let after = app.state().last_match.clone().unwrap();
-        assert_ne!(after.at, before.at);
-
-        let before = after;
-        app.dispatch(Command::SetProgress { id, progress: 5 });
-        app.dispatch(Command::Playback(PlaybackEvent {
-            observed_at: SystemTime::UNIX_EPOCH + Duration::from_secs(180),
-            ..playing("Other - 01.mkv")
-        }));
-        assert_ne!(app.state().last_match.as_ref().unwrap().at, before.at);
+        // A paused player sends nothing more, so the flip has to happen on the
+        // library write itself.
+        app.dispatch(Command::AddEntry(entry("Y")));
+        let linked = app.state().last_match.clone().unwrap();
+        assert_eq!(linked.confidence, Confidence::Exact);
+        assert_eq!(linked.entry, Some(app.state().library[0].id));
     }
 
     #[test]
-    fn add_proposed_clears_the_stale_flag() {
+    fn add_proposed_holds_through_the_next_event_for_the_same_title() {
         let (_tmp, dir) = open_tmp();
         let mut app = Ryuuji::open(&dir).unwrap();
         app.dispatch(Command::Playback(playing("Show - 03.mkv")));
