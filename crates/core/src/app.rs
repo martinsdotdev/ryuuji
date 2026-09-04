@@ -1,3 +1,4 @@
+use crate::matching::Resolution;
 use crate::settings::{self, SettingsError};
 use crate::{
     AppState, Command, Confidence, DataDir, Diagnostics, LibraryEntry, NewEntry, Notice,
@@ -147,14 +148,17 @@ impl Ryuuji {
         if standing.confidence != Confidence::Unmatched {
             return;
         }
-        let (entry, confidence) = matching::resolve(&standing.parsed_title, &self.state.library);
-        if entry.is_some() {
-            self.record_match(ProposedMatch {
-                entry,
-                confidence,
-                ..standing
-            });
-        }
+        let (entry, confidence) =
+            match matching::resolve(&standing.parsed_title, &self.state.library) {
+                Resolution::Exact(entry) => (entry, Confidence::Exact),
+                Resolution::Likely { entry, .. } => (entry, Confidence::Likely),
+                Resolution::Unmatched => return,
+            };
+        self.record_match(ProposedMatch {
+            entry: Some(entry),
+            confidence,
+            ..standing
+        });
     }
 
     fn record_match(&mut self, proposal: ProposedMatch) {

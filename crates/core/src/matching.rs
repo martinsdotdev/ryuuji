@@ -170,23 +170,35 @@ fn levenshtein(a: &[char], b: &[char]) -> usize {
     prev[b.len()]
 }
 
+/// What [`resolve`] decided. An entry and the confidence in it travel in the
+/// same variant, so an entry carrying no confidence, or an `Exact` carrying no
+/// entry, cannot be built.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Resolution {
+    Exact(EntryId),
+    /// `score` is the similarity that cleared the threshold, kept because the
+    /// caller logs it and recomputing it means walking the library again.
+    Likely {
+        entry: EntryId,
+        score: f64,
+    },
+    Unmatched,
+}
+
 /// The matching decision for an already-parsed title.
-pub(crate) fn resolve(
-    parsed_title: &str,
-    library: &[LibraryEntry],
-) -> (Option<EntryId>, Confidence) {
+pub(crate) fn resolve(parsed_title: &str, library: &[LibraryEntry]) -> Resolution {
     let needle = normalize_title(parsed_title);
     if needle.is_empty() {
-        return (None, Confidence::Unmatched);
+        return Resolution::Unmatched;
     }
     if let Some(entry) = library
         .iter()
         .find(|entry| normalize_title(&entry.title) == needle)
     {
-        return (Some(entry.id), Confidence::Exact);
+        return Resolution::Exact(entry.id);
     }
     if needle.chars().count() < 5 {
-        return (None, Confidence::Unmatched);
+        return Resolution::Unmatched;
     }
     let mut best: Option<(EntryId, f64)> = None;
     for entry in library {
@@ -196,8 +208,8 @@ pub(crate) fn resolve(
         }
     }
     match best {
-        Some((id, score)) if score >= 0.85 => (Some(id), Confidence::Likely),
-        _ => (None, Confidence::Unmatched),
+        Some((entry, score)) if score >= 0.85 => Resolution::Likely { entry, score },
+        _ => Resolution::Unmatched,
     }
 }
 
@@ -208,19 +220,11 @@ pub fn propose(event: &PlaybackEvent, library: &[LibraryEntry]) -> ProposedMatch
         .get(ElementKind::AnimeTitle)
         .unwrap_or_default()
         .to_owned();
-    let (entry, confidence) = resolve(&parsed_title, library);
-    let score = (confidence == Confidence::Likely)
-        .then(|| {
-            entry
-                .and_then(|id| library.iter().find(|candidate| candidate.id == id))
-                .map(|candidate| {
-                    similarity(
-                        &normalize_title(&candidate.title),
-                        &normalize_title(&parsed_title),
-                    )
-                })
-        })
-        .flatten();
+    let (entry, confidence, score) = match resolve(&parsed_title, library) {
+        Resolution::Exact(entry) => (Some(entry), Confidence::Exact, None),
+        Resolution::Likely { entry, score } => (Some(entry), Confidence::Likely, Some(score)),
+        Resolution::Unmatched => (None, Confidence::Unmatched, None),
+    };
     tracing::debug!(
         confidence = confidence.tag(),
         entry = entry.map(EntryId::as_i64),
@@ -320,42 +324,50 @@ mod tests {
         let library = library(&["Frieren: Beyond Journey's End"]);
         assert_eq!(
             resolve("Frieren - Beyond Journey's End", &library),
-            (Some(library[0].id), Confidence::Exact)
+            Resolution::Exact(library[0].id)
         );
     }
 
     #[test]
     fn resolve_finds_a_likely_match_above_the_threshold() {
         let library = library(&["Frieren Beyond Journeys End"]);
+        let Resolution::Likely { entry, score } = resolve("Frieren Beyond Journey End", &library)
+        else {
+            panic!("expected a likely match");
+        };
+        assert_eq!(entry, library[0].id);
+        // The score is carried out of the walk rather than recomputed, so it
+        // has to be the similarity that cleared the threshold.
         assert_eq!(
-            resolve("Frieren Beyond Journey End", &library),
-            (Some(library[0].id), Confidence::Likely)
+            score,
+            similarity(
+                &normalize_title(&library[0].title),
+                &normalize_title("Frieren Beyond Journey End")
+            )
         );
+        assert!(score >= 0.85);
     }
 
     #[test]
     fn resolve_prefers_the_first_entry_on_a_tie() {
         let library = library(&["abcdefgx", "abcdefgy"]);
-        assert_eq!(
+        assert!(matches!(
             resolve("abcdefgz", &library),
-            (Some(library[0].id), Confidence::Likely)
-        );
+            Resolution::Likely { entry, .. } if entry == library[0].id
+        ));
     }
 
     #[test]
     fn resolve_without_a_close_entry_is_unmatched() {
         let library = library(&["Frieren"]);
-        assert_eq!(
-            resolve("Mushoku Tensei", &library),
-            (None, Confidence::Unmatched)
-        );
-        assert_eq!(resolve("", &library), (None, Confidence::Unmatched));
+        assert_eq!(resolve("Mushoku Tensei", &library), Resolution::Unmatched);
+        assert_eq!(resolve("", &library), Resolution::Unmatched);
     }
 
     #[test]
     fn resolve_never_calls_a_short_needle_likely() {
         let library = library(&["abcz"]);
-        assert_eq!(resolve("abcd", &library), (None, Confidence::Unmatched));
+        assert_eq!(resolve("abcd", &library), Resolution::Unmatched);
     }
 
     #[test]
