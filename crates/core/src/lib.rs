@@ -14,6 +14,7 @@ mod playback;
 mod settings;
 mod store;
 mod tagged;
+mod watch;
 
 use std::fmt;
 use std::path::PathBuf;
@@ -146,6 +147,25 @@ pub enum NowPlaying {
         /// [`Duration::ZERO`] means unknown.
         duration: Duration,
     },
+}
+
+impl NowPlaying {
+    /// What the shell shows for one observation.
+    pub(crate) fn of(event: &PlaybackEvent) -> NowPlaying {
+        match event.status {
+            PlaybackStatus::Stopped => NowPlaying::Idle,
+            PlaybackStatus::Playing | PlaybackStatus::Paused if event.title.trim().is_empty() => {
+                NowPlaying::Detecting
+            }
+            PlaybackStatus::Playing | PlaybackStatus::Paused => NowPlaying::Playing {
+                title: event.title.clone(),
+                player: event.player.clone(),
+                status: event.status,
+                position: event.position,
+                duration: event.duration,
+            },
+        }
+    }
 }
 
 /// Everything a shell can ask the core to do.
