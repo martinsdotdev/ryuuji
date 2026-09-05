@@ -18,7 +18,7 @@ use windows_reactor::*;
 use crate::logging::{EventRecord, RecentEvents};
 use crate::ui::{
     self, APP_VERSION, BUILD_PROFILE, CONTENT_MAX_WIDTH, FOLDER_GLYPH, age_of, caption, card,
-    card_frame, enum_picker, open_folder, section, table,
+    card_frame, enum_picker, open_folder_button, section, table,
 };
 
 const MONO_FONT: &str = "Cascadia Mono";
@@ -356,11 +356,6 @@ pub fn diagnostics(props: &DiagnosticsProps, cx: &mut RenderCx) -> Element {
         let set = set_last_action.clone();
         move || set.call(Some(copy_to_clipboard(&report.to_text())))
     };
-    let open = {
-        let root = core.data_dir.clone();
-        let set = set_last_action.clone();
-        move || set.call(Some(open_folder(&root)))
-    };
     let inject = |status: PlaybackStatus, outcome: &'static str| {
         let dispatch = dispatch.clone();
         let set = set_last_action.clone();
@@ -383,7 +378,7 @@ pub fn diagnostics(props: &DiagnosticsProps, cx: &mut RenderCx) -> Element {
             "{} · Ryuuji {APP_VERSION} · {BUILD_PROFILE} build",
             source_text(core.data_dir_source)
         ),
-        button("Open folder").on_click(open).into(),
+        open_folder_button(core.data_dir.clone(), set_last_action.clone()).into(),
     );
 
     let playback_card = card(

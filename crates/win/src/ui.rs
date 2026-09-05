@@ -2,7 +2,7 @@
 //! section headers, cards and captions in the Windows Settings idiom, the
 //! tables and enum pickers both pages build, and the relative-age text.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command as Process;
 use std::time::{Duration, SystemTime};
 
@@ -166,8 +166,15 @@ pub(crate) fn enum_picker<T: Copy + PartialEq + 'static>(
         })
 }
 
+/// The "Open folder" button. Its outcome lands in `outcome`; the page
+/// places the caption, since Diagnostics feeds other actions into the same
+/// one.
+pub(crate) fn open_folder_button(root: PathBuf, outcome: SetState<Option<String>>) -> Button {
+    button("Open folder").on_click(move || outcome.call(Some(open_folder(&root))))
+}
+
 /// Opens `root` in Explorer and describes the outcome for the page.
-pub(crate) fn open_folder(root: &Path) -> String {
+fn open_folder(root: &Path) -> String {
     match Process::new("explorer").arg(root).spawn() {
         Ok(_) => "Opened data folder".to_owned(),
         Err(err) => {

@@ -84,27 +84,27 @@ impl Component for Shell {
         });
 
         let detection_down = watcher.is_err();
-        let detail = state.detail.map(|detail| match detail {
-            Detail::Diagnostics => component(
-                debug::diagnostics,
-                debug::DiagnosticsProps {
-                    dispatch: dispatch.clone(),
-                    core: core.clone(),
-                    recent: self.recent.clone(),
-                    watcher: watcher.clone(),
-                },
+        let (detail, header) = match state.detail {
+            Some(detail @ Detail::Diagnostics) => (
+                Some(component(
+                    debug::diagnostics,
+                    debug::DiagnosticsProps {
+                        dispatch: dispatch.clone(),
+                        core: core.clone(),
+                        recent: self.recent.clone(),
+                        watcher: watcher.clone(),
+                    },
+                )),
+                detail.label(),
             ),
-        });
+            None => (None, state.page.label()),
+        };
+        let on_detail = detail.is_some();
         let body = pages::render(&state, dispatch.clone(), &self.dir, detection_down, detail);
 
-        let on_detail = state.detail.is_some();
         let back = {
             let dispatch = dispatch.clone();
             move || dispatch.call(Command::CloseDetail)
-        };
-        let header = match state.detail {
-            Some(detail) => detail.label(),
-            None => state.page.label(),
         };
 
         NavigationView::new(menu_items, body)
