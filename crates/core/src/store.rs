@@ -7,7 +7,9 @@ use rusqlite::{Connection, OptionalExtension, Row, ToSql, params};
 use rusqlite_migration::Migrations;
 use tracing::{debug, info, info_span, warn};
 
-use crate::{Confidence, DataDir, EntryId, LibraryEntry, NewEntry, ProposedMatch, WatchStatus};
+use crate::{
+    Confidence, DataDir, EntryId, LibraryEntry, Link, NewEntry, ProposedMatch, WatchStatus,
+};
 
 /// The schema, compiled in from `migrations/`, one numbered directory per
 /// version.
@@ -264,14 +266,14 @@ impl Store {
                     m.episode.map(i64::from),
                     m.season.map(i64::from),
                     m.release_group,
-                    m.entry.map(EntryId::as_i64),
-                    m.confidence.tag(),
+                    m.link.entry().map(EntryId::as_i64),
+                    m.link.confidence().tag(),
                     m.player,
                     unix_secs(m.at),
                 ],
             )
             .map_err(query_failed)?;
-        info!(confidence = m.confidence.tag(), "last match saved");
+        info!(confidence = m.link.confidence().tag(), "last match saved");
         Ok(())
     }
 
@@ -443,9 +445,11 @@ impl RawLastMatch {
                 .transpose()
                 .map_err(|_| invalid("season"))?,
             release_group: self.release_group,
-            entry: self.entry_id.map(EntryId),
-            confidence: Confidence::from_tag(&self.confidence)
-                .ok_or_else(|| invalid("confidence"))?,
+            link: Link::from_columns(
+                self.entry_id.map(EntryId),
+                Confidence::from_tag(&self.confidence).ok_or_else(|| invalid("confidence"))?,
+            )
+            .ok_or_else(|| invalid("link"))?,
             player: self.player,
             at: UNIX_EPOCH
                 + Duration::from_secs(u64::try_from(self.at).map_err(|_| invalid("at"))?),
@@ -641,8 +645,7 @@ mod tests {
             episode: Some(3),
             season: Some(2),
             release_group: Some("Subs".into()),
-            entry: None,
-            confidence: Confidence::Unmatched,
+            link: Link::Unmatched,
             player: "mpv".into(),
             at: UNIX_EPOCH + Duration::from_secs(1_700_000_000),
         }
@@ -718,8 +721,7 @@ mod tests {
         let id = store.add(entry("Show")).unwrap().id;
         store.save_last_match(&proposed("first.mkv")).unwrap();
         let second = ProposedMatch {
-            entry: Some(id),
-            confidence: Confidence::Exact,
+            link: Link::Exact(id),
             ..proposed("second.mkv")
         };
         store.save_last_match(&second).unwrap();
@@ -746,7 +748,7 @@ mod tests {
         let (_tmp, dir) = open_tmp();
         let mut store = open(&dir);
         let m = ProposedMatch {
-            entry: Some(EntryId(999)),
+            link: Link::Exact(EntryId(999)),
             ..proposed("Show - 03.mkv")
         };
         assert!(store.save_last_match(&m).is_err());
@@ -764,6 +766,33 @@ mod tests {
             Err(StoreError::InvalidLastMatch {
                 field: "confidence"
             })
+        ));
+    }
+
+    #[test]
+    fn exact_without_an_entry_surfaces_as_invalid_last_match() {
+        let (_tmp, dir) = open_tmp();
+        let mut store = open(&dir);
+        store.save_last_match(&proposed("Show - 03.mkv")).unwrap();
+        store.execute_raw("UPDATE last_match SET entry_id = NULL, confidence = 'exact'");
+        assert!(matches!(
+            store.last_match(),
+            Err(StoreError::InvalidLastMatch { field: "link" })
+        ));
+    }
+
+    #[test]
+    fn unmatched_with_an_entry_surfaces_as_invalid_last_match() {
+        let (_tmp, dir) = open_tmp();
+        let mut store = open(&dir);
+        let id = store.add(entry("Show")).unwrap().id;
+        store.save_last_match(&proposed("Show - 03.mkv")).unwrap();
+        store.execute_raw(&format!(
+            "UPDATE last_match SET entry_id = {id}, confidence = 'unmatched'"
+        ));
+        assert!(matches!(
+            store.last_match(),
+            Err(StoreError::InvalidLastMatch { field: "link" })
         ));
     }
 }

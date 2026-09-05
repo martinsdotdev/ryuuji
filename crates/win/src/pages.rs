@@ -9,8 +9,8 @@
 use std::time::{Duration, SystemTime};
 
 use ryuuji_core::{
-    AppState, Command, Confidence, DataDir, Detail, LibraryEntry, Notice, NowPlaying, Options,
-    Page, ProposedMatch, Settings, StoreError, ThemePreference, error_chain, parse,
+    AppState, Command, DataDir, Detail, LibraryEntry, Notice, NowPlaying, Options, Page,
+    ProposedMatch, Settings, StoreError, ThemePreference, error_chain, parse,
 };
 use windows_reactor::*;
 
@@ -232,7 +232,7 @@ fn proposal_card(
     if !rows.is_empty() {
         children.push(facts_grid(&rows));
     }
-    if m.confidence == Confidence::Unmatched {
+    if !m.link.names_entry() {
         children.push(
             button("Add to library")
                 .on_click(move || dispatch.call(Command::AddProposedToLibrary))
@@ -248,7 +248,7 @@ fn match_caption(m: &ProposedMatch, idle: bool, now: SystemTime) -> String {
     if let Some(episode) = m.episode {
         parts.push(format!("Episode {episode}"));
     }
-    parts.push(m.confidence.label().to_owned());
+    parts.push(m.link.confidence().label().to_owned());
     if idle {
         parts.push(format!("Last seen in {}", m.player));
         parts.push(age_of(m.at, now));
@@ -388,7 +388,7 @@ fn placeholder(heading: impl Into<String>, body: impl Into<String>) -> Element {
 
 #[cfg(test)]
 mod tests {
-    use ryuuji_core::Confidence;
+    use ryuuji_core::Link;
 
     use super::*;
 
@@ -412,8 +412,7 @@ mod tests {
             episode: None,
             season: None,
             release_group: None,
-            entry: None,
-            confidence: Confidence::Exact,
+            link: Link::Unmatched,
             player: "mpv".to_owned(),
             at: std::time::SystemTime::UNIX_EPOCH,
         }
@@ -427,11 +426,11 @@ mod tests {
         };
         assert_eq!(
             match_caption(&m, true, SystemTime::UNIX_EPOCH),
-            "Episode 1 \u{b7} Exact match \u{b7} Last seen in mpv \u{b7} 0 s ago"
+            "Episode 1 \u{b7} No library entry \u{b7} Last seen in mpv \u{b7} 0 s ago"
         );
         assert_eq!(
             match_caption(&proposal(), false, SystemTime::UNIX_EPOCH),
-            "Exact match"
+            "No library entry"
         );
     }
 
@@ -440,9 +439,9 @@ mod tests {
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(2 * 3600);
         assert_eq!(
             match_caption(&proposal(), true, now),
-            "Exact match \u{b7} Last seen in mpv \u{b7} 2 h ago"
+            "No library entry \u{b7} Last seen in mpv \u{b7} 2 h ago"
         );
-        assert_eq!(match_caption(&proposal(), false, now), "Exact match");
+        assert_eq!(match_caption(&proposal(), false, now), "No library entry");
     }
 
     #[test]

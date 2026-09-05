@@ -31,8 +31,7 @@ pub struct ProposedMatch {
     pub episode: Option<u32>,
     pub season: Option<u32>,
     pub release_group: Option<String>,
-    pub entry: Option<EntryId>,
-    pub confidence: Confidence,
+    pub link: Link,
     pub player: String,
     pub at: SystemTime,
 }
@@ -50,7 +49,8 @@ impl ProposedMatch {
 
     /// The matched entry's title, else [`ProposedMatch::shown_title`].
     pub fn title_in<'a>(&'a self, library: &'a [LibraryEntry]) -> &'a str {
-        self.entry
+        self.link
+            .entry()
             .and_then(|id| library.iter().find(|entry| entry.id == id))
             .map_or_else(|| self.shown_title(), |entry| entry.title.as_str())
     }
@@ -185,6 +185,66 @@ pub(crate) enum Resolution {
     Unmatched,
 }
 
+/// Which library entry a proposal names, and how surely. The two travel
+/// together, so an entry without a confidence, or an `Exact` without an
+/// entry, cannot be built, in memory or off the store.
+///
+/// This is the durable half of a [`Resolution`]: the score a `Likely` was
+/// decided on is logged once and never stored, and its `f64` is what keeps
+/// `Resolution` out of `Eq` while a [`ProposedMatch`] compares whole.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Link {
+    Exact(EntryId),
+    Likely(EntryId),
+    Unmatched,
+}
+
+impl Link {
+    pub fn entry(self) -> Option<EntryId> {
+        match self {
+            Link::Exact(entry) | Link::Likely(entry) => Some(entry),
+            Link::Unmatched => None,
+        }
+    }
+
+    pub fn confidence(self) -> Confidence {
+        match self {
+            Link::Exact(_) => Confidence::Exact,
+            Link::Likely(_) => Confidence::Likely,
+            Link::Unmatched => Confidence::Unmatched,
+        }
+    }
+
+    pub fn names_entry(self) -> bool {
+        self.entry().is_some()
+    }
+
+    /// The store's two columns as one value, or `None` when they disagree.
+    /// The schema's `ON DELETE SET NULL` on `entry_id` is the one known
+    /// producer of a disagreeing pair, so whoever adds entry deletion has
+    /// to revisit this reader.
+    pub(crate) fn from_columns(entry: Option<EntryId>, confidence: Confidence) -> Option<Link> {
+        match (entry, confidence) {
+            (Some(entry), Confidence::Exact) => Some(Link::Exact(entry)),
+            (Some(entry), Confidence::Likely) => Some(Link::Likely(entry)),
+            (None, Confidence::Unmatched) => Some(Link::Unmatched),
+            (Some(_), Confidence::Unmatched) | (None, Confidence::Exact | Confidence::Likely) => {
+                None
+            }
+        }
+    }
+}
+
+impl From<Resolution> for Link {
+    fn from(resolution: Resolution) -> Link {
+        match resolution {
+            Resolution::Exact(entry) => Link::Exact(entry),
+            Resolution::Likely { entry, .. } => Link::Likely(entry),
+            Resolution::Unmatched => Link::Unmatched,
+        }
+    }
+}
+
 /// The matching decision for an already-parsed title.
 pub(crate) fn resolve(parsed_title: &str, library: &[LibraryEntry]) -> Resolution {
     let needle = normalize_title(parsed_title);
@@ -220,14 +280,15 @@ pub fn propose(event: &PlaybackEvent, library: &[LibraryEntry]) -> ProposedMatch
         .get(ElementKind::AnimeTitle)
         .unwrap_or_default()
         .to_owned();
-    let (entry, confidence, score) = match resolve(&parsed_title, library) {
-        Resolution::Exact(entry) => (Some(entry), Confidence::Exact, None),
-        Resolution::Likely { entry, score } => (Some(entry), Confidence::Likely, Some(score)),
-        Resolution::Unmatched => (None, Confidence::Unmatched, None),
+    let resolution = resolve(&parsed_title, library);
+    let score = match resolution {
+        Resolution::Likely { score, .. } => Some(score),
+        Resolution::Exact(_) | Resolution::Unmatched => None,
     };
+    let link = Link::from(resolution);
     tracing::debug!(
-        confidence = confidence.tag(),
-        entry = entry.map(EntryId::as_i64),
+        confidence = link.confidence().tag(),
+        entry = link.entry().map(EntryId::as_i64),
         score,
         "match proposed"
     );
@@ -237,8 +298,7 @@ pub fn propose(event: &PlaybackEvent, library: &[LibraryEntry]) -> ProposedMatch
         episode: parsed.episode_number(),
         season: parsed.season_number(),
         release_group: parsed.get(ElementKind::ReleaseGroup).map(str::to_owned),
-        entry,
-        confidence,
+        link,
         player: event.player.clone(),
         at: event.observed_at,
     }
@@ -386,7 +446,7 @@ mod tests {
         assert_eq!(proposal.shown_title(), "Show");
         assert_eq!(proposal.title_in(&library), "Show");
         let matched = ProposedMatch {
-            entry: Some(library[0].id),
+            link: Link::Exact(library[0].id),
             ..proposal.clone()
         };
         assert_eq!(matched.title_in(&library), "Frieren: Beyond Journey's End");
@@ -402,7 +462,26 @@ mod tests {
     fn propose_without_a_title_is_unmatched() {
         let proposal = propose(&event(""), &library(&["Show"]));
         assert_eq!(proposal.parsed_title, "");
-        assert_eq!(proposal.entry, None);
-        assert_eq!(proposal.confidence, Confidence::Unmatched);
+        assert_eq!(proposal.link, Link::Unmatched);
+    }
+
+    #[test]
+    fn link_from_columns_rejects_a_disagreeing_pair() {
+        let id = EntryId(1);
+        assert_eq!(
+            Link::from_columns(Some(id), Confidence::Exact),
+            Some(Link::Exact(id))
+        );
+        assert_eq!(
+            Link::from_columns(Some(id), Confidence::Likely),
+            Some(Link::Likely(id))
+        );
+        assert_eq!(
+            Link::from_columns(None, Confidence::Unmatched),
+            Some(Link::Unmatched)
+        );
+        assert_eq!(Link::from_columns(None, Confidence::Exact), None);
+        assert_eq!(Link::from_columns(None, Confidence::Likely), None);
+        assert_eq!(Link::from_columns(Some(id), Confidence::Unmatched), None);
     }
 }
