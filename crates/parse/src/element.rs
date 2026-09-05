@@ -1,3 +1,5 @@
+use std::ops::RangeInclusive;
+
 use crate::string::leading_number;
 
 /// A category of information extracted from a filename.
@@ -186,6 +188,20 @@ impl Elements {
         leading_number(self.get(ElementKind::EpisodeNumber)?)
     }
 
+    /// Every episode number the name carries, as the span from lowest to
+    /// highest. A batch like `01-02` parses to two values in table order,
+    /// so the ends are the min and max rather than the first and last. A
+    /// single episode is a range of one.
+    pub fn episode_range(&self) -> Option<RangeInclusive<u32>> {
+        let mut numbers = self
+            .get_all(ElementKind::EpisodeNumber)
+            .into_iter()
+            .filter_map(leading_number);
+        let first = numbers.next()?;
+        let (low, high) = numbers.fold((first, first), |(low, high), n| (low.min(n), high.max(n)));
+        Some(low..=high)
+    }
+
     pub fn season_number(&self) -> Option<u32> {
         leading_number(self.get(ElementKind::AnimeSeason)?)
     }
@@ -217,6 +233,58 @@ mod tests {
             assert_eq!(elements.episode_number(), expected, "value {value:?}");
         }
         assert_eq!(Elements::default().episode_number(), None);
+    }
+
+    #[test]
+    fn episode_range_of_a_single_value_is_one_wide() {
+        let mut elements = Elements::default();
+        elements.insert(ElementKind::EpisodeNumber, "03");
+        assert_eq!(elements.episode_range(), Some(3..=3));
+    }
+
+    #[test]
+    fn episode_range_spans_an_ascending_batch() {
+        let mut elements = Elements::default();
+        elements.insert(ElementKind::EpisodeNumber, "01");
+        elements.insert(ElementKind::EpisodeNumber, "02");
+        assert_eq!(elements.episode_range(), Some(1..=2));
+    }
+
+    #[test]
+    fn episode_range_orders_the_ends_regardless_of_table_order() {
+        let mut elements = Elements::default();
+        elements.insert(ElementKind::EpisodeNumber, "12");
+        elements.insert(ElementKind::EpisodeNumber, "01");
+        assert_eq!(elements.episode_range(), Some(1..=12));
+    }
+
+    #[test]
+    fn episode_range_is_none_without_an_episode_number() {
+        assert_eq!(Elements::default().episode_range(), None);
+        let mut elements = Elements::default();
+        elements.insert(ElementKind::EpisodeNumberAlt, "08");
+        assert_eq!(elements.episode_range(), None);
+    }
+
+    #[test]
+    fn episode_range_skips_values_without_a_leading_number() {
+        let mut elements = Elements::default();
+        elements.insert(ElementKind::EpisodeNumber, "abc");
+        elements.insert(ElementKind::EpisodeNumber, "4a");
+        assert_eq!(elements.episode_range(), Some(4..=4));
+        let mut only_garbage = Elements::default();
+        only_garbage.insert(ElementKind::EpisodeNumber, "v2");
+        assert_eq!(only_garbage.episode_range(), None);
+    }
+
+    // `Ep. 08 - 05v2` is one episode under two numbering schemes, not a
+    // batch, so the alternate number must not widen the range.
+    #[test]
+    fn episode_range_ignores_the_alternate_number() {
+        let mut elements = Elements::default();
+        elements.insert(ElementKind::EpisodeNumber, "05v2");
+        elements.insert(ElementKind::EpisodeNumberAlt, "08");
+        assert_eq!(elements.episode_range(), Some(5..=5));
     }
 
     #[test]
