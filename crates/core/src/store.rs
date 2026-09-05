@@ -1,3 +1,4 @@
+use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{fmt, fs, io};
@@ -16,7 +17,7 @@ use crate::{
 static MIGRATIONS: include_dir::Dir<'static> =
     include_dir::include_dir!("$CARGO_MANIFEST_DIR/migrations");
 
-const SELECT_ENTRY: &str = "SELECT id, title, status, progress, total FROM entries";
+const SELECT_ENTRY: &str = "SELECT id, title, status, progress, total, rewatching FROM entries";
 
 /// Files SQLite may keep beside the database; they move with it.
 const SIDECAR_SUFFIXES: [&str; 3] = ["-journal", "-wal", "-shm"];
@@ -187,14 +188,15 @@ impl Store {
         let _span = info_span!("store.add", title = %entry.title).entered();
         let tx = self.conn.transaction().map_err(query_failed)?;
         tx.execute(
-            "INSERT INTO entries (title, status, progress, total, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO entries (title, status, progress, total, updated_at, rewatching) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 entry.title,
                 entry.status.tag(),
                 entry.progress,
                 entry.total,
-                unix_now()
+                unix_now(),
+                entry.rewatching
             ],
         )
         .map_err(query_failed)?;
@@ -258,18 +260,19 @@ impl Store {
         self.conn
             .execute(
                 "INSERT OR REPLACE INTO last_match (id, raw_title, parsed_title, episode, \
-                 season, release_group, entry_id, confidence, player, at) \
-                 VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                 season, release_group, entry_id, confidence, player, at, episode_end) \
+                 VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     m.raw_title,
                     m.parsed_title,
-                    m.episode.map(i64::from),
+                    m.episode.as_ref().map(|r| i64::from(*r.start())),
                     m.season.map(i64::from),
                     m.release_group,
                     m.link.entry().map(EntryId::as_i64),
                     m.link.confidence().tag(),
                     m.player,
                     unix_secs(m.at),
+                    m.episode.as_ref().map(|r| i64::from(*r.end())),
                 ],
             )
             .map_err(query_failed)?;
@@ -283,7 +286,7 @@ impl Store {
         self.conn
             .query_row(
                 "SELECT raw_title, parsed_title, episode, season, release_group, \
-                 entry_id, confidence, player, at \
+                 entry_id, confidence, player, at, episode_end \
                  FROM last_match WHERE id = 1",
                 [],
                 RawLastMatch::read,
@@ -370,9 +373,11 @@ struct RawEntry {
     status: String,
     progress: i64,
     total: Option<i64>,
+    rewatching: bool,
 }
 
 impl RawEntry {
+    // Positional, so `SELECT_ENTRY` only ever appends a column.
     fn read(row: &Row<'_>) -> rusqlite::Result<RawEntry> {
         Ok(RawEntry {
             id: row.get(0)?,
@@ -380,6 +385,7 @@ impl RawEntry {
             status: row.get(2)?,
             progress: row.get(3)?,
             total: row.get(4)?,
+            rewatching: row.get(5)?,
         })
     }
 
@@ -396,6 +402,7 @@ impl RawEntry {
                 .map(u32::try_from)
                 .transpose()
                 .map_err(|_| invalid("total"))?,
+            rewatching: self.rewatching,
         })
     }
 }
@@ -412,9 +419,11 @@ struct RawLastMatch {
     confidence: String,
     player: String,
     at: i64,
+    episode_end: Option<i64>,
 }
 
 impl RawLastMatch {
+    // Positional, so the SELECT in `last_match` only ever appends a column.
     fn read(row: &Row<'_>) -> rusqlite::Result<RawLastMatch> {
         Ok(RawLastMatch {
             raw_title: row.get(0)?,
@@ -426,6 +435,7 @@ impl RawLastMatch {
             confidence: row.get(6)?,
             player: row.get(7)?,
             at: row.get(8)?,
+            episode_end: row.get(9)?,
         })
     }
 
@@ -434,11 +444,8 @@ impl RawLastMatch {
         Ok(ProposedMatch {
             raw_title: self.raw_title,
             parsed_title: self.parsed_title,
-            episode: self
-                .episode
-                .map(u32::try_from)
-                .transpose()
-                .map_err(|_| invalid("episode"))?,
+            episode: episode_range(self.episode, self.episode_end)
+                .map_err(|()| invalid("episode"))?,
             season: self
                 .season
                 .map(u32::try_from)
@@ -454,6 +461,24 @@ impl RawLastMatch {
             at: UNIX_EPOCH
                 + Duration::from_secs(u64::try_from(self.at).map_err(|_| invalid("at"))?),
         })
+    }
+}
+
+/// The two episode columns read as one value: both NULL is no episode, both
+/// set and ordered is the span, anything else is a broken row.
+fn episode_range(low: Option<i64>, high: Option<i64>) -> Result<Option<RangeInclusive<u32>>, ()> {
+    match (low, high) {
+        (None, None) => Ok(None),
+        (Some(low), Some(high)) => {
+            let low = u32::try_from(low).map_err(|_| ())?;
+            let high = u32::try_from(high).map_err(|_| ())?;
+            if low <= high {
+                Ok(Some(low..=high))
+            } else {
+                Err(())
+            }
+        }
+        (None, Some(_)) | (Some(_), None) => Err(()),
     }
 }
 
@@ -509,6 +534,7 @@ mod tests {
             status: WatchStatus::Watching,
             progress: 0,
             total: None,
+            rewatching: false,
         }
     }
 
@@ -517,13 +543,13 @@ mod tests {
     }
 
     #[test]
-    fn open_creates_the_database_at_schema_v3_without_recovery() {
+    fn open_creates_the_database_at_schema_v4_without_recovery() {
         let (_tmp, dir) = open_tmp();
         let store = open(&dir);
         assert!(dir.root().join("library.sqlite").is_file());
-        assert_eq!(schema_version(&store), SchemaVersion(3));
+        assert_eq!(schema_version(&store), SchemaVersion(4));
         drop(store);
-        assert_eq!(schema_version(&open(&dir)), SchemaVersion(3));
+        assert_eq!(schema_version(&open(&dir)), SchemaVersion(4));
     }
 
     #[test]
@@ -550,7 +576,7 @@ mod tests {
         let recovered = recovered.expect("recovery reported");
         assert_backup_name(&backup_name(&recovered));
         assert_eq!(fs::read(&recovered.backup).unwrap(), garbage);
-        assert_eq!(schema_version(&store), SchemaVersion(3));
+        assert_eq!(schema_version(&store), SchemaVersion(4));
         assert_eq!(store.entries().unwrap(), vec![]);
         drop(store);
 
@@ -642,7 +668,7 @@ mod tests {
         ProposedMatch {
             raw_title: raw.into(),
             parsed_title: "Show".into(),
-            episode: Some(3),
+            episode: Some(3..=3),
             season: Some(2),
             release_group: Some("Subs".into()),
             link: Link::Unmatched,
@@ -652,7 +678,7 @@ mod tests {
     }
 
     #[test]
-    fn v1_library_migrates_to_v3_and_keeps_entries() {
+    fn v1_library_migrates_to_v4_and_keeps_entries() {
         let (_tmp, dir) = open_tmp();
         let conn = Connection::open(dir.library_db()).unwrap();
         conn.execute_batch(include_str!("../migrations/01-entries/up.sql"))
@@ -667,12 +693,13 @@ mod tests {
         drop(conn);
 
         let store = open(&dir);
-        assert_eq!(schema_version(&store), SchemaVersion(3));
+        assert_eq!(schema_version(&store), SchemaVersion(4));
         let entries = store.entries().unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].title, "Show");
         assert_eq!(entries[0].progress, 3);
         assert_eq!(entries[0].total, Some(12));
+        assert!(!entries[0].rewatching);
         assert_eq!(store.last_match().unwrap(), None);
     }
 
@@ -696,8 +723,85 @@ mod tests {
         drop(conn);
 
         let store = open(&dir);
-        assert_eq!(schema_version(&store), SchemaVersion(3));
+        assert_eq!(schema_version(&store), SchemaVersion(4));
         assert_eq!(store.last_match().unwrap(), Some(proposed("Show - 03.mkv")));
+    }
+
+    #[test]
+    fn v3_last_match_gains_an_episode_end() {
+        let (_tmp, dir) = open_tmp();
+        let conn = Connection::open(dir.library_db()).unwrap();
+        for sql in [
+            include_str!("../migrations/01-entries/up.sql"),
+            include_str!("../migrations/02-last_match/up.sql"),
+            include_str!("../migrations/03-drop_outcome/up.sql"),
+        ] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO last_match (id, raw_title, parsed_title, episode, season, \
+             release_group, entry_id, confidence, player, at) \
+             VALUES (1, 'Show - 03.mkv', 'Show', 3, 2, 'Subs', NULL, 'unmatched', \
+             'mpv', 1700000000)",
+            [],
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 3).unwrap();
+        drop(conn);
+
+        let store = open(&dir);
+        assert_eq!(schema_version(&store), SchemaVersion(4));
+        assert_eq!(store.last_match().unwrap(), Some(proposed("Show - 03.mkv")));
+    }
+
+    #[test]
+    fn disagreeing_episode_columns_are_invalid() {
+        let (_tmp, dir) = open_tmp();
+        let mut store = open(&dir);
+        store.save_last_match(&proposed("Show - 03.mkv")).unwrap();
+        for broken in [
+            "UPDATE last_match SET episode = 5, episode_end = 2",
+            "UPDATE last_match SET episode = 3, episode_end = NULL",
+            "UPDATE last_match SET episode = NULL, episode_end = 3",
+            "UPDATE last_match SET episode = -1, episode_end = 3",
+        ] {
+            store.execute_raw(broken);
+            assert!(
+                matches!(
+                    store.last_match(),
+                    Err(StoreError::InvalidLastMatch { field: "episode" })
+                ),
+                "{broken}"
+            );
+        }
+    }
+
+    #[test]
+    fn last_match_round_trips_a_batch() {
+        let (_tmp, dir) = open_tmp();
+        let mut store = open(&dir);
+        let batch = ProposedMatch {
+            episode: Some(1..=12),
+            ..proposed("Show - 01-12.mkv")
+        };
+        store.save_last_match(&batch).unwrap();
+        assert_eq!(store.last_match().unwrap(), Some(batch));
+    }
+
+    #[test]
+    fn add_persists_the_rewatch_flag() {
+        let (_tmp, dir) = open_tmp();
+        let mut store = open(&dir);
+        let again = store
+            .add(NewEntry {
+                rewatching: true,
+                ..entry("Again")
+            })
+            .unwrap();
+        let fresh = store.add(entry("Fresh")).unwrap();
+        assert!(again.rewatching);
+        assert!(!fresh.rewatching);
+        assert_eq!(store.entries().unwrap(), vec![again, fresh]);
     }
 
     #[test]

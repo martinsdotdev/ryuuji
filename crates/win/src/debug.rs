@@ -3,6 +3,7 @@
 
 use std::cell::RefCell;
 use std::fmt::Write as _;
+use std::ops::RangeInclusive;
 use std::path::Path;
 use std::rc::Rc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -157,7 +158,7 @@ impl Report {
                 let _ = writeln!(
                     out,
                     "  episode: {}  season: {}  group: {}",
-                    count_text(last.episode),
+                    episode_text(last.episode.as_ref()),
                     count_text(last.season),
                     last.release_group.as_deref().unwrap_or(NOT_APPLICABLE)
                 );
@@ -209,6 +210,21 @@ impl Report {
 /// A count, or the em dash when absent.
 fn count_text(value: Option<u32>) -> String {
     value.map_or_else(|| NOT_APPLICABLE.to_owned(), |n| n.to_string())
+}
+
+/// An episode span, `3` alone or `1-12` for a batch, or the em dash when
+/// absent. Plain hyphen: the report is plain text.
+fn episode_text(value: Option<&RangeInclusive<u32>>) -> String {
+    value.map_or_else(
+        || NOT_APPLICABLE.to_owned(),
+        |range| {
+            if range.start() == range.end() {
+                range.start().to_string()
+            } else {
+                format!("{}-{}", range.start(), range.end())
+            }
+        },
+    )
 }
 
 /// `app_id | title | status | player`, the player as [`NOT_APPLICABLE`] when
@@ -657,7 +673,7 @@ mod tests {
         let last = ProposedMatch {
             raw_title: "[Subs] Show - 03.mkv".to_owned(),
             parsed_title: "Show".to_owned(),
-            episode: Some(3),
+            episode: Some(3..=3),
             season: None,
             release_group: Some("Subs".to_owned()),
             link: Link::Unmatched,
@@ -680,7 +696,7 @@ mod tests {
             "Library: {} ({len}, modified ",
             core.library.path.display()
         )));
-        assert!(text.contains("Schema version: 3\n"));
+        assert!(text.contains("Schema version: 4\n"));
         assert!(text.contains(&format!(
             "Settings: {} (missing)",
             core.settings.path.display()

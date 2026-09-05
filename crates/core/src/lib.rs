@@ -116,6 +116,9 @@ pub struct NewEntry {
     pub progress: u32,
     /// Total episode count when known.
     pub total: Option<u32>,
+    /// Watching again after Completed; lets a recorded episode land on a
+    /// finished show. Set from M5, never here.
+    pub rewatching: bool,
 }
 
 /// One tracked show as stored.
@@ -128,6 +131,9 @@ pub struct LibraryEntry {
     pub progress: u32,
     /// Total episode count when known.
     pub total: Option<u32>,
+    /// Watching again after Completed; lets a recorded episode land on a
+    /// finished show. Set from M5, never here.
+    pub rewatching: bool,
 }
 
 /// What the detection side currently reports.

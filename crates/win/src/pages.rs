@@ -255,8 +255,13 @@ fn proposal_card(
 
 fn match_caption(m: &ProposedMatch, idle: bool, now: SystemTime) -> String {
     let mut parts = Vec::new();
-    if let Some(episode) = m.episode {
-        parts.push(format!("Episode {episode}"));
+    if let Some(episode) = &m.episode {
+        let (low, high) = (episode.start(), episode.end());
+        parts.push(if low == high {
+            format!("Episode {low}")
+        } else {
+            format!("Episodes {low}\u{2013}{high}")
+        });
     }
     parts.push(m.link.confidence().label().to_owned());
     if idle {
@@ -427,12 +432,20 @@ mod tests {
     #[test]
     fn match_caption_joins_episode_confidence_and_idle_player() {
         let m = ProposedMatch {
-            episode: Some(1),
+            episode: Some(1..=1),
             ..proposal()
         };
         assert_eq!(
             match_caption(&m, true, SystemTime::UNIX_EPOCH),
             "Episode 1 \u{b7} No library entry \u{b7} Last seen in mpv \u{b7} 0 s ago"
+        );
+        let batch = ProposedMatch {
+            episode: Some(1..=12),
+            ..proposal()
+        };
+        assert_eq!(
+            match_caption(&batch, false, SystemTime::UNIX_EPOCH),
+            "Episodes 1\u{2013}12 \u{b7} No library entry"
         );
         assert_eq!(
             match_caption(&proposal(), false, SystemTime::UNIX_EPOCH),

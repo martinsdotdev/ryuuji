@@ -177,6 +177,7 @@ impl Ryuuji {
             status: WatchStatus::Watching,
             progress: 0,
             total: None,
+            rewatching: false,
         });
         // Not `absorb`: the link is known here, so re-resolving first would
         // save a proposal that the relink below immediately replaces, and a
@@ -245,6 +246,7 @@ mod tests {
             status: WatchStatus::PlanToWatch,
             progress: 0,
             total: Some(12),
+            rewatching: false,
         }
     }
 
