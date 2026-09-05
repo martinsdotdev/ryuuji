@@ -14,7 +14,7 @@ use windows_reactor::{
     RequestedTheme, Symbol, component, set_requested_theme,
 };
 
-use crate::debug::{self, Report};
+use crate::debug;
 use crate::logging::RecentEvents;
 use crate::pages;
 
@@ -84,26 +84,17 @@ impl Component for Shell {
         });
 
         let detection_down = watcher.is_err();
-        let detail = match state.detail {
-            Some(Detail::Diagnostics) => {
-                let sessions = Result::as_ref(&watcher)
-                    .map(Watcher::sessions)
-                    .map_err(|err| error_chain(err));
-                Some(component(
-                    debug::diagnostics,
-                    debug::DiagnosticsProps {
-                        report: Report::new(
-                            core.borrow().diagnostics(),
-                            core.borrow().state().last_match.clone(),
-                            self.recent.snapshot(),
-                            sessions,
-                        ),
-                        dispatch: dispatch.clone(),
-                    },
-                ))
-            }
-            None => None,
-        };
+        let detail = state.detail.map(|detail| match detail {
+            Detail::Diagnostics => component(
+                debug::diagnostics,
+                debug::DiagnosticsProps {
+                    dispatch: dispatch.clone(),
+                    core: core.clone(),
+                    recent: self.recent.clone(),
+                    watcher: watcher.clone(),
+                },
+            ),
+        });
         let body = pages::render(&state, dispatch.clone(), &self.dir, detection_down, detail);
 
         let on_detail = state.detail.is_some();

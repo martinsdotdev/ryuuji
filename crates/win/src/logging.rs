@@ -40,6 +40,11 @@ impl RecentEvents {
             .collect()
     }
 
+    /// Whether `other` is a clone of this handle, sharing its buffer.
+    pub fn shares_buffer(&self, other: &RecentEvents) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
     fn push(&self, record: EventRecord) {
         let mut events = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         events.push_back(record);

@@ -1,19 +1,21 @@
 //! The Diagnostics page: where the files are, what state they are in, and
 //! the tail of the log, with the whole thing copyable as plain text.
 
+use std::cell::RefCell;
 use std::fmt::Write as _;
 use std::path::Path;
+use std::rc::Rc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ryuuji_core::{
     Command, DataDirSource, Diagnostics, FileFacts, FileStat, PlaybackEvent, PlaybackSource,
-    PlaybackStatus, ProbeFailed, ProposedMatch, SchemaVersion,
+    PlaybackStatus, ProbeFailed, ProposedMatch, Ryuuji, SchemaVersion, error_chain,
 };
-use ryuuji_detect::SessionFacts;
+use ryuuji_detect::{SessionFacts, WatchError, Watcher};
 use tracing::{Level, warn};
 use windows_reactor::*;
 
-use crate::logging::EventRecord;
+use crate::logging::{EventRecord, RecentEvents};
 use crate::ui::{
     self, APP_VERSION, BUILD_PROFILE, CONTENT_MAX_WIDTH, FOLDER_GLYPH, age_of, caption, card,
     card_frame, enum_picker, open_folder, section, table,
@@ -85,6 +87,25 @@ pub struct Report {
 }
 
 impl Report {
+    /// Reads every source at one instant. Called from the page's own
+    /// render, so its refresh clock re-reads what it shows.
+    pub fn gather(
+        core: &Ryuuji,
+        recent: &RecentEvents,
+        watcher: &std::result::Result<Watcher, WatchError>,
+    ) -> Report {
+        let sessions = watcher
+            .as_ref()
+            .map(Watcher::sessions)
+            .map_err(|err| error_chain(err));
+        Report::new(
+            core.diagnostics(),
+            core.state().last_match.clone(),
+            recent.snapshot(),
+            sessions,
+        )
+    }
+
     pub fn new(
         core: Diagnostics,
         last_match: Option<ProposedMatch>,
@@ -298,13 +319,28 @@ pub fn copy_to_clipboard(text: &str) -> String {
     }
 }
 
-/// What Diagnostics shows and the way back into the core. The shell gathers
-/// the report because it owns the core handle and the log buffer; the level
-/// filter and the last action's outcome are the view's own.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// The sources Diagnostics reads and the way back into the core. The page
+/// gathers its own report from these on every render, so the refresh clock
+/// it runs re-reads exactly what it shows; the level filter and the last
+/// action's outcome are the view's own.
+#[derive(Clone)]
 pub struct DiagnosticsProps {
     pub dispatch: Dispatch<Command>,
-    pub report: Report,
+    pub core: Rc<RefCell<Ryuuji>>,
+    pub recent: RecentEvents,
+    pub watcher: Rc<std::result::Result<Watcher, WatchError>>,
+}
+
+/// Identity, not contents: two handles to the same core are the same
+/// source. The reactor requires `PartialEq` on props; this is not a memo
+/// key, and it never holds today because `dispatch` is fresh every render.
+impl PartialEq for DiagnosticsProps {
+    fn eq(&self, other: &DiagnosticsProps) -> bool {
+        self.dispatch == other.dispatch
+            && Rc::ptr_eq(&self.core, &other.core)
+            && self.recent.shares_buffer(&other.recent)
+            && Rc::ptr_eq(&self.watcher, &other.watcher)
+    }
 }
 
 pub fn diagnostics(props: &DiagnosticsProps, cx: &mut RenderCx) -> Element {
@@ -312,13 +348,13 @@ pub fn diagnostics(props: &DiagnosticsProps, cx: &mut RenderCx) -> Element {
     let (last_action, set_last_action) = cx.use_state(None::<String>);
     ui::use_refresh(cx, true);
 
-    let report = &props.report;
+    let report = Report::gather(&props.core.borrow(), &props.recent, &props.watcher);
     let dispatch = props.dispatch.clone();
     let core = &report.core;
     let copy = {
-        let text = report.to_text();
+        let report = report.clone();
         let set = set_last_action.clone();
-        move || set.call(Some(copy_to_clipboard(&text)))
+        move || set.call(Some(copy_to_clipboard(&report.to_text())))
     };
     let open = {
         let root = core.data_dir.clone();
@@ -379,7 +415,7 @@ pub fn diagnostics(props: &DiagnosticsProps, cx: &mut RenderCx) -> Element {
             vstack((section("Files"), files_card(core, report.now))).spacing(8.0),
             vstack((section("Playback"), playback_card)).spacing(8.0),
             vstack((section("Media sessions"), sessions_card(&report.sessions))).spacing(8.0),
-            vstack((events_header, events_card(report, filter))).spacing(8.0),
+            vstack((events_header, events_card(&report, filter))).spacing(8.0),
         ))
         .spacing(24.0)
         .max_width(CONTENT_MAX_WIDTH),
@@ -550,6 +586,8 @@ fn level_brush(level: Level) -> ThemeRef {
 #[cfg(test)]
 mod tests {
     use ryuuji_core::{ByteSize, DataDir, Link, Opened, ProposedMatch, Store};
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
 
     use super::*;
 
@@ -668,6 +706,28 @@ mod tests {
         assert!(text.contains(" INFO  ryuuji_core::store info event\n"));
         assert!(text.contains(" ERROR ryuuji_core::store error event\n"));
         assert!(text.contains(" ago)"));
+    }
+
+    #[test]
+    fn gather_reads_the_core_the_buffer_and_the_watcher_outcome() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = DataDir::at(tmp.path()).unwrap();
+        let core = Ryuuji::open(&dir).unwrap();
+        let recent = RecentEvents::default();
+        let _default = tracing_subscriber::registry()
+            .with(recent.clone())
+            .set_default();
+        tracing::info!("gathered");
+
+        let report = Report::gather(&core, &recent, &Err(WatchError::Exited));
+
+        assert_eq!(report.core, core.diagnostics());
+        assert_eq!(report.last_match, core.state().last_match);
+        assert_eq!(report.events[0].message, "gathered");
+        assert_eq!(
+            report.sessions,
+            Err("the SMTC worker exited before reporting".to_owned())
+        );
     }
 
     #[test]
