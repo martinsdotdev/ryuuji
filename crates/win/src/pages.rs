@@ -6,12 +6,13 @@
 //! neutral tone). An open detail is built by the caller and handed in, so
 //! this module never sees the core handle or the log buffer.
 
+use std::ops::RangeInclusive;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 use ryuuji_core::{
     AppState, Command, DataDir, Detail, LibraryEntry, Notice, NowPlaying, Options, Page,
-    ProposedMatch, StoreError, ThemePreference, error_chain, parse,
+    ProposedMatch, StoreError, ThemePreference, WatchProgress, error_chain, parse,
 };
 use windows_reactor::*;
 
@@ -41,6 +42,7 @@ pub fn render(
                     dispatch: dispatch.clone(),
                     now_playing: state.now_playing.clone(),
                     last_match: state.last_match.clone(),
+                    watch_progress: state.watch_progress,
                     title: state
                         .last_match
                         .as_ref()
@@ -154,6 +156,7 @@ struct NowPlayingProps {
     dispatch: Dispatch<Command>,
     now_playing: NowPlaying,
     last_match: Option<ProposedMatch>,
+    watch_progress: Option<WatchProgress>,
     /// The proposal's title as the library knows it, resolved by the caller
     /// so the page never carries the library.
     title: Option<String>,
@@ -181,19 +184,27 @@ fn now_playing(props: &NowPlayingProps, cx: &mut RenderCx) -> Element {
             status,
             position,
             duration,
-        } => card_frame(
-            vstack((
-                text_block(title.clone()).font_size(20.0).semibold().wrap(),
-                caption(format!("{} in {player}", status.label())),
+        } => {
+            let mut lines: Vec<Element> = vec![
+                text_block(title.clone())
+                    .font_size(20.0)
+                    .semibold()
+                    .wrap()
+                    .into(),
+                caption(format!("{} in {player}", status.label())).into(),
                 text_block(format!(
                     "{} / {}",
                     clock_text(*position),
                     duration_text(*duration)
-                )),
-            ))
-            .spacing(4.0),
-        )
-        .into(),
+                ))
+                .into(),
+            ];
+            if let Some(progress) = &props.watch_progress {
+                let episode = props.last_match.as_ref().and_then(|m| m.episode.as_ref());
+                lines.push(caption(progress_text(progress, episode)).into());
+            }
+            card_frame(vstack(lines).spacing(4.0)).into()
+        }
     };
     match &props.last_match {
         Some(m) => vstack((
@@ -256,12 +267,7 @@ fn proposal_card(
 fn match_caption(m: &ProposedMatch, idle: bool, now: SystemTime) -> String {
     let mut parts = Vec::new();
     if let Some(episode) = &m.episode {
-        let (low, high) = (episode.start(), episode.end());
-        parts.push(if low == high {
-            format!("Episode {low}")
-        } else {
-            format!("Episodes {low}\u{2013}{high}")
-        });
+        parts.push(episode_text(episode));
     }
     parts.push(m.link.confidence().label().to_owned());
     if idle {
@@ -269,6 +275,29 @@ fn match_caption(m: &ProposedMatch, idle: bool, now: SystemTime) -> String {
         parts.push(age_of(m.at, now));
     }
     parts.join(" \u{b7} ")
+}
+
+/// `Episode 3`, or `Episodes 1–12` for a batch.
+fn episode_text(episode: &RangeInclusive<u32>) -> String {
+    let (low, high) = (episode.start(), episode.end());
+    if low == high {
+        format!("Episode {low}")
+    } else {
+        format!("Episodes {low}\u{2013}{high}")
+    }
+}
+
+/// The countdown to the write, then what was written. Why a countdown did
+/// not end in a write is not known here; that wording is UMA-78's.
+fn progress_text(progress: &WatchProgress, episode: Option<&RangeInclusive<u32>>) -> String {
+    if !progress.recorded {
+        let remaining = progress.threshold.saturating_sub(progress.accrued);
+        return format!("Recording in {}", clock_text(remaining));
+    }
+    match episode {
+        Some(episode) => format!("Recorded {}", episode_text(episode).to_lowercase()),
+        None => "Recorded".to_owned(),
+    }
 }
 
 /// Every element the parser finds in the raw player title. Re-parsed here
@@ -461,6 +490,39 @@ mod tests {
             "No library entry \u{b7} Last seen in mpv \u{b7} 2 h ago"
         );
         assert_eq!(match_caption(&proposal(), false, now), "No library entry");
+    }
+
+    #[test]
+    fn progress_text_counts_down_then_names_what_was_recorded() {
+        let counting = WatchProgress {
+            accrued: Duration::from_secs(510),
+            threshold: Duration::from_secs(710),
+            recorded: false,
+        };
+        assert_eq!(
+            progress_text(&counting, Some(&(3..=3))),
+            "Recording in 3:20"
+        );
+        assert_eq!(progress_text(&counting, None), "Recording in 3:20");
+        let overshot = WatchProgress {
+            accrued: Duration::from_secs(800),
+            ..counting
+        };
+        assert_eq!(progress_text(&overshot, None), "Recording in 0:00");
+
+        let recorded = WatchProgress {
+            recorded: true,
+            ..counting
+        };
+        assert_eq!(
+            progress_text(&recorded, Some(&(3..=3))),
+            "Recorded episode 3"
+        );
+        assert_eq!(
+            progress_text(&recorded, Some(&(1..=12))),
+            "Recorded episodes 1\u{2013}12"
+        );
+        assert_eq!(progress_text(&recorded, None), "Recorded");
     }
 
     #[test]
