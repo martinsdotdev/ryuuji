@@ -39,6 +39,7 @@ pub fn injected(status: PlaybackStatus) -> PlaybackEvent {
         duration: Duration::from_secs(24 * 60),
         observed_at: SystemTime::now(),
         source: PlaybackSource::Injected,
+        foreground: None,
     }
 }
 

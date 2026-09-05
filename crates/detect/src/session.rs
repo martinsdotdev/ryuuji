@@ -88,6 +88,7 @@ pub(crate) fn normalize(matched: &Matched<'_>, now: SystemTime) -> Option<Playba
         duration: snapshot.end.saturating_sub(snapshot.start),
         observed_at: now,
         source: PlaybackSource::Detected,
+        foreground: None,
     })
 }
 
@@ -198,6 +199,7 @@ mod tests {
             duration: Duration::from_secs(1440),
             observed_at: now(),
             source: PlaybackSource::Detected,
+            foreground: None,
         }
     }
 

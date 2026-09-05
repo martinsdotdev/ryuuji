@@ -77,6 +77,7 @@ mod tests {
             duration: Duration::from_secs(1420),
             observed_at: at(seen),
             source: PlaybackSource::Detected,
+            foreground: None,
         }
     }
 
