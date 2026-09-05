@@ -84,6 +84,12 @@ impl WatchSession {
         }
     }
 
+    /// The episode has been written; nothing more records until the key
+    /// changes.
+    pub(crate) fn mark_recorded(&mut self) {
+        self.recorded = true;
+    }
+
     fn is_watching(&self, event: &PlaybackEvent) -> bool {
         self.key
             .as_ref()
@@ -452,6 +458,41 @@ mod tests {
         );
         // Nothing from the old title's cursor leaks into the first credit.
         assert_eq!(session.accrued, Duration::ZERO);
+    }
+
+    #[test]
+    fn mark_recorded_sticks_across_same_title_events() {
+        let mut session = WatchSession::default();
+        session.observe(&playing_at(100, 1_000));
+        session.mark_recorded();
+        assert!(
+            session
+                .observe(&playing_at(160, 1_060))
+                .progress
+                .unwrap()
+                .recorded
+        );
+        assert!(
+            session
+                .observe(&event("Show - 03.mkv", PlaybackStatus::Paused, 160, 1_070))
+                .progress
+                .unwrap()
+                .recorded
+        );
+        assert!(
+            session
+                .observe(&event("Show - 03.mkv", PlaybackStatus::Stopped, 160, 1_080))
+                .progress
+                .unwrap()
+                .recorded
+        );
+        assert!(
+            session
+                .observe(&playing_at(220, 1_140))
+                .progress
+                .unwrap()
+                .recorded
+        );
     }
 
     #[test]
