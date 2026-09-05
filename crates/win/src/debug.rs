@@ -303,8 +303,8 @@ pub fn copy_to_clipboard(text: &str) -> String {
 /// filter and the last action's outcome are the view's own.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DiagnosticsProps {
-    pub report: Report,
     pub dispatch: Dispatch<Command>,
+    pub report: Report,
 }
 
 pub fn diagnostics(props: &DiagnosticsProps, cx: &mut RenderCx) -> Element {

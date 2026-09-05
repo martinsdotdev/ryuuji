@@ -6,11 +6,12 @@
 //! neutral tone). An open detail is built by the caller and handed in, so
 //! this module never sees the core handle or the log buffer.
 
+use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 use ryuuji_core::{
     AppState, Command, DataDir, Detail, LibraryEntry, Notice, NowPlaying, Options, Page,
-    ProposedMatch, Settings, StoreError, ThemePreference, error_chain, parse,
+    ProposedMatch, StoreError, ThemePreference, error_chain, parse,
 };
 use windows_reactor::*;
 
@@ -37,19 +38,22 @@ pub fn render(
             Page::NowPlaying => component(
                 now_playing,
                 NowPlayingProps {
+                    dispatch: dispatch.clone(),
                     now_playing: state.now_playing.clone(),
                     last_match: state.last_match.clone(),
-                    library: state.library.clone(),
+                    title: state
+                        .last_match
+                        .as_ref()
+                        .map(|m| m.title_in(&state.library).to_owned()),
                     detection_down,
-                    dispatch: dispatch.clone(),
                 },
             ),
             Page::Settings => component(
                 settings,
                 SettingsProps {
-                    settings: state.settings.clone(),
-                    dir: dir.clone(),
                     dispatch: dispatch.clone(),
+                    theme: state.settings.theme,
+                    root: dir.root().to_path_buf(),
                 },
             ),
         },
@@ -143,13 +147,17 @@ fn status_line(entry: &LibraryEntry) -> String {
 
 /// What Now playing shows. A standing proposal is captioned with its age,
 /// so while nothing is playing the page runs a clock to keep that current.
+/// `dispatch` is fresh every render and compares by identity, so it comes
+/// first and the props compare stops there.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct NowPlayingProps {
+    dispatch: Dispatch<Command>,
     now_playing: NowPlaying,
     last_match: Option<ProposedMatch>,
-    library: Vec<LibraryEntry>,
+    /// The proposal's title as the library knows it, resolved by the caller
+    /// so the page never carries the library.
+    title: Option<String>,
     detection_down: bool,
-    dispatch: Dispatch<Command>,
 }
 
 fn now_playing(props: &NowPlayingProps, cx: &mut RenderCx) -> Element {
@@ -157,7 +165,6 @@ fn now_playing(props: &NowPlayingProps, cx: &mut RenderCx) -> Element {
     ui::use_refresh(cx, idle && props.last_match.is_some());
 
     let now_playing = &props.now_playing;
-    let library = &props.library;
     let now = SystemTime::now();
     let top: Element = match now_playing {
         NowPlaying::Idle => {
@@ -191,7 +198,13 @@ fn now_playing(props: &NowPlayingProps, cx: &mut RenderCx) -> Element {
     match &props.last_match {
         Some(m) => vstack((
             top,
-            proposal_card(m, library, idle, now, props.dispatch.clone()),
+            proposal_card(
+                m,
+                props.title.as_deref().unwrap_or_else(|| m.shown_title()),
+                idle,
+                now,
+                props.dispatch.clone(),
+            ),
         ))
         .spacing(8.0)
         .into(),
@@ -217,15 +230,12 @@ fn idle_placeholder_copy(detection_down: bool) -> (&'static str, &'static str) {
 
 fn proposal_card(
     m: &ProposedMatch,
-    library: &[LibraryEntry],
+    title: &str,
     idle: bool,
     now: SystemTime,
     dispatch: Dispatch<Command>,
 ) -> Element {
-    let title = text_block(m.title_in(library))
-        .font_size(20.0)
-        .semibold()
-        .wrap();
+    let title = text_block(title).font_size(20.0).semibold().wrap();
     let mut children: Vec<Element> =
         vec![title.into(), caption(match_caption(m, idle, now)).into()];
     let rows = fact_rows(m);
@@ -307,18 +317,16 @@ fn duration_text(value: Duration) -> String {
 /// own, so it lives in the page rather than in the shell.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SettingsProps {
-    settings: Settings,
-    dir: DataDir,
     dispatch: Dispatch<Command>,
+    theme: ThemePreference,
+    root: PathBuf,
 }
 
 fn settings(props: &SettingsProps, cx: &mut RenderCx) -> Element {
     let (folder_action, set_folder_action) = cx.use_state(None::<String>);
 
-    let settings = &props.settings;
-    let dir = &props.dir;
     let dispatch = props.dispatch.clone();
-    let root = dir.root().to_path_buf();
+    let root = props.root.clone();
     let open_folder = move || set_folder_action.call(Some(ui::open_folder(&root)));
     let open_diagnostics = {
         let dispatch = dispatch.clone();
@@ -326,13 +334,13 @@ fn settings(props: &SettingsProps, cx: &mut RenderCx) -> Element {
     };
     scroll_viewer(
         vstack((
-            vstack((section("Appearance"), theme_card(settings.theme, dispatch))).spacing(8.0),
+            vstack((section("Appearance"), theme_card(props.theme, dispatch))).spacing(8.0),
             vstack((
                 section("Your data"),
                 card(
                     Some(FOLDER_GLYPH),
                     "Data folder",
-                    dir.root().display().to_string(),
+                    props.root.display().to_string(),
                     hstack((
                         button("Open folder").on_click(open_folder),
                         caption(folder_action.unwrap_or_default())
