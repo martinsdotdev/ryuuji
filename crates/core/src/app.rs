@@ -259,6 +259,7 @@ mod tests {
             duration: Duration::from_secs(1420),
             observed_at: SystemTime::UNIX_EPOCH,
             source: PlaybackSource::Detected,
+            foreground: None,
         }
     }
 

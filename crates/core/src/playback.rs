@@ -55,4 +55,8 @@ pub struct PlaybackEvent {
     pub duration: Duration,
     pub observed_at: SystemTime,
     pub source: PlaybackSource,
+    /// Whether the player's window is in front. `None` when the platform
+    /// cannot tell; the accrual rule treats that as watchable, so a source
+    /// without a focus signal still records.
+    pub foreground: Option<bool>,
 }
