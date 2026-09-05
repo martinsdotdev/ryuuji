@@ -3,7 +3,7 @@ use crate::watch::WatchSession;
 use crate::{
     AppState, Command, DataDir, Diagnostics, LibraryEntry, Link, NewEntry, Notice, NowPlaying,
     Opened, PlaybackEvent, ProposedMatch, Settings, Store, StoreError, ThemePreference,
-    WatchStatus, error_chain, matching,
+    WatchProgress, WatchStatus, error_chain, matching,
 };
 
 /// The running application: the store plus the state derived from it.
@@ -103,11 +103,61 @@ impl Ryuuji {
             duration_s = event.duration.as_secs(),
             "playback"
         );
-        if self.session.observe(&event).new_viewing {
+        let observed = self.session.observe(&event);
+        if observed.new_viewing {
             let proposal = matching::propose(&event, &self.state.library);
             self.record_match(proposal);
         }
+        self.state.watch_progress = observed.progress;
+        self.try_record();
         self.state.now_playing = NowPlaying::of(&event);
+    }
+
+    /// Writes the episode the standing viewing has earned, once per viewing.
+    /// The gates run in the order a decline would be explained in: the
+    /// session, then the match, then the entry. A failed write leaves the
+    /// session unrecorded, so the next event past the threshold tries again
+    /// and the notice says why.
+    fn try_record(&mut self) {
+        let Some(progress) = self.state.watch_progress else {
+            return;
+        };
+        if progress.recorded || progress.accrued < progress.threshold {
+            return;
+        }
+        let Some(last) = self.state.last_match.as_ref() else {
+            return;
+        };
+        let Link::Exact(id) = last.link else {
+            return;
+        };
+        let Some(entry) = self.state.library.iter().find(|entry| entry.id == id) else {
+            return;
+        };
+        if entry.status == WatchStatus::Completed && !entry.rewatching {
+            return;
+        }
+        let Some(range) = last.episode.as_ref().filter(|range| {
+            entry
+                .progress
+                .checked_add(1)
+                .is_some_and(|next| range.contains(&next))
+        }) else {
+            return;
+        };
+        // A batch spanning the next episode was watched through its end.
+        let watched = *range.end();
+        let outcome = self.store.set_progress(id, watched);
+        let Some(entry) = commit(&mut self.state.notices, "progress", outcome) else {
+            return;
+        };
+        upsert(&mut self.state.library, entry);
+        self.session.mark_recorded();
+        self.state.watch_progress = Some(WatchProgress {
+            recorded: true,
+            ..progress
+        });
+        tracing::info!(entry = id.as_i64(), progress = watched, "episode recorded");
     }
 
     fn set_theme(&mut self, theme: ThemePreference) {
@@ -347,6 +397,7 @@ mod tests {
         assert_eq!(after.detail, before.detail);
         assert_eq!(after.library, before.library);
         assert_eq!(after.now_playing, before.now_playing);
+        assert_eq!(after.watch_progress, before.watch_progress);
         assert_eq!(after.settings, before.settings);
         assert_eq!(after.notices, before.notices);
         assert_eq!(
@@ -414,7 +465,7 @@ mod tests {
     }
 
     #[test]
-    fn playback_changes_now_playing_and_last_match_only() {
+    fn a_first_event_changes_now_playing_last_match_and_watch_progress_only() {
         let (_tmp, dir) = open_tmp();
         let mut app = Ryuuji::open(&dir).unwrap();
         app.dispatch(Command::AddEntry(entry("Show")));
@@ -425,6 +476,14 @@ mod tests {
         let after = app.state();
         assert!(matches!(after.now_playing, NowPlaying::Playing { .. }));
         assert!(after.last_match.is_some());
+        assert_eq!(
+            after.watch_progress,
+            Some(WatchProgress {
+                accrued: Duration::ZERO,
+                threshold: Duration::from_secs(710),
+                recorded: false,
+            })
+        );
         assert_eq!(after.page, before.page);
         assert_eq!(after.library, before.library);
         assert_eq!(after.settings, before.settings);
@@ -809,5 +868,186 @@ mod tests {
             ..playing("Show - 03.mkv")
         }));
         assert_eq!(app.state().last_match, relinked);
+    }
+
+    /// The same title `secs` later and `secs` further in, so the credit is
+    /// the full gap. The viewing's threshold is 710 s.
+    fn later(title: &str, secs: u64) -> PlaybackEvent {
+        PlaybackEvent {
+            position: Duration::from_secs(305 + secs),
+            observed_at: SystemTime::UNIX_EPOCH + Duration::from_secs(secs),
+            ..playing(title)
+        }
+    }
+
+    fn watch_past_threshold(app: &mut Ryuuji, title: &str) {
+        app.dispatch(Command::Playback(playing(title)));
+        app.dispatch(Command::Playback(later(title, 720)));
+    }
+
+    fn stored_progress(dir: &DataDir, id: EntryId) -> u32 {
+        Store::open(dir)
+            .unwrap()
+            .store
+            .entries()
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.id == id)
+            .unwrap()
+            .progress
+    }
+
+    #[test]
+    fn watching_past_half_the_episode_records_it_once() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::AddEntry(entry("Show")));
+        let id = app.state().library[0].id;
+
+        app.dispatch(Command::Playback(playing("Show - 01.mkv")));
+        assert_eq!(app.state().library[0].progress, 0);
+        assert!(!app.state().watch_progress.unwrap().recorded);
+
+        app.dispatch(Command::Playback(later("Show - 01.mkv", 720)));
+        assert_eq!(app.state().library[0].progress, 1);
+        assert_eq!(stored_progress(&dir, id), 1);
+        assert!(app.state().watch_progress.unwrap().recorded);
+        assert!(app.state().notices.is_empty());
+
+        app.dispatch(Command::Playback(later("Show - 01.mkv", 1_400)));
+        assert_eq!(app.state().library[0].progress, 1);
+        assert_eq!(stored_progress(&dir, id), 1);
+    }
+
+    #[test]
+    fn a_batch_records_its_last_episode() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::AddEntry(entry("Show")));
+        watch_past_threshold(&mut app, "Show - 01-12.mkv");
+        assert_eq!(
+            app.state().last_match.as_ref().unwrap().episode,
+            Some(1..=12)
+        );
+        assert_eq!(app.state().library[0].progress, 12);
+    }
+
+    #[test]
+    fn short_of_the_threshold_does_not_record() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::AddEntry(entry("Show")));
+        app.dispatch(Command::Playback(playing("Show - 01.mkv")));
+        app.dispatch(Command::Playback(later("Show - 01.mkv", 700)));
+        assert_eq!(app.state().library[0].progress, 0);
+        assert!(!app.state().watch_progress.unwrap().recorded);
+    }
+
+    #[test]
+    fn a_likely_match_does_not_record() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::AddEntry(entry("Frieren Beyond Journeys End")));
+        watch_past_threshold(&mut app, "Frieren Beyond Journey End - 01.mkv");
+        assert!(matches!(
+            app.state().last_match.as_ref().unwrap().link,
+            Link::Likely(_)
+        ));
+        assert_eq!(app.state().library[0].progress, 0);
+        assert!(!app.state().watch_progress.unwrap().recorded);
+    }
+
+    #[test]
+    fn a_completed_entry_records_only_when_rewatching() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::AddEntry(entry("Show")));
+        let id = app.state().library[0].id;
+        app.dispatch(Command::SetStatus {
+            id,
+            status: WatchStatus::Completed,
+        });
+        watch_past_threshold(&mut app, "Show - 01.mkv");
+        assert_eq!(app.state().library[0].progress, 0);
+        assert!(!app.state().watch_progress.unwrap().recorded);
+
+        // Nothing sets the flag before M5, so it goes in underneath.
+        app.store_mut()
+            .execute_raw("UPDATE entries SET rewatching = 1");
+        drop(app);
+        let mut app = Ryuuji::open(&dir).unwrap();
+        assert!(app.state().library[0].rewatching);
+        watch_past_threshold(&mut app, "Show - 01.mkv");
+        assert_eq!(app.state().library[0].progress, 1);
+    }
+
+    #[test]
+    fn an_episode_other_than_the_next_does_not_record() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::AddEntry(entry("Show")));
+        let id = app.state().library[0].id;
+        app.dispatch(Command::SetProgress { id, progress: 4 });
+
+        watch_past_threshold(&mut app, "Show - 03.mkv");
+        assert_eq!(app.state().library[0].progress, 4);
+        watch_past_threshold(&mut app, "Show - 04.mkv");
+        assert_eq!(app.state().library[0].progress, 4);
+        watch_past_threshold(&mut app, "Show - 06.mkv");
+        assert_eq!(app.state().library[0].progress, 4);
+        watch_past_threshold(&mut app, "Show.mkv");
+        assert_eq!(app.state().library[0].progress, 4);
+
+        watch_past_threshold(&mut app, "Show - 05.mkv");
+        assert_eq!(app.state().library[0].progress, 5);
+    }
+
+    #[test]
+    fn a_failed_progress_write_notices_and_tries_again() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::AddEntry(entry("Show")));
+        app.dispatch(Command::Playback(playing("Show - 01.mkv")));
+        app.store_mut().execute_raw("DROP TABLE entries");
+
+        app.dispatch(Command::Playback(later("Show - 01.mkv", 720)));
+        assert_eq!(app.state().library[0].progress, 0);
+        assert!(!app.state().watch_progress.unwrap().recorded);
+        assert!(matches!(
+            app.state().notices.as_slice(),
+            [Notice::SaveFailed { .. }]
+        ));
+
+        app.dispatch(Command::Playback(later("Show - 01.mkv", 730)));
+        assert!(matches!(
+            app.state().notices.as_slice(),
+            [Notice::SaveFailed { .. }, Notice::SaveFailed { .. }]
+        ));
+    }
+
+    /// `recorded` lives in memory only. On relaunch `resume` seeds the key
+    /// from the persisted match so the title is not re-proposed, and the
+    /// accrual starts over; what stops a second write is the range gate,
+    /// since `progress + 1` is no longer in `1..=1`.
+    #[test]
+    fn a_relaunch_under_the_same_title_does_not_record_again() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::AddEntry(entry("Show")));
+        let id = app.state().library[0].id;
+        watch_past_threshold(&mut app, "Show - 01.mkv");
+        assert_eq!(app.state().library[0].progress, 1);
+        let proposed = app.state().last_match.clone();
+        drop(app);
+
+        let mut app = Ryuuji::open(&dir).unwrap();
+        assert_eq!(app.state().watch_progress, None);
+        app.dispatch(Command::Playback(later("Show - 01.mkv", 2_000)));
+        app.dispatch(Command::Playback(later("Show - 01.mkv", 2_720)));
+        assert_eq!(app.state().last_match, proposed);
+        assert!(app.state().watch_progress.unwrap().accrued >= Duration::from_secs(710));
+        assert_eq!(app.state().library[0].progress, 1);
+        assert_eq!(stored_progress(&dir, id), 1);
+        assert!(app.state().notices.is_empty());
     }
 }

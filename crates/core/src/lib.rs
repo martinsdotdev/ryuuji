@@ -241,6 +241,9 @@ pub struct AppState {
     /// The latest playback title's proposal against the library. Survives
     /// restarts via the store.
     pub last_match: Option<ProposedMatch>,
+    /// The standing viewing's countdown to a recorded episode, so the shell
+    /// can show it. `None` when nothing is being watched.
+    pub watch_progress: Option<WatchProgress>,
     pub settings: Settings,
     /// Oldest first; the shell shows the front one.
     pub notices: Vec<Notice>,
@@ -254,6 +257,7 @@ impl Default for AppState {
             library: Vec::new(),
             now_playing: NowPlaying::Idle,
             last_match: None,
+            watch_progress: None,
             settings: Settings::default(),
             notices: Vec::new(),
         }
@@ -291,6 +295,7 @@ mod tests {
         assert!(state.library.is_empty());
         assert_eq!(state.now_playing, NowPlaying::Idle);
         assert_eq!(state.last_match, None);
+        assert_eq!(state.watch_progress, None);
         assert_eq!(state.settings.theme, ThemePreference::System);
         assert!(state.notices.is_empty());
     }
