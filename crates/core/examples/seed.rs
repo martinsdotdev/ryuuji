@@ -28,6 +28,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             status,
             progress,
             total,
+            rewatching: false,
         }));
         match app.state().library.last() {
             Some(stored) if stored.title == title => {

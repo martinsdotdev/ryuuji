@@ -4,6 +4,7 @@
 //! which library entry, if any, it names. The decision is a
 //! [`ProposedMatch`]: the shell shows it and the store keeps the latest one.
 
+use std::ops::RangeInclusive;
 use std::time::SystemTime;
 
 use ryuuji_parse::{ElementKind, Options, parse};
@@ -28,7 +29,8 @@ pub struct ProposedMatch {
     pub raw_title: String,
     /// Empty when the parser found no title.
     pub parsed_title: String,
-    pub episode: Option<u32>,
+    /// Every episode the file carries; a batch spans more than one.
+    pub episode: Option<RangeInclusive<u32>>,
     pub season: Option<u32>,
     pub release_group: Option<String>,
     pub link: Link,
@@ -295,7 +297,7 @@ pub fn propose(event: &PlaybackEvent, library: &[LibraryEntry]) -> ProposedMatch
     ProposedMatch {
         raw_title: event.title.clone(),
         parsed_title,
-        episode: parsed.episode_number(),
+        episode: parsed.episode_range(),
         season: parsed.season_number(),
         release_group: parsed.get(ElementKind::ReleaseGroup).map(str::to_owned),
         link,
@@ -321,6 +323,7 @@ mod tests {
                 status: WatchStatus::Watching,
                 progress: 0,
                 total: None,
+                rewatching: false,
             })
             .collect()
     }

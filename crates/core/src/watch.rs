@@ -193,7 +193,7 @@ mod tests {
         let persisted = ProposedMatch {
             raw_title: "Show - 03.mkv".into(),
             parsed_title: "Show".into(),
-            episode: Some(3),
+            episode: Some(3..=3),
             season: None,
             release_group: None,
             link: Link::Unmatched,
