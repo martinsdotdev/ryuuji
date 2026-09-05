@@ -1,5 +1,5 @@
 use crate::settings::{self, SettingsError};
-use crate::watch::{Observed, WatchSession};
+use crate::watch::WatchSession;
 use crate::{
     AppState, Command, DataDir, Diagnostics, LibraryEntry, Link, NewEntry, Notice, NowPlaying,
     Opened, PlaybackEvent, ProposedMatch, Settings, Store, StoreError, ThemePreference,
@@ -103,12 +103,9 @@ impl Ryuuji {
             duration_s = event.duration.as_secs(),
             "playback"
         );
-        match self.session.observe(&event) {
-            Observed::NewViewing => {
-                let proposal = matching::propose(&event, &self.state.library);
-                self.record_match(proposal);
-            }
-            Observed::Continues => {}
+        if self.session.observe(&event).new_viewing {
+            let proposal = matching::propose(&event, &self.state.library);
+            self.record_match(proposal);
         }
         self.state.now_playing = NowPlaying::of(&event);
     }

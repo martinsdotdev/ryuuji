@@ -174,6 +174,17 @@ impl NowPlaying {
     }
 }
 
+/// How far the standing viewing is from being recorded as an episode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WatchProgress {
+    /// Time credited as watched so far.
+    pub accrued: Duration,
+    /// Half the episode when its duration is known, else a flat two minutes.
+    pub threshold: Duration,
+    /// The episode has already been written for this viewing.
+    pub recorded: bool,
+}
+
 /// Everything a shell can ask the core to do.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
