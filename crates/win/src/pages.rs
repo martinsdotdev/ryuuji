@@ -326,8 +326,6 @@ fn settings(props: &SettingsProps, cx: &mut RenderCx) -> Element {
     let (folder_action, set_folder_action) = cx.use_state(None::<String>);
 
     let dispatch = props.dispatch.clone();
-    let root = props.root.clone();
-    let open_folder = move || set_folder_action.call(Some(ui::open_folder(&root)));
     let open_diagnostics = {
         let dispatch = dispatch.clone();
         move || dispatch.call(Command::OpenDetail(Detail::Diagnostics))
@@ -342,7 +340,7 @@ fn settings(props: &SettingsProps, cx: &mut RenderCx) -> Element {
                     "Data folder",
                     props.root.display().to_string(),
                     hstack((
-                        button("Open folder").on_click(open_folder),
+                        ui::open_folder_button(props.root.clone(), set_folder_action),
                         caption(folder_action.unwrap_or_default())
                             .vertical_alignment(VerticalAlignment::Center),
                     ))
