@@ -1,8 +1,9 @@
 use crate::settings::{self, SettingsError};
+use crate::watch::{Observed, WatchSession};
 use crate::{
     AppState, Command, DataDir, Diagnostics, LibraryEntry, Link, NewEntry, Notice, NowPlaying,
-    Opened, PlaybackEvent, PlaybackStatus, ProposedMatch, Settings, Store, StoreError,
-    ThemePreference, WatchStatus, error_chain, matching,
+    Opened, PlaybackEvent, ProposedMatch, Settings, Store, StoreError, ThemePreference,
+    WatchStatus, error_chain, matching,
 };
 
 /// The running application: the store plus the state derived from it.
@@ -19,6 +20,7 @@ pub struct Ryuuji {
     dir: DataDir,
     store: Store,
     state: AppState,
+    session: WatchSession,
 }
 
 impl Ryuuji {
@@ -40,6 +42,7 @@ impl Ryuuji {
         Ok(Ryuuji {
             dir: dir.clone(),
             store,
+            session: WatchSession::resume(last_match.as_ref()),
             state: AppState {
                 library,
                 last_match,
@@ -100,20 +103,14 @@ impl Ryuuji {
             duration_s = event.duration.as_secs(),
             "playback"
         );
-        let proposes = matches!(
-            event.status,
-            PlaybackStatus::Playing | PlaybackStatus::Paused
-        ) && !event.title.trim().is_empty()
-            && self
-                .state
-                .last_match
-                .as_ref()
-                .is_none_or(|m| m.raw_title != event.title);
-        if proposes {
-            let proposal = matching::propose(&event, &self.state.library);
-            self.record_match(proposal);
+        match self.session.observe(&event) {
+            Observed::NewViewing => {
+                let proposal = matching::propose(&event, &self.state.library);
+                self.record_match(proposal);
+            }
+            Observed::Continues => {}
         }
-        self.state.now_playing = now_playing_for(event);
+        self.state.now_playing = NowPlaying::of(&event);
     }
 
     fn set_theme(&mut self, theme: ThemePreference) {
@@ -221,22 +218,6 @@ fn commit<T>(
     }
 }
 
-fn now_playing_for(event: PlaybackEvent) -> NowPlaying {
-    match event.status {
-        PlaybackStatus::Stopped => NowPlaying::Idle,
-        PlaybackStatus::Playing | PlaybackStatus::Paused if event.title.trim().is_empty() => {
-            NowPlaying::Detecting
-        }
-        PlaybackStatus::Playing | PlaybackStatus::Paused => NowPlaying::Playing {
-            title: event.title,
-            player: event.player,
-            status: event.status,
-            position: event.position,
-            duration: event.duration,
-        },
-    }
-}
-
 fn upsert(library: &mut Vec<LibraryEntry>, entry: LibraryEntry) {
     match library.iter_mut().find(|existing| existing.id == entry.id) {
         Some(existing) => *existing = entry,
@@ -250,7 +231,7 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     use super::*;
-    use crate::{Detail, EntryId, Page, PlaybackSource};
+    use crate::{Detail, EntryId, Page, PlaybackSource, PlaybackStatus};
 
     fn open_tmp() -> (tempfile::TempDir, DataDir) {
         let tmp = tempfile::tempdir().unwrap();
@@ -566,6 +547,44 @@ mod tests {
             ..playing("Show - 03.mkv")
         }));
         assert_eq!(app.state().last_match, first);
+    }
+
+    #[test]
+    fn reopen_does_not_re_propose_the_title_still_playing() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::Playback(playing("Show - 03.mkv")));
+        let first = app.state().last_match.clone();
+        assert!(first.is_some());
+        drop(app);
+
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::Playback(PlaybackEvent {
+            observed_at: SystemTime::UNIX_EPOCH + Duration::from_secs(60),
+            ..playing("Show - 03.mkv")
+        }));
+        assert_eq!(app.state().last_match, first);
+
+        app.dispatch(Command::Playback(PlaybackEvent {
+            observed_at: SystemTime::UNIX_EPOCH + Duration::from_secs(120),
+            ..playing("Show - 04.mkv")
+        }));
+        assert_ne!(app.state().last_match, first);
+    }
+
+    #[test]
+    fn same_title_in_another_player_re_proposes() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::Playback(playing("Show - 03.mkv")));
+        app.dispatch(Command::Playback(PlaybackEvent {
+            player: "vlc".into(),
+            observed_at: SystemTime::UNIX_EPOCH + Duration::from_secs(60),
+            ..playing("Show - 03.mkv")
+        }));
+        let moved = app.state().last_match.clone().unwrap();
+        assert_eq!(moved.player, "vlc");
+        assert_eq!(moved.at, SystemTime::UNIX_EPOCH + Duration::from_secs(60));
     }
 
     #[test]
