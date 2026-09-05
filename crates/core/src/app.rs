@@ -1,8 +1,7 @@
-use crate::matching::Resolution;
 use crate::settings::{self, SettingsError};
 use crate::{
-    AppState, Command, Confidence, DataDir, Diagnostics, LibraryEntry, NewEntry, Notice,
-    NowPlaying, Opened, PlaybackEvent, PlaybackStatus, ProposedMatch, Settings, Store, StoreError,
+    AppState, Command, DataDir, Diagnostics, LibraryEntry, Link, NewEntry, Notice, NowPlaying,
+    Opened, PlaybackEvent, PlaybackStatus, ProposedMatch, Settings, Store, StoreError,
     ThemePreference, WatchStatus, error_chain, matching,
 };
 
@@ -145,20 +144,16 @@ impl Ryuuji {
         let Some(standing) = self.state.last_match.clone() else {
             return;
         };
-        if standing.confidence != Confidence::Unmatched {
+        if standing.link.names_entry() {
             return;
         }
-        let (entry, confidence) =
-            match matching::resolve(&standing.parsed_title, &self.state.library) {
-                Resolution::Exact(entry) => (entry, Confidence::Exact),
-                Resolution::Likely { entry, .. } => (entry, Confidence::Likely),
-                Resolution::Unmatched => return,
-            };
-        self.record_match(ProposedMatch {
-            entry: Some(entry),
-            confidence,
-            ..standing
-        });
+        match Link::from(matching::resolve(
+            &standing.parsed_title,
+            &self.state.library,
+        )) {
+            Link::Unmatched => {}
+            link => self.record_match(ProposedMatch { link, ..standing }),
+        }
     }
 
     fn record_match(&mut self, proposal: ProposedMatch) {
@@ -175,7 +170,7 @@ impl Ryuuji {
             .state
             .last_match
             .clone()
-            .filter(|m| m.confidence == Confidence::Unmatched)
+            .filter(|m| !m.link.names_entry())
         else {
             return;
         };
@@ -195,8 +190,7 @@ impl Ryuuji {
         let id = entry.id;
         upsert(&mut self.state.library, entry);
         self.record_match(ProposedMatch {
-            entry: Some(id),
-            confidence: Confidence::Exact,
+            link: Link::Exact(id),
             ..last
         });
         tracing::info!(entry = id.as_i64(), "proposal added to library");
@@ -632,8 +626,8 @@ mod tests {
             "[SubsPlease] Frieren - Beyond Journey's End - 01 (1080p) [ABCD1234].mkv",
         )));
         assert_eq!(
-            app.state().last_match.as_ref().unwrap().confidence,
-            Confidence::Unmatched
+            app.state().last_match.as_ref().unwrap().link,
+            Link::Unmatched
         );
 
         app.dispatch(Command::AddProposedToLibrary);
@@ -644,8 +638,7 @@ mod tests {
         assert_eq!(added[0].progress, 0);
         assert_eq!(added[0].total, None);
         let relinked = app.state().last_match.clone().unwrap();
-        assert_eq!(relinked.entry, Some(added[0].id));
-        assert_eq!(relinked.confidence, Confidence::Exact);
+        assert_eq!(relinked.link, Link::Exact(added[0].id));
         drop(app);
 
         let reopened = Ryuuji::open(&dir).unwrap();
@@ -660,7 +653,7 @@ mod tests {
         app.dispatch(Command::Playback(playing("[EnigmaBD 1080p].mkv")));
         let proposal = app.state().last_match.clone().unwrap();
         assert!(proposal.parsed_title.is_empty());
-        assert_eq!(proposal.confidence, Confidence::Unmatched);
+        assert_eq!(proposal.link, Link::Unmatched);
 
         app.dispatch(Command::AddProposedToLibrary);
         assert_eq!(app.state().library.len(), 1);
@@ -671,8 +664,7 @@ mod tests {
         let id = app.state().library[0].id;
         app.dispatch(Command::SetProgress { id, progress: 1 });
         let linked = app.state().last_match.clone().unwrap();
-        assert_eq!(linked.confidence, Confidence::Exact);
-        assert_eq!(linked.entry, Some(id));
+        assert_eq!(linked.link, Link::Exact(id));
     }
 
     #[test]
@@ -690,9 +682,10 @@ mod tests {
         let mut app = Ryuuji::open(&dir).unwrap();
         app.dispatch(Command::AddEntry(entry("Show")));
         app.dispatch(Command::Playback(playing("Show - 03.mkv")));
+        let id = app.state().library[0].id;
         assert_eq!(
-            app.state().last_match.as_ref().unwrap().confidence,
-            Confidence::Exact
+            app.state().last_match.as_ref().unwrap().link,
+            Link::Exact(id)
         );
         let before = app.state().clone();
 
@@ -714,8 +707,8 @@ mod tests {
         ));
         assert!(app.state().library.is_empty());
         assert_eq!(
-            app.state().last_match.as_ref().unwrap().confidence,
-            Confidence::Unmatched
+            app.state().last_match.as_ref().unwrap().link,
+            Link::Unmatched
         );
     }
 
@@ -729,8 +722,7 @@ mod tests {
         app.dispatch(Command::AddProposedToLibrary);
         assert_eq!(app.state().library.len(), 1);
         let relinked = app.state().last_match.clone().unwrap();
-        assert_eq!(relinked.entry, Some(app.state().library[0].id));
-        assert_eq!(relinked.confidence, Confidence::Exact);
+        assert_eq!(relinked.link, Link::Exact(app.state().library[0].id));
         assert!(matches!(
             app.state().notices.as_slice(),
             [Notice::SaveFailed { .. }]
@@ -743,14 +735,12 @@ mod tests {
         let mut app = Ryuuji::open(&dir).unwrap();
         app.dispatch(Command::Playback(playing("X - 03.mkv")));
         let before = app.state().last_match.clone().unwrap();
-        assert_eq!(before.confidence, Confidence::Unmatched);
-        assert_eq!(before.entry, None);
+        assert_eq!(before.link, Link::Unmatched);
 
         app.dispatch(Command::AddEntry(entry("X")));
         let after = app.state().last_match.clone().unwrap();
         let id = app.state().library[0].id;
-        assert_eq!(after.confidence, Confidence::Exact);
-        assert_eq!(after.entry, Some(id));
+        assert_eq!(after.link, Link::Exact(id));
         // The proposal was re-resolved, not re-proposed: it still describes the
         // same observation, so its timestamp does not move.
         assert_eq!(after.at, before.at);
@@ -758,8 +748,7 @@ mod tests {
         drop(app);
         let reopened = Ryuuji::open(&dir).unwrap();
         let stored = reopened.state().last_match.clone().unwrap();
-        assert_eq!(stored.entry, Some(id));
-        assert_eq!(stored.confidence, Confidence::Exact);
+        assert_eq!(stored.link, Link::Exact(id));
         assert_eq!(stored.at, before.at);
 
         let mut app = reopened;
@@ -776,16 +765,15 @@ mod tests {
             ..playing("Y - 07.mkv")
         }));
         assert_eq!(
-            app.state().last_match.as_ref().unwrap().confidence,
-            Confidence::Unmatched
+            app.state().last_match.as_ref().unwrap().link,
+            Link::Unmatched
         );
 
         // A paused player sends nothing more, so the flip has to happen on the
         // library write itself.
         app.dispatch(Command::AddEntry(entry("Y")));
         let linked = app.state().last_match.clone().unwrap();
-        assert_eq!(linked.confidence, Confidence::Exact);
-        assert_eq!(linked.entry, Some(app.state().library[0].id));
+        assert_eq!(linked.link, Link::Exact(app.state().library[0].id));
     }
 
     #[test]

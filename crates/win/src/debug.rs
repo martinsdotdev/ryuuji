@@ -143,9 +143,10 @@ impl Report {
                 let _ = writeln!(
                     out,
                     "  entry: {}  confidence: {}",
-                    last.entry
+                    last.link
+                        .entry()
                         .map_or_else(|| NOT_APPLICABLE.to_owned(), |id| id.to_string()),
-                    last.confidence.tag()
+                    last.link.confidence().tag()
                 );
                 let _ = writeln!(
                     out,
@@ -548,7 +549,7 @@ fn level_brush(level: Level) -> ThemeRef {
 
 #[cfg(test)]
 mod tests {
-    use ryuuji_core::{ByteSize, Confidence, DataDir, Opened, ProposedMatch, Store};
+    use ryuuji_core::{ByteSize, DataDir, Link, Opened, ProposedMatch, Store};
 
     use super::*;
 
@@ -626,8 +627,7 @@ mod tests {
             episode: Some(3),
             season: None,
             release_group: Some("Subs".to_owned()),
-            entry: None,
-            confidence: Confidence::Unmatched,
+            link: Link::Unmatched,
             player: "mpv".to_owned(),
             at: UNIX_EPOCH + Duration::from_secs(1_700_000_000),
         };
