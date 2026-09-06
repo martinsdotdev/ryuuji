@@ -1,9 +1,9 @@
 use crate::settings::{self, SettingsError};
-use crate::watch::WatchSession;
+use crate::watch::{Accrual, WatchSession};
 use crate::{
-    AppState, Command, DataDir, Diagnostics, LibraryEntry, Link, NewEntry, NewWatchEvent, Notice,
-    NowPlaying, Opened, PlaybackEvent, ProposedMatch, Recording, Settings, Store, StoreError,
-    ThemePreference, WatchProgress, WatchStatus, error_chain, matching,
+    AppState, Command, DataDir, Decline, Diagnostics, LibraryEntry, Link, NewEntry, NewWatchEvent,
+    Notice, NowPlaying, Opened, PlaybackEvent, ProposedMatch, RecordOutcome, Recording, Settings,
+    Store, StoreError, ThemePreference, WatchProgress, WatchStatus, error_chain, matching,
 };
 
 /// The running application: the store plus the state derived from it.
@@ -108,66 +108,86 @@ impl Ryuuji {
             let proposal = matching::propose(&event, &self.state.library);
             self.record_match(proposal);
         }
-        self.state.watch_progress = observed.progress;
-        self.try_record();
+        let previous = self.state.watch_progress.map(|progress| progress.outcome);
+        self.state.watch_progress = observed.progress.map(|accrual| WatchProgress {
+            accrued: accrual.accrued,
+            threshold: accrual.threshold,
+            outcome: self.record_outcome(accrual, previous),
+        });
         self.state.now_playing = NowPlaying::of(&event);
     }
 
-    /// Writes the episode the standing viewing has earned, once per viewing.
-    /// The gates run in the order a decline would be explained in: the
-    /// session, then the match, then the entry. A failed write leaves the
+    /// Writes the episode the standing viewing has earned, once per viewing,
+    /// and says what came of it. Once the session is recorded the standing
+    /// outcome carries forward instead of the gates running again, since
+    /// the id they minted lives nowhere else. A failed write leaves the
     /// session unrecorded, so the next event past the threshold tries again
     /// and the notice says why.
-    fn try_record(&mut self) {
-        let Some(progress) = self.state.watch_progress else {
-            return;
-        };
-        if progress.recorded || progress.accrued < progress.threshold {
-            return;
+    fn record_outcome(
+        &mut self,
+        accrual: Accrual,
+        previous: Option<RecordOutcome>,
+    ) -> RecordOutcome {
+        if accrual.recorded {
+            return previous
+                .filter(|outcome| matches!(outcome, RecordOutcome::Recorded(_)))
+                .unwrap_or(RecordOutcome::Counting);
         }
-        let Some(last) = self.state.last_match.as_ref() else {
-            return;
-        };
-        let Link::Exact(id) = last.link else {
-            return;
-        };
-        let Some(entry) = self.state.library.iter().find(|entry| entry.id == id) else {
-            return;
-        };
-        if entry.status == WatchStatus::Completed && !entry.rewatching {
-            return;
+        if accrual.accrued < accrual.threshold {
+            return RecordOutcome::Counting;
         }
-        let Some(range) = last.episode.as_ref().filter(|range| {
-            entry
-                .progress
-                .checked_add(1)
-                .is_some_and(|next| range.contains(&next))
-        }) else {
-            return;
+        let write = match self.earned() {
+            Ok(write) => write,
+            Err(decline) => return RecordOutcome::Declined(decline),
         };
-        // A batch spanning the next episode was watched through its end.
-        let outcome = self.store.record(NewWatchEvent {
-            entry: id,
-            episode: range.clone(),
-            raw_title: last.raw_title.clone(),
-            player: last.player.clone(),
-        });
+        let outcome = self.store.record(write);
         let Some(Recording { entry, event }) = commit(&mut self.state.notices, "progress", outcome)
         else {
-            return;
+            return RecordOutcome::Counting;
         };
         upsert(&mut self.state.library, entry);
         self.session.mark_recorded();
-        self.state.watch_progress = Some(WatchProgress {
-            recorded: true,
-            ..progress
-        });
         tracing::info!(
-            entry = id.as_i64(),
+            entry = event.entry.as_i64(),
             event = event.id.as_i64(),
             progress = event.progress,
             "episode recorded"
         );
+        RecordOutcome::Recorded(event.id)
+    }
+
+    /// The write the standing viewing has earned, or the first gate that
+    /// refuses it. The gates run in the order a decline would be explained
+    /// in: the match, then the entry.
+    fn earned(&self) -> Result<NewWatchEvent, Decline> {
+        let last = self.state.last_match.as_ref().ok_or(Decline::NotExact)?;
+        let Link::Exact(id) = last.link else {
+            return Err(Decline::NotExact);
+        };
+        let entry = self
+            .state
+            .library
+            .iter()
+            .find(|entry| entry.id == id)
+            .ok_or(Decline::NotExact)?;
+        if entry.status == WatchStatus::Completed && !entry.rewatching {
+            return Err(Decline::Completed);
+        }
+        let range = last.episode.as_ref().ok_or(Decline::NoEpisode)?;
+        // A batch spanning the next episode was watched through its end.
+        if !entry
+            .progress
+            .checked_add(1)
+            .is_some_and(|next| range.contains(&next))
+        {
+            return Err(Decline::NotNext);
+        }
+        Ok(NewWatchEvent {
+            entry: id,
+            episode: range.clone(),
+            raw_title: last.raw_title.clone(),
+            player: last.player.clone(),
+        })
     }
 
     fn set_theme(&mut self, theme: ThemePreference) {
@@ -492,7 +512,7 @@ mod tests {
             Some(WatchProgress {
                 accrued: Duration::ZERO,
                 threshold: Duration::from_secs(710),
-                recorded: false,
+                outcome: RecordOutcome::Counting,
             })
         );
         assert_eq!(after.page, before.page);
@@ -912,6 +932,10 @@ mod tests {
         Store::open(dir).unwrap().store.watch_events().unwrap()
     }
 
+    fn outcome(app: &Ryuuji) -> RecordOutcome {
+        app.state().watch_progress.unwrap().outcome
+    }
+
     /// The `(episode, progress_before, progress)` of every stored event,
     /// which is what a recording test cares about.
     fn stored_writes(dir: &DataDir) -> Vec<(RangeInclusive<u32>, u32, u32)> {
@@ -930,16 +954,16 @@ mod tests {
 
         app.dispatch(Command::Playback(playing("Show - 01.mkv")));
         assert_eq!(app.state().library[0].progress, 0);
-        assert!(!app.state().watch_progress.unwrap().recorded);
+        assert_eq!(outcome(&app), RecordOutcome::Counting);
         assert_eq!(stored_events(&dir), vec![]);
 
         app.dispatch(Command::Playback(later("Show - 01.mkv", 720)));
         assert_eq!(app.state().library[0].progress, 1);
         assert_eq!(stored_progress(&dir, id), 1);
-        assert!(app.state().watch_progress.unwrap().recorded);
         assert!(app.state().notices.is_empty());
         let events = stored_events(&dir);
         assert_eq!(events.len(), 1);
+        assert_eq!(outcome(&app), RecordOutcome::Recorded(events[0].id));
         assert_eq!(events[0].entry, id);
         assert_eq!(events[0].episode, 1..=1);
         assert_eq!(events[0].progress_before, 0);
@@ -952,6 +976,7 @@ mod tests {
         assert_eq!(app.state().library[0].progress, 1);
         assert_eq!(stored_progress(&dir, id), 1);
         assert_eq!(stored_events(&dir), events);
+        assert_eq!(outcome(&app), RecordOutcome::Recorded(events[0].id));
     }
 
     #[test]
@@ -976,7 +1001,7 @@ mod tests {
         app.dispatch(Command::Playback(playing("Show - 01.mkv")));
         app.dispatch(Command::Playback(later("Show - 01.mkv", 700)));
         assert_eq!(app.state().library[0].progress, 0);
-        assert!(!app.state().watch_progress.unwrap().recorded);
+        assert_eq!(outcome(&app), RecordOutcome::Counting);
         assert_eq!(stored_events(&dir), vec![]);
     }
 
@@ -991,7 +1016,7 @@ mod tests {
             Link::Likely(_)
         ));
         assert_eq!(app.state().library[0].progress, 0);
-        assert!(!app.state().watch_progress.unwrap().recorded);
+        assert_eq!(outcome(&app), RecordOutcome::Declined(Decline::NotExact));
         assert_eq!(stored_events(&dir), vec![]);
     }
 
@@ -1007,7 +1032,7 @@ mod tests {
         });
         watch_past_threshold(&mut app, "Show - 01.mkv");
         assert_eq!(app.state().library[0].progress, 0);
-        assert!(!app.state().watch_progress.unwrap().recorded);
+        assert_eq!(outcome(&app), RecordOutcome::Declined(Decline::Completed));
         assert_eq!(stored_events(&dir), vec![]);
 
         // Nothing sets the flag before M5, so it goes in underneath.
@@ -1029,14 +1054,18 @@ mod tests {
         let id = app.state().library[0].id;
         app.dispatch(Command::SetProgress { id, progress: 4 });
 
-        watch_past_threshold(&mut app, "Show - 03.mkv");
-        assert_eq!(app.state().library[0].progress, 4);
-        watch_past_threshold(&mut app, "Show - 04.mkv");
-        assert_eq!(app.state().library[0].progress, 4);
-        watch_past_threshold(&mut app, "Show - 06.mkv");
-        assert_eq!(app.state().library[0].progress, 4);
+        for title in ["Show - 03.mkv", "Show - 04.mkv", "Show - 06.mkv"] {
+            watch_past_threshold(&mut app, title);
+            assert_eq!(app.state().library[0].progress, 4, "{title}");
+            assert_eq!(
+                outcome(&app),
+                RecordOutcome::Declined(Decline::NotNext),
+                "{title}"
+            );
+        }
         watch_past_threshold(&mut app, "Show.mkv");
         assert_eq!(app.state().library[0].progress, 4);
+        assert_eq!(outcome(&app), RecordOutcome::Declined(Decline::NoEpisode));
         assert_eq!(stored_events(&dir), vec![]);
 
         watch_past_threshold(&mut app, "Show - 05.mkv");
@@ -1055,7 +1084,11 @@ mod tests {
         app.dispatch(Command::Playback(later("Show - 01.mkv", 720)));
         assert_eq!(app.state().library[0].progress, 0);
         assert_eq!(stored_progress(&dir, app.state().library[0].id), 0);
-        assert!(!app.state().watch_progress.unwrap().recorded);
+        // Past the threshold and still counting, which the shell shows as
+        // `Recording in 0:00`: the next event tries again.
+        let progress = app.state().watch_progress.unwrap();
+        assert_eq!(progress.outcome, RecordOutcome::Counting);
+        assert!(progress.accrued >= progress.threshold);
         assert!(matches!(
             app.state().notices.as_slice(),
             [Notice::SaveFailed { .. }]
@@ -1089,6 +1122,7 @@ mod tests {
         app.dispatch(Command::Playback(later("Show - 01.mkv", 2_720)));
         assert_eq!(app.state().last_match, proposed);
         assert!(app.state().watch_progress.unwrap().accrued >= Duration::from_secs(710));
+        assert_eq!(outcome(&app), RecordOutcome::Declined(Decline::NotNext));
         assert_eq!(app.state().library[0].progress, 1);
         assert_eq!(stored_progress(&dir, id), 1);
         assert_eq!(stored_writes(&dir), vec![(1..=1, 0, 1)]);

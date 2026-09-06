@@ -218,15 +218,49 @@ impl NowPlaying {
     }
 }
 
-/// How far the standing viewing is from being recorded as an episode.
+/// How far the standing viewing is from being recorded as an episode, and
+/// what came of getting there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WatchProgress {
     /// Time credited as watched so far.
     pub accrued: Duration,
     /// Half the episode when its duration is known, else a flat two minutes.
     pub threshold: Duration,
-    /// The episode has already been written for this viewing.
-    pub recorded: bool,
+    pub outcome: RecordOutcome,
+}
+
+/// What reaching the threshold did for the standing viewing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecordOutcome {
+    /// Still short of the threshold, or a write failed and the next event
+    /// past it tries again.
+    Counting,
+    Recorded(WatchEventId),
+    /// The threshold was met and the gates refused the write. Recomputed on
+    /// every event, so a decline never outlives what caused it.
+    Declined(Decline),
+}
+
+/// Why a viewing past its threshold wrote nothing, in the order the gates
+/// run: the match first, then the entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Decline {
+    NotExact,
+    Completed,
+    NoEpisode,
+    NotNext,
+}
+
+impl Decline {
+    /// Human-readable label.
+    pub fn label(self) -> &'static str {
+        match self {
+            Decline::NotExact => "Not recorded: no exact match",
+            Decline::Completed => "Not recorded: show is completed",
+            Decline::NoEpisode => "Not recorded: no episode number",
+            Decline::NotNext => "Not recorded: not the next episode",
+        }
+    }
 }
 
 /// Everything a shell can ask the core to do.
@@ -285,8 +319,9 @@ pub struct AppState {
     /// The latest playback title's proposal against the library. Survives
     /// restarts via the store.
     pub last_match: Option<ProposedMatch>,
-    /// The standing viewing's countdown to a recorded episode, so the shell
-    /// can show it. `None` when nothing is being watched.
+    /// The standing viewing's countdown to a recorded episode and what came
+    /// of it, so the shell can show both. `None` when nothing is being
+    /// watched.
     pub watch_progress: Option<WatchProgress>,
     pub settings: Settings,
     /// Oldest first; the shell shows the front one.
@@ -329,6 +364,23 @@ mod tests {
         assert_eq!(PlaybackStatus::Playing.label(), "Playing");
         assert_eq!(PlaybackStatus::Paused.label(), "Paused");
         assert_eq!(PlaybackStatus::Stopped.label(), "Stopped");
+    }
+
+    #[test]
+    fn decline_labels_say_why_nothing_was_recorded() {
+        assert_eq!(Decline::NotExact.label(), "Not recorded: no exact match");
+        assert_eq!(
+            Decline::Completed.label(),
+            "Not recorded: show is completed"
+        );
+        assert_eq!(
+            Decline::NoEpisode.label(),
+            "Not recorded: no episode number"
+        );
+        assert_eq!(
+            Decline::NotNext.label(),
+            "Not recorded: not the next episode"
+        );
     }
 
     #[test]
