@@ -34,10 +34,10 @@ jobs:
           cache-on-failure: true
       - name: fmt
         run: cargo fmt --all -- --check
-      - name: clippy (ryuuji-core, ryuuji-parse)
-        run: cargo clippy -p ryuuji-core -p ryuuji-parse --all-targets --locked -- -D warnings
-      - name: test (ryuuji-core, ryuuji-parse)
-        run: cargo test -p ryuuji-core -p ryuuji-parse --locked
+      - name: clippy (ryuuji-core, ryuuji-parse, ryuuji-detect)
+        run: cargo clippy -p ryuuji-core -p ryuuji-parse -p ryuuji-detect --all-targets --locked -- -D warnings
+      - name: test (ryuuji-core, ryuuji-parse, ryuuji-detect)
+        run: cargo test -p ryuuji-core -p ryuuji-parse -p ryuuji-detect --locked
 
   windows:
     name: workspace (windows)

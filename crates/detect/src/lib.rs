@@ -5,6 +5,7 @@
 
 #[cfg(windows)]
 mod foreground;
+#[cfg_attr(not(windows), allow(dead_code))]
 mod players;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod session;
