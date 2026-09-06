@@ -2,15 +2,22 @@
 # GlobalSystemMediaTransportControlsSession.SourceAppUserModelId.
 # Unpackaged apps get a system-assigned id that contains the exe name.
 # Verify each id from the Diagnostics page's "Media sessions" card.
+#
+# Executables are matched case-insensitively against the whole file name
+# of the foreground window's process, so a skin or helper whose name merely
+# contains the player's does not pass as the player.
 
 [[player]]
 name = "mpv"
 smtc_app_ids = ["mpv.exe"]
+executables = ["mpv.exe"]
 
 [[player]]
 name = "VLC"
 smtc_app_ids = ["vlc.exe", "videolan.vlc"]
+executables = ["vlc.exe"]
 
 [[player]]
 name = "MPC-HC"
 smtc_app_ids = ["mpc-hc64.exe", "mpc-hc.exe"]
+executables = ["mpc-hc64.exe", "mpc-hc.exe"]

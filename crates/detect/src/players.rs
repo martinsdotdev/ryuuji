@@ -10,6 +10,11 @@ pub(crate) struct Player {
     /// [`PlayerTable::parse`] so a match only has to lowercase the app id.
     #[serde(default)]
     pub smtc_app_ids: Vec<String>,
+    /// File names of the player's executables, lowercased by
+    /// [`PlayerTable::parse`]. The foreground window is tied to a player by
+    /// this name alone, so two instances of one player read the same.
+    #[serde(default)]
+    pub executables: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -21,8 +26,12 @@ pub(crate) struct PlayerTable {
 pub(crate) enum TableError {
     #[error("players.toml does not parse")]
     Parse(#[source] toml::de::Error),
-    #[error("player {name:?} has an smtc_app_id shorter than 3 characters: {pattern:?}")]
-    ShortPattern { name: String, pattern: String },
+    #[error("player {name:?} has a {field} entry shorter than 3 characters: {pattern:?}")]
+    ShortPattern {
+        name: String,
+        field: &'static str,
+        pattern: String,
+    },
     #[error("player name {name:?} appears twice")]
     DuplicateName { name: String },
 }
@@ -45,15 +54,20 @@ impl PlayerTable {
         let document: Document = toml::from_str(text).map_err(TableError::Parse)?;
         let mut players = document.player;
         for (index, player) in players.iter().enumerate() {
-            if let Some(pattern) = player
-                .smtc_app_ids
-                .iter()
-                .find(|pattern| pattern.chars().count() < MIN_PATTERN_LEN)
-            {
-                return Err(TableError::ShortPattern {
-                    name: player.name.clone(),
-                    pattern: pattern.clone(),
-                });
+            for (field, patterns) in [
+                ("smtc_app_ids", &player.smtc_app_ids),
+                ("executables", &player.executables),
+            ] {
+                if let Some(pattern) = patterns
+                    .iter()
+                    .find(|pattern| pattern.chars().count() < MIN_PATTERN_LEN)
+                {
+                    return Err(TableError::ShortPattern {
+                        name: player.name.clone(),
+                        field,
+                        pattern: pattern.clone(),
+                    });
+                }
             }
             if players[..index]
                 .iter()
@@ -64,7 +78,10 @@ impl PlayerTable {
                 });
             }
         }
-        for pattern in players.iter_mut().flat_map(|p| &mut p.smtc_app_ids) {
+        for pattern in players
+            .iter_mut()
+            .flat_map(|p| p.smtc_app_ids.iter_mut().chain(&mut p.executables))
+        {
             *pattern = pattern.to_lowercase();
         }
         Ok(PlayerTable { players })
@@ -118,10 +135,12 @@ mod tests {
 
     #[test]
     fn parse_lowercases_patterns_so_an_uppercase_entry_still_matches() {
-        let table =
-            PlayerTable::parse("[[player]]\nname = \"MPV\"\nsmtc_app_ids = [\"MPV.EXE\"]\n")
-                .unwrap();
+        let table = PlayerTable::parse(
+            "[[player]]\nname = \"MPV\"\nsmtc_app_ids = [\"MPV.EXE\"]\nexecutables = [\"MPV.EXE\"]\n",
+        )
+        .unwrap();
         assert_eq!(table.players()[0].smtc_app_ids, ["mpv.exe"]);
+        assert_eq!(table.players()[0].executables, ["mpv.exe"]);
         assert_eq!(
             table
                 .match_smtc("C:\\tools\\mpv.exe")
@@ -131,17 +150,31 @@ mod tests {
     }
 
     #[test]
+    fn every_builtin_player_names_an_executable() {
+        for player in PlayerTable::builtin().players() {
+            assert!(!player.executables.is_empty(), "{}", player.name);
+        }
+    }
+
+    #[test]
     fn unknown_app_id_matches_nothing() {
         assert_eq!(PlayerTable::builtin().match_smtc("Spotify.exe"), None);
     }
 
     #[test]
-    fn pattern_shorter_than_three_chars_is_rejected() {
-        let result = PlayerTable::parse("[[player]]\nname = \"x\"\nsmtc_app_ids = [\"ab\"]\n");
-        assert!(matches!(
-            result,
-            Err(TableError::ShortPattern { ref name, ref pattern }) if name == "x" && pattern == "ab"
-        ));
+    fn pattern_shorter_than_three_chars_is_rejected_and_names_the_field() {
+        for field in ["smtc_app_ids", "executables"] {
+            let result =
+                PlayerTable::parse(&format!("[[player]]\nname = \"x\"\n{field} = [\"ab\"]\n"));
+            assert!(
+                matches!(
+                    result,
+                    Err(TableError::ShortPattern { ref name, field: got, ref pattern })
+                        if name == "x" && got == field && pattern == "ab"
+                ),
+                "{field}: {result:?}"
+            );
+        }
     }
 
     #[test]
@@ -155,13 +188,14 @@ mod tests {
     }
 
     #[test]
-    fn missing_smtc_app_ids_is_an_empty_list() {
+    fn missing_id_lists_are_empty() {
         let table = PlayerTable::parse("[[player]]\nname = \"bare\"\n").unwrap();
         assert_eq!(
             table.players(),
             [Player {
                 name: "bare".to_owned(),
                 smtc_app_ids: Vec::new(),
+                executables: Vec::new(),
             }]
         );
         assert_eq!(table.match_smtc("bare"), None);
