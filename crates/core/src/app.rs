@@ -103,6 +103,7 @@ impl Ryuuji {
             status = event.status.label(),
             position_s = event.position.as_secs(),
             duration_s = event.duration.as_secs(),
+            foreground = ?event.foreground,
             "playback"
         );
         let observed = self.session.observe(&event);
