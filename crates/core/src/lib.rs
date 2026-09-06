@@ -236,6 +236,9 @@ pub enum RecordOutcome {
     /// past it tries again.
     Counting,
     Recorded(WatchEventId),
+    /// The recording was undone from this viewing. The session stays
+    /// recorded, so watching on writes nothing more; a relaunch starts over.
+    Undone,
     /// The threshold was met and the gates refused the write. Recomputed on
     /// every event, so a decline never outlives what caused it.
     Declined(Decline),
@@ -293,6 +296,9 @@ pub enum Command {
     Playback(PlaybackEvent),
     /// Creates a Watching entry from the unmatched last proposal and relinks it.
     AddProposedToLibrary,
+    /// Marks a recording undone and puts the entry's progress back to what
+    /// it was before the write.
+    UndoRecording(WatchEventId),
 }
 
 /// Something the shell should surface to the user until dismissed.
