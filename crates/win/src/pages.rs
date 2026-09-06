@@ -12,7 +12,7 @@ use std::time::{Duration, SystemTime};
 
 use ryuuji_core::{
     AppState, Command, DataDir, Detail, LibraryEntry, Notice, NowPlaying, Options, Page,
-    ProposedMatch, StoreError, ThemePreference, WatchProgress, error_chain, parse,
+    ProposedMatch, RecordOutcome, StoreError, ThemePreference, WatchProgress, error_chain, parse,
 };
 use windows_reactor::*;
 
@@ -201,7 +201,22 @@ fn now_playing(props: &NowPlayingProps, cx: &mut RenderCx) -> Element {
             ];
             if let Some(progress) = &props.watch_progress {
                 let episode = props.last_match.as_ref().and_then(|m| m.episode.as_ref());
-                lines.push(caption(progress_text(progress, episode)).into());
+                let caption = caption(progress_text(progress, episode));
+                lines.push(match progress.outcome {
+                    RecordOutcome::Recorded(id) => {
+                        let dispatch = props.dispatch.clone();
+                        hstack((
+                            button("Undo")
+                                .on_click(move || dispatch.call(Command::UndoRecording(id))),
+                            caption.vertical_alignment(VerticalAlignment::Center),
+                        ))
+                        .spacing(12.0)
+                        .into()
+                    }
+                    RecordOutcome::Counting
+                    | RecordOutcome::Undone
+                    | RecordOutcome::Declined(_) => caption.into(),
+                });
             }
             card_frame(vstack(lines).spacing(4.0)).into()
         }
@@ -287,16 +302,19 @@ fn episode_text(episode: &RangeInclusive<u32>) -> String {
     }
 }
 
-/// The countdown to the write, then what was written. Why a countdown did
-/// not end in a write is not known here; that wording is UMA-78's.
+/// The countdown to the write, then what came of it.
 fn progress_text(progress: &WatchProgress, episode: Option<&RangeInclusive<u32>>) -> String {
-    if !progress.recorded {
-        let remaining = progress.threshold.saturating_sub(progress.accrued);
-        return format!("Recording in {}", clock_text(remaining));
-    }
-    match episode {
-        Some(episode) => format!("Recorded {}", episode_text(episode).to_lowercase()),
-        None => "Recorded".to_owned(),
+    let named = episode.map(|episode| episode_text(episode).to_lowercase());
+    match (progress.outcome, named) {
+        (RecordOutcome::Counting, _) => {
+            let remaining = progress.threshold.saturating_sub(progress.accrued);
+            format!("Recording in {}", clock_text(remaining))
+        }
+        (RecordOutcome::Recorded(_), Some(episode)) => format!("Recorded {episode}"),
+        (RecordOutcome::Recorded(_), None) => "Recorded".to_owned(),
+        (RecordOutcome::Undone, Some(episode)) => format!("Undid {episode}"),
+        (RecordOutcome::Undone, None) => "Undone".to_owned(),
+        (RecordOutcome::Declined(why), _) => why.label().to_owned(),
     }
 }
 
@@ -428,7 +446,7 @@ fn placeholder(heading: impl Into<String>, body: impl Into<String>) -> Element {
 
 #[cfg(test)]
 mod tests {
-    use ryuuji_core::Link;
+    use ryuuji_core::{Decline, Link, NewEntry, NewWatchEvent, Opened, Store, WatchStatus};
 
     use super::*;
 
@@ -492,12 +510,39 @@ mod tests {
         assert_eq!(match_caption(&proposal(), false, now), "No library entry");
     }
 
+    /// Only the store mints a [`WatchEventId`], so the Recorded arm needs one
+    /// recorded for real.
+    fn recorded_event_id() -> ryuuji_core::WatchEventId {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = DataDir::at(tmp.path()).unwrap();
+        let Opened { mut store, .. } = Store::open(&dir).unwrap();
+        let entry = store
+            .add(NewEntry {
+                title: "Show".to_owned(),
+                status: WatchStatus::Watching,
+                progress: 0,
+                total: None,
+                rewatching: false,
+            })
+            .unwrap();
+        store
+            .record(NewWatchEvent {
+                entry: entry.id,
+                episode: 1..=1,
+                raw_title: "Show - 01.mkv".to_owned(),
+                player: "mpv".to_owned(),
+            })
+            .unwrap()
+            .event
+            .id
+    }
+
     #[test]
-    fn progress_text_counts_down_then_names_what_was_recorded() {
+    fn progress_text_counts_down_then_says_what_came_of_it() {
         let counting = WatchProgress {
             accrued: Duration::from_secs(510),
             threshold: Duration::from_secs(710),
-            recorded: false,
+            outcome: RecordOutcome::Counting,
         };
         assert_eq!(
             progress_text(&counting, Some(&(3..=3))),
@@ -511,7 +556,7 @@ mod tests {
         assert_eq!(progress_text(&overshot, None), "Recording in 0:00");
 
         let recorded = WatchProgress {
-            recorded: true,
+            outcome: RecordOutcome::Recorded(recorded_event_id()),
             ..counting
         };
         assert_eq!(
@@ -523,6 +568,32 @@ mod tests {
             "Recorded episodes 1\u{2013}12"
         );
         assert_eq!(progress_text(&recorded, None), "Recorded");
+
+        let undone = WatchProgress {
+            outcome: RecordOutcome::Undone,
+            ..counting
+        };
+        assert_eq!(progress_text(&undone, Some(&(3..=3))), "Undid episode 3");
+        assert_eq!(
+            progress_text(&undone, Some(&(1..=12))),
+            "Undid episodes 1\u{2013}12"
+        );
+        assert_eq!(progress_text(&undone, None), "Undone");
+
+        for (why, text) in [
+            (Decline::NotExact, "Not recorded: no exact match"),
+            (Decline::Completed, "Not recorded: show is completed"),
+            (Decline::NoEpisode, "Not recorded: no episode number"),
+            (Decline::NotNext, "Not recorded: not the next episode"),
+            (Decline::PastTotal, "Not recorded: past the show's total"),
+        ] {
+            let declined = WatchProgress {
+                outcome: RecordOutcome::Declined(why),
+                ..counting
+            };
+            assert_eq!(progress_text(&declined, Some(&(3..=3))), text);
+            assert_eq!(progress_text(&declined, None), text);
+        }
     }
 
     #[test]
