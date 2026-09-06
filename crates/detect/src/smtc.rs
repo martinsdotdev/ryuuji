@@ -17,8 +17,9 @@ use windows::Media::Control::{
 use windows::core::EventRevoker;
 
 use crate::SessionFacts;
+use crate::foreground;
 use crate::players::PlayerTable;
-use crate::session::{Dedup, Front, Matched, RawStatus, SessionSnapshot, observe};
+use crate::session::{Dedup, Matched, RawStatus, SessionSnapshot, observe};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 /// While a session plays, the timeline is re-read on this cadence even if
@@ -218,6 +219,7 @@ impl Worker {
     }
 
     fn refresh(&mut self, now: SystemTime) -> windows::core::Result<()> {
+        let front = foreground::front();
         let mut facts = Vec::new();
         let mut matched = Vec::new();
         let mut live = Vec::new();
@@ -272,7 +274,7 @@ impl Worker {
                 "several smtc sessions match the player table"
             );
         }
-        let observation = observe(&matched, unreadable, now, &Front::Unknown);
+        let observation = observe(&matched, unreadable, now, &front);
         self.retry = unreadable > 0;
         *self.facts.lock().unwrap_or_else(PoisonError::into_inner) = facts;
         if let Some(event) = self.dedup.admit(observation, now) {
@@ -282,6 +284,7 @@ impl Worker {
                 status = event.status.label(),
                 position_ms = event.position.as_millis(),
                 duration_ms = event.duration.as_millis(),
+                foreground = ?event.foreground,
                 "playback event"
             );
             (self.sink)(event);

@@ -3,6 +3,8 @@
 //! [`ryuuji_core::PlaybackEvent`]. The only strategy so far is Windows SMTC
 //! (`Windows.Media.Control`); the table and the session logic are portable.
 
+#[cfg(windows)]
+mod foreground;
 mod players;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod session;

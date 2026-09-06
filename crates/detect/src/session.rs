@@ -73,7 +73,6 @@ pub(crate) fn choose<'a, 'b>(matched: &'b [Matched<'a>]) -> Option<&'b Matched<'
 /// What sat in front of everything else at one refresh. Ryuuji's own
 /// window is `Own`, not `Exe`, so looking at the countdown does not read as
 /// looking away from the player.
-#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Front {
     Unknown,
@@ -85,7 +84,6 @@ pub(crate) enum Front {
 impl Front {
     /// Every packaged app's window belongs to ApplicationFrameHost, so that
     /// name says nothing about which app is in front.
-    #[allow(dead_code)]
     pub(crate) fn from_reading(own: bool, exe: Option<String>) -> Front {
         if own {
             return Front::Own;

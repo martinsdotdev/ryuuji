@@ -18,7 +18,7 @@ windows-reactor = { git = "https://github.com/microsoft/windows-rs", rev = "acaa
 windows-reactor-setup = { git = "https://github.com/microsoft/windows-rs", rev = "acaaa37be53e68f8c1be575d24dcbebce1e92b1a" }
 # No proc-macros: the default feature would pull windows-implement and
 # windows-interface into the lock for an #[implement] nothing here uses.
-windows = { git = "https://github.com/microsoft/windows-rs", rev = "acaaa37be53e68f8c1be575d24dcbebce1e92b1a", default-features = false, features = ["std", "Media_Control", "Foundation_Collections"] }
+windows = { git = "https://github.com/microsoft/windows-rs", rev = "acaaa37be53e68f8c1be575d24dcbebce1e92b1a", default-features = false, features = ["std", "Media_Control", "Foundation_Collections", "handleapi", "processthreadsapi", "psapi", "winuser"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 rusqlite_migration = { version = "2.6", features = ["from-directory"] }
 include_dir = "0.7.4"
