@@ -70,9 +70,52 @@ pub(crate) fn choose<'a, 'b>(matched: &'b [Matched<'a>]) -> Option<&'b Matched<'
         .or_else(|| matched.first())
 }
 
+/// What sat in front of everything else at one refresh. Ryuuji's own
+/// window is `Own`, not `Exe`, so looking at the countdown does not read as
+/// looking away from the player.
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Front {
+    Unknown,
+    Own,
+    /// The lowercased file name of the process that owns the window.
+    Exe(String),
+}
+
+impl Front {
+    /// Every packaged app's window belongs to ApplicationFrameHost, so that
+    /// name says nothing about which app is in front.
+    #[allow(dead_code)]
+    pub(crate) fn from_reading(own: bool, exe: Option<String>) -> Front {
+        if own {
+            return Front::Own;
+        }
+        match exe.map(|name| name.to_lowercase()) {
+            Some(name) if name != "applicationframehost.exe" => Front::Exe(name),
+            _ => Front::Unknown,
+        }
+    }
+
+    /// Whether `player` owns the front window. `None` when nothing can be
+    /// said: the front is unknown or Ryuuji's own, or the player names no
+    /// executables and would otherwise never read as in front.
+    pub(crate) fn of(&self, player: &Player) -> Option<bool> {
+        match self {
+            Front::Exe(name) if !player.executables.is_empty() => {
+                Some(player.executables.contains(name))
+            }
+            _ => None,
+        }
+    }
+}
+
 /// Closed and Stopped are Stopped; Opened and Changing are not an
 /// observation yet. Times are relative to the timeline start.
-pub(crate) fn normalize(matched: &Matched<'_>, now: SystemTime) -> Option<PlaybackEvent> {
+pub(crate) fn normalize(
+    matched: &Matched<'_>,
+    now: SystemTime,
+    front: &Front,
+) -> Option<PlaybackEvent> {
     let snapshot = &matched.snapshot;
     let status = match snapshot.status {
         RawStatus::Closed | RawStatus::Stopped => PlaybackStatus::Stopped,
@@ -88,7 +131,7 @@ pub(crate) fn normalize(matched: &Matched<'_>, now: SystemTime) -> Option<Playba
         duration: snapshot.end.saturating_sub(snapshot.start),
         observed_at: now,
         source: PlaybackSource::Detected,
-        foreground: None,
+        foreground: front.of(matched.player),
     })
 }
 
@@ -103,9 +146,16 @@ pub(crate) enum Observation {
 /// `unreadable` counts matched sessions whose media or timeline could not be
 /// read this refresh. They keep the observation out of `Absent`, since a
 /// session that exists but is not ready has not vanished.
-pub(crate) fn observe(matched: &[Matched<'_>], unreadable: usize, now: SystemTime) -> Observation {
+pub(crate) fn observe(
+    matched: &[Matched<'_>],
+    unreadable: usize,
+    now: SystemTime,
+    front: &Front,
+) -> Observation {
     match choose(matched) {
-        Some(chosen) => normalize(chosen, now).map_or(Observation::Transitional, Observation::Seen),
+        Some(chosen) => {
+            normalize(chosen, now, front).map_or(Observation::Transitional, Observation::Seen)
+        }
         None if unreadable > 0 => Observation::Transitional,
         None => Observation::Absent,
     }
@@ -169,12 +219,17 @@ fn same_except_time(a: &PlaybackEvent, b: &PlaybackEvent) -> bool {
 mod tests {
     use super::*;
 
+    /// A player whose executable is its lowercased name plus `.exe`.
     fn player(name: &str) -> Player {
         Player {
             name: name.to_owned(),
             smtc_app_ids: Vec::new(),
-            executables: Vec::new(),
+            executables: vec![format!("{}.exe", name.to_lowercase())],
         }
+    }
+
+    fn exe(name: &str) -> Front {
+        Front::Exe(name.to_owned())
     }
 
     fn snapshot(status: RawStatus) -> SessionSnapshot {
@@ -257,7 +312,7 @@ mod tests {
                 snapshot: snapshot(status),
             };
             assert_eq!(
-                normalize(&matched, now()),
+                normalize(&matched, now(), &Front::Unknown),
                 Some(event(PlaybackStatus::Stopped, 90))
             );
         }
@@ -274,7 +329,10 @@ mod tests {
                 player: &mpv,
                 snapshot: snapshot(raw),
             };
-            assert_eq!(normalize(&matched, now()), Some(event(status, 90)));
+            assert_eq!(
+                normalize(&matched, now(), &Front::Unknown),
+                Some(event(status, 90))
+            );
         }
     }
 
@@ -286,7 +344,7 @@ mod tests {
                 player: &mpv,
                 snapshot: snapshot(status),
             };
-            assert_eq!(normalize(&matched, now()), None);
+            assert_eq!(normalize(&matched, now(), &Front::Unknown), None);
         }
     }
 
@@ -301,7 +359,7 @@ mod tests {
             player: &mpv,
             snapshot: shifted.clone(),
         };
-        let normalized = normalize(&matched, now()).unwrap();
+        let normalized = normalize(&matched, now(), &Front::Unknown).unwrap();
         assert_eq!(normalized.position, Duration::from_secs(30));
         assert_eq!(normalized.duration, Duration::from_secs(300));
 
@@ -311,25 +369,108 @@ mod tests {
             player: &mpv,
             snapshot: shifted,
         };
-        let normalized = normalize(&matched, now()).unwrap();
+        let normalized = normalize(&matched, now(), &Front::Unknown).unwrap();
         assert_eq!(normalized.position, Duration::ZERO);
         assert_eq!(normalized.duration, Duration::ZERO);
     }
 
     #[test]
+    fn front_of_compares_the_whole_file_name_against_the_players_executables() {
+        let mpv = player("mpv");
+        assert_eq!(exe("mpv.exe").of(&mpv), Some(true));
+        assert_eq!(exe("notepad.exe").of(&mpv), Some(false));
+        assert_eq!(exe("some-mpv-skin.exe").of(&mpv), Some(false));
+        assert_eq!(Front::Unknown.of(&mpv), None);
+        assert_eq!(Front::Own.of(&mpv), None);
+    }
+
+    #[test]
+    fn front_of_a_player_without_executables_is_unknown_never_behind() {
+        let bare = Player {
+            executables: Vec::new(),
+            ..player("mpv")
+        };
+        assert_eq!(exe("mpv.exe").of(&bare), None);
+        assert_eq!(exe("notepad.exe").of(&bare), None);
+    }
+
+    #[test]
+    fn from_reading_lowercases_and_maps_own_and_the_frame_host_to_unknowns() {
+        assert_eq!(
+            Front::from_reading(false, Some("MPV.EXE".to_owned())),
+            exe("mpv.exe")
+        );
+        assert_eq!(
+            Front::from_reading(true, Some("ryuuji.exe".to_owned())),
+            Front::Own
+        );
+        assert_eq!(Front::from_reading(false, None), Front::Unknown);
+        assert_eq!(
+            Front::from_reading(false, Some("ApplicationFrameHost.exe".to_owned())),
+            Front::Unknown
+        );
+    }
+
+    #[test]
+    fn normalize_carries_the_front() {
+        let mpv = player("mpv");
+        let matched = Matched {
+            player: &mpv,
+            snapshot: snapshot(RawStatus::Playing),
+        };
+        for (front, foreground) in [
+            (exe("mpv.exe"), Some(true)),
+            (exe("vlc.exe"), Some(false)),
+            (Front::Own, None),
+            (Front::Unknown, None),
+        ] {
+            let event = normalize(&matched, now(), &front).unwrap();
+            assert_eq!(event.foreground, foreground, "{front:?}");
+        }
+    }
+
+    #[test]
+    fn two_instances_of_one_player_both_read_as_in_front() {
+        let mpv = player("mpv");
+        let matched = [
+            Matched {
+                player: &mpv,
+                snapshot: snapshot(RawStatus::Playing),
+            },
+            Matched {
+                player: &mpv,
+                snapshot: snapshot(RawStatus::Paused),
+            },
+        ];
+        for m in &matched {
+            let event = normalize(m, now(), &exe("mpv.exe")).unwrap();
+            assert_eq!(event.foreground, Some(true));
+        }
+    }
+
+    #[test]
     fn unreadable_matched_session_is_transitional_not_absent() {
-        assert!(matches!(observe(&[], 1, now()), Observation::Transitional));
+        assert!(matches!(
+            observe(&[], 1, now(), &Front::Unknown),
+            Observation::Transitional
+        ));
         let mpv = player("mpv");
         let matched = [Matched {
             player: &mpv,
             snapshot: snapshot(RawStatus::Playing),
         }];
-        assert!(matches!(observe(&matched, 1, now()), Observation::Seen(_)));
+        assert!(matches!(
+            observe(&matched, 1, now(), &Front::Unknown),
+            Observation::Seen(_)
+        ));
     }
 
     #[test]
     fn no_sessions_is_absent() {
-        assert!(matches!(observe(&[], 0, now()), Observation::Absent));
+        assert!(matches!(
+            observe(&[], 0, now(), &Front::Unknown),
+            Observation::Absent
+        ));
     }
 
     #[test]
@@ -356,6 +497,24 @@ mod tests {
         assert_eq!(
             dedup.admit(Observation::Seen(moved.clone()), now()),
             Some(moved)
+        );
+    }
+
+    #[test]
+    fn dedup_passes_a_foreground_flip_at_the_same_position() {
+        let mut dedup = Dedup::default();
+        let front = PlaybackEvent {
+            foreground: Some(true),
+            ..event(PlaybackStatus::Playing, 90)
+        };
+        dedup.admit(Observation::Seen(front.clone()), now());
+        let behind = PlaybackEvent {
+            foreground: Some(false),
+            ..front
+        };
+        assert_eq!(
+            dedup.admit(Observation::Seen(behind.clone()), now()),
+            Some(behind)
         );
     }
 

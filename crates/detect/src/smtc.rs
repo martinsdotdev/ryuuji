@@ -18,7 +18,7 @@ use windows::core::EventRevoker;
 
 use crate::SessionFacts;
 use crate::players::PlayerTable;
-use crate::session::{Dedup, Matched, RawStatus, SessionSnapshot, observe};
+use crate::session::{Dedup, Front, Matched, RawStatus, SessionSnapshot, observe};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 /// While a session plays, the timeline is re-read on this cadence even if
@@ -272,7 +272,7 @@ impl Worker {
                 "several smtc sessions match the player table"
             );
         }
-        let observation = observe(&matched, unreadable, now);
+        let observation = observe(&matched, unreadable, now, &Front::Unknown);
         self.retry = unreadable > 0;
         *self.facts.lock().unwrap_or_else(PoisonError::into_inner) = facts;
         if let Some(event) = self.dedup.admit(observation, now) {
