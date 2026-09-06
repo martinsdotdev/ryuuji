@@ -3,7 +3,8 @@ use crate::watch::{Accrual, WatchSession};
 use crate::{
     AppState, Command, DataDir, Decline, Diagnostics, LibraryEntry, Link, NewEntry, NewWatchEvent,
     Notice, NowPlaying, Opened, PlaybackEvent, ProposedMatch, RecordOutcome, Recording, Settings,
-    Store, StoreError, ThemePreference, WatchProgress, WatchStatus, error_chain, matching,
+    Store, StoreError, ThemePreference, WatchEventId, WatchProgress, WatchStatus, error_chain,
+    matching,
 };
 
 /// The running application: the store plus the state derived from it.
@@ -90,6 +91,7 @@ impl Ryuuji {
             }
             Command::Playback(event) => self.observe_playback(event),
             Command::AddProposedToLibrary => self.add_proposed(),
+            Command::UndoRecording(id) => self.undo_recording(id),
         }
     }
 
@@ -130,7 +132,9 @@ impl Ryuuji {
     ) -> RecordOutcome {
         if accrual.recorded {
             return previous
-                .filter(|outcome| matches!(outcome, RecordOutcome::Recorded(_)))
+                .filter(|outcome| {
+                    matches!(outcome, RecordOutcome::Recorded(_) | RecordOutcome::Undone)
+                })
                 .unwrap_or(RecordOutcome::Counting);
         }
         if accrual.accrued < accrual.threshold {
@@ -191,6 +195,31 @@ impl Ryuuji {
             raw_title: last.raw_title.clone(),
             player: last.player.clone(),
         })
+    }
+
+    /// Not `absorb`: the link is unchanged, so re-resolving would be a store
+    /// read for nothing. The session stays recorded, so watching on does not
+    /// write again; a relaunch and rewatch does, because the range gate
+    /// permits `progress + 1` once more, which is the right answer to "I
+    /// undid it and watched it again".
+    fn undo_recording(&mut self, id: WatchEventId) {
+        let outcome = self.store.undo(id);
+        let Some(Recording { entry, event }) = commit(&mut self.state.notices, "undo", outcome)
+        else {
+            return;
+        };
+        upsert(&mut self.state.library, entry);
+        if let Some(progress) = self.state.watch_progress.as_mut()
+            && progress.outcome == RecordOutcome::Recorded(id)
+        {
+            progress.outcome = RecordOutcome::Undone;
+        }
+        tracing::info!(
+            entry = event.entry.as_i64(),
+            event = id.as_i64(),
+            progress = event.progress_before,
+            "recording undone"
+        );
     }
 
     fn set_theme(&mut self, theme: ThemePreference) {
@@ -1137,6 +1166,100 @@ mod tests {
             app.state().notices.as_slice(),
             [Notice::SaveFailed { .. }, Notice::SaveFailed { .. }]
         ));
+    }
+
+    /// Records episode 1 of a fresh "Show" and hands back the event id.
+    fn record_first_episode(app: &mut Ryuuji, dir: &DataDir) -> WatchEventId {
+        app.dispatch(Command::AddEntry(entry("Show")));
+        watch_past_threshold(app, "Show - 01.mkv");
+        assert_eq!(app.state().library[0].progress, 1);
+        let events = stored_events(dir);
+        assert_eq!(events.len(), 1);
+        events[0].id
+    }
+
+    #[test]
+    fn undo_restores_the_progress_in_memory_and_on_disk() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        let event = record_first_episode(&mut app, &dir);
+        let id = app.state().library[0].id;
+
+        app.dispatch(Command::UndoRecording(event));
+        assert_eq!(app.state().library[0].progress, 0);
+        assert_eq!(stored_progress(&dir, id), 0);
+        assert_eq!(outcome(&app), RecordOutcome::Undone);
+        assert!(app.state().notices.is_empty());
+        let events = stored_events(&dir);
+        assert_eq!(events.len(), 1);
+        assert!(events[0].undone_at.is_some());
+    }
+
+    #[test]
+    fn a_batch_undoes_to_where_it_started() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::AddEntry(entry("Show")));
+        watch_past_threshold(&mut app, "Show - 01-12.mkv");
+        assert_eq!(app.state().library[0].progress, 12);
+        let event = stored_events(&dir)[0].id;
+
+        app.dispatch(Command::UndoRecording(event));
+        assert_eq!(app.state().library[0].progress, 0);
+        assert_eq!(stored_progress(&dir, app.state().library[0].id), 0);
+    }
+
+    #[test]
+    fn undoing_twice_notices_and_leaves_the_progress_alone() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        let event = record_first_episode(&mut app, &dir);
+        let id = app.state().library[0].id;
+        app.dispatch(Command::UndoRecording(event));
+        app.dispatch(Command::SetProgress { id, progress: 5 });
+
+        app.dispatch(Command::UndoRecording(event));
+        assert!(matches!(
+            app.state().notices.as_slice(),
+            [Notice::SaveFailed { detail }] if detail.contains("already undone")
+        ));
+        assert_eq!(app.state().library[0].progress, 5);
+        assert_eq!(stored_progress(&dir, id), 5);
+        assert_eq!(outcome(&app), RecordOutcome::Undone);
+    }
+
+    #[test]
+    fn watching_on_after_undo_does_not_record_again() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        let event = record_first_episode(&mut app, &dir);
+        app.dispatch(Command::UndoRecording(event));
+
+        app.dispatch(Command::Playback(later("Show - 01.mkv", 1_400)));
+        assert_eq!(app.state().library[0].progress, 0);
+        assert_eq!(outcome(&app), RecordOutcome::Undone);
+        assert_eq!(stored_events(&dir).len(), 1);
+    }
+
+    #[test]
+    fn a_relaunch_and_rewatch_after_undo_records_a_second_row() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        let event = record_first_episode(&mut app, &dir);
+        app.dispatch(Command::UndoRecording(event));
+        drop(app);
+
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::Playback(later("Show - 01.mkv", 2_000)));
+        app.dispatch(Command::Playback(later("Show - 01.mkv", 2_720)));
+        assert_eq!(app.state().library[0].progress, 1);
+        let events = stored_events(&dir);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].id, event);
+        assert!(events[0].undone_at.is_some());
+        assert_eq!(events[1].undone_at, None);
+        assert_eq!(stored_writes(&dir), vec![(1..=1, 0, 1), (1..=1, 0, 1)]);
+        assert_eq!(outcome(&app), RecordOutcome::Recorded(events[1].id));
     }
 
     /// `recorded` lives in memory only. On relaunch `resume` seeds the key
