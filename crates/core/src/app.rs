@@ -1,9 +1,9 @@
 use crate::settings::{self, SettingsError};
 use crate::watch::WatchSession;
 use crate::{
-    AppState, Command, DataDir, Diagnostics, LibraryEntry, Link, NewEntry, Notice, NowPlaying,
-    Opened, PlaybackEvent, ProposedMatch, Settings, Store, StoreError, ThemePreference,
-    WatchProgress, WatchStatus, error_chain, matching,
+    AppState, Command, DataDir, Diagnostics, LibraryEntry, Link, NewEntry, NewWatchEvent, Notice,
+    NowPlaying, Opened, PlaybackEvent, ProposedMatch, Recording, Settings, Store, StoreError,
+    ThemePreference, WatchProgress, WatchStatus, error_chain, matching,
 };
 
 /// The running application: the store plus the state derived from it.
@@ -146,9 +146,14 @@ impl Ryuuji {
             return;
         };
         // A batch spanning the next episode was watched through its end.
-        let watched = *range.end();
-        let outcome = self.store.set_progress(id, watched);
-        let Some(entry) = commit(&mut self.state.notices, "progress", outcome) else {
+        let outcome = self.store.record(NewWatchEvent {
+            entry: id,
+            episode: range.clone(),
+            raw_title: last.raw_title.clone(),
+            player: last.player.clone(),
+        });
+        let Some(Recording { entry, event }) = commit(&mut self.state.notices, "progress", outcome)
+        else {
             return;
         };
         upsert(&mut self.state.library, entry);
@@ -157,7 +162,12 @@ impl Ryuuji {
             recorded: true,
             ..progress
         });
-        tracing::info!(entry = id.as_i64(), progress = watched, "episode recorded");
+        tracing::info!(
+            entry = id.as_i64(),
+            event = event.id.as_i64(),
+            progress = event.progress,
+            "episode recorded"
+        );
     }
 
     fn set_theme(&mut self, theme: ThemePreference) {
@@ -276,10 +286,11 @@ fn upsert(library: &mut Vec<LibraryEntry>, entry: LibraryEntry) {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::ops::RangeInclusive;
     use std::time::{Duration, SystemTime};
 
     use super::*;
-    use crate::{Detail, EntryId, Page, PlaybackSource, PlaybackStatus};
+    use crate::{Detail, EntryId, Page, PlaybackSource, PlaybackStatus, WatchEvent};
 
     fn open_tmp() -> (tempfile::TempDir, DataDir) {
         let tmp = tempfile::tempdir().unwrap();
@@ -897,6 +908,19 @@ mod tests {
             .progress
     }
 
+    fn stored_events(dir: &DataDir) -> Vec<WatchEvent> {
+        Store::open(dir).unwrap().store.watch_events().unwrap()
+    }
+
+    /// The `(episode, progress_before, progress)` of every stored event,
+    /// which is what a recording test cares about.
+    fn stored_writes(dir: &DataDir) -> Vec<(RangeInclusive<u32>, u32, u32)> {
+        stored_events(dir)
+            .into_iter()
+            .map(|event| (event.episode, event.progress_before, event.progress))
+            .collect()
+    }
+
     #[test]
     fn watching_past_half_the_episode_records_it_once() {
         let (_tmp, dir) = open_tmp();
@@ -907,16 +931,27 @@ mod tests {
         app.dispatch(Command::Playback(playing("Show - 01.mkv")));
         assert_eq!(app.state().library[0].progress, 0);
         assert!(!app.state().watch_progress.unwrap().recorded);
+        assert_eq!(stored_events(&dir), vec![]);
 
         app.dispatch(Command::Playback(later("Show - 01.mkv", 720)));
         assert_eq!(app.state().library[0].progress, 1);
         assert_eq!(stored_progress(&dir, id), 1);
         assert!(app.state().watch_progress.unwrap().recorded);
         assert!(app.state().notices.is_empty());
+        let events = stored_events(&dir);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].entry, id);
+        assert_eq!(events[0].episode, 1..=1);
+        assert_eq!(events[0].progress_before, 0);
+        assert_eq!(events[0].progress, 1);
+        assert_eq!(events[0].raw_title, "Show - 01.mkv");
+        assert_eq!(events[0].player, "mpv");
+        assert_eq!(events[0].undone_at, None);
 
         app.dispatch(Command::Playback(later("Show - 01.mkv", 1_400)));
         assert_eq!(app.state().library[0].progress, 1);
         assert_eq!(stored_progress(&dir, id), 1);
+        assert_eq!(stored_events(&dir), events);
     }
 
     #[test]
@@ -930,6 +965,7 @@ mod tests {
             Some(1..=12)
         );
         assert_eq!(app.state().library[0].progress, 12);
+        assert_eq!(stored_writes(&dir), vec![(1..=12, 0, 12)]);
     }
 
     #[test]
@@ -941,6 +977,7 @@ mod tests {
         app.dispatch(Command::Playback(later("Show - 01.mkv", 700)));
         assert_eq!(app.state().library[0].progress, 0);
         assert!(!app.state().watch_progress.unwrap().recorded);
+        assert_eq!(stored_events(&dir), vec![]);
     }
 
     #[test]
@@ -955,6 +992,7 @@ mod tests {
         ));
         assert_eq!(app.state().library[0].progress, 0);
         assert!(!app.state().watch_progress.unwrap().recorded);
+        assert_eq!(stored_events(&dir), vec![]);
     }
 
     #[test]
@@ -970,6 +1008,7 @@ mod tests {
         watch_past_threshold(&mut app, "Show - 01.mkv");
         assert_eq!(app.state().library[0].progress, 0);
         assert!(!app.state().watch_progress.unwrap().recorded);
+        assert_eq!(stored_events(&dir), vec![]);
 
         // Nothing sets the flag before M5, so it goes in underneath.
         app.store_mut()
@@ -979,6 +1018,7 @@ mod tests {
         assert!(app.state().library[0].rewatching);
         watch_past_threshold(&mut app, "Show - 01.mkv");
         assert_eq!(app.state().library[0].progress, 1);
+        assert_eq!(stored_writes(&dir), vec![(1..=1, 0, 1)]);
     }
 
     #[test]
@@ -997,9 +1037,11 @@ mod tests {
         assert_eq!(app.state().library[0].progress, 4);
         watch_past_threshold(&mut app, "Show.mkv");
         assert_eq!(app.state().library[0].progress, 4);
+        assert_eq!(stored_events(&dir), vec![]);
 
         watch_past_threshold(&mut app, "Show - 05.mkv");
         assert_eq!(app.state().library[0].progress, 5);
+        assert_eq!(stored_writes(&dir), vec![(5..=5, 4, 5)]);
     }
 
     #[test]
@@ -1008,10 +1050,11 @@ mod tests {
         let mut app = Ryuuji::open(&dir).unwrap();
         app.dispatch(Command::AddEntry(entry("Show")));
         app.dispatch(Command::Playback(playing("Show - 01.mkv")));
-        app.store_mut().execute_raw("DROP TABLE entries");
+        app.store_mut().execute_raw("DROP TABLE watch_events");
 
         app.dispatch(Command::Playback(later("Show - 01.mkv", 720)));
         assert_eq!(app.state().library[0].progress, 0);
+        assert_eq!(stored_progress(&dir, app.state().library[0].id), 0);
         assert!(!app.state().watch_progress.unwrap().recorded);
         assert!(matches!(
             app.state().notices.as_slice(),
@@ -1048,6 +1091,7 @@ mod tests {
         assert!(app.state().watch_progress.unwrap().accrued >= Duration::from_secs(710));
         assert_eq!(app.state().library[0].progress, 1);
         assert_eq!(stored_progress(&dir, id), 1);
+        assert_eq!(stored_writes(&dir), vec![(1..=1, 0, 1)]);
         assert!(app.state().notices.is_empty());
     }
 }

@@ -17,8 +17,9 @@ mod tagged;
 mod watch;
 
 use std::fmt;
+use std::ops::RangeInclusive;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 pub use app::Ryuuji;
 pub use data_dir::{DataDir, DataDirError, DataDirSource};
@@ -27,7 +28,7 @@ pub use matching::{Confidence, Link, ProposedMatch, normalize_title, propose, si
 pub use playback::{PlaybackEvent, PlaybackSource, PlaybackStatus};
 // Shells depend on this crate alone, so the parser reaches them through here.
 pub use ryuuji_parse::{ElementKind, Options, parse};
-pub use store::{DbError, Opened, Recovered, SchemaVersion, Store, StoreError};
+pub use store::{DbError, Opened, Recording, Recovered, SchemaVersion, Store, StoreError};
 use tagged::tagged_enum;
 
 tagged_enum! {
@@ -134,6 +135,49 @@ pub struct LibraryEntry {
     /// Watching again after Completed; lets a recorded episode land on a
     /// finished show. Set from M5, never here.
     pub rewatching: bool,
+}
+
+/// Identity of a stored watch event. Only [`Store`] mints these.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct WatchEventId(i64);
+
+impl WatchEventId {
+    pub fn as_i64(self) -> i64 {
+        self.0
+    }
+}
+
+impl fmt::Display for WatchEventId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// A progress write that watching is about to cause. The title and player
+/// name the proposal it was decided on, since the last match is one row and
+/// gets overwritten.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NewWatchEvent {
+    pub entry: EntryId,
+    /// Every episode the file carries; progress moves to its end.
+    pub episode: RangeInclusive<u32>,
+    pub raw_title: String,
+    pub player: String,
+}
+
+/// One progress write that watching caused, as stored. Rows are never
+/// deleted: undoing one marks it and puts `progress_before` back.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WatchEvent {
+    pub id: WatchEventId,
+    pub entry: EntryId,
+    pub episode: RangeInclusive<u32>,
+    pub progress_before: u32,
+    pub progress: u32,
+    pub raw_title: String,
+    pub player: String,
+    pub at: SystemTime,
+    pub undone_at: Option<SystemTime>,
 }
 
 /// What the detection side currently reports.

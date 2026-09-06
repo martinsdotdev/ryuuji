@@ -9,7 +9,8 @@ use rusqlite_migration::Migrations;
 use tracing::{debug, info, info_span, warn};
 
 use crate::{
-    Confidence, DataDir, EntryId, LibraryEntry, Link, NewEntry, ProposedMatch, WatchStatus,
+    Confidence, DataDir, EntryId, LibraryEntry, Link, NewEntry, NewWatchEvent, ProposedMatch,
+    WatchEvent, WatchEventId, WatchStatus,
 };
 
 /// The schema, compiled in from `migrations/`, one numbered directory per
@@ -18,6 +19,9 @@ static MIGRATIONS: include_dir::Dir<'static> =
     include_dir::include_dir!("$CARGO_MANIFEST_DIR/migrations");
 
 const SELECT_ENTRY: &str = "SELECT id, title, status, progress, total, rewatching FROM entries";
+
+const SELECT_EVENT: &str = "SELECT id, entry_id, episode, episode_end, progress_before, progress, \
+                            raw_title, player, at, undone_at FROM watch_events";
 
 /// Files SQLite may keep beside the database; they move with it.
 const SIDECAR_SUFFIXES: [&str; 3] = ["-journal", "-wal", "-shm"];
@@ -90,6 +94,11 @@ pub enum StoreError {
     InvalidRow { id: EntryId, field: &'static str },
     #[error("the stored last match has an invalid {field}")]
     InvalidLastMatch { field: &'static str },
+    #[error("watch event {id} has an invalid {field}")]
+    InvalidWatchEvent {
+        id: WatchEventId,
+        field: &'static str,
+    },
 }
 
 impl StoreError {
@@ -102,7 +111,8 @@ impl StoreError {
             StoreError::Quarantine { .. }
             | StoreError::NotFound { .. }
             | StoreError::InvalidRow { .. }
-            | StoreError::InvalidLastMatch { .. } => false,
+            | StoreError::InvalidLastMatch { .. }
+            | StoreError::InvalidWatchEvent { .. } => false,
         }
     }
 }
@@ -128,6 +138,14 @@ pub struct Opened {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Recovered {
     pub backup: PathBuf,
+}
+
+/// An entry and the watch event that last moved its progress, both as
+/// stored after the same transaction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Recording {
+    pub entry: LibraryEntry,
+    pub event: WatchEvent,
 }
 
 /// The on-disk library. Every mutation runs in one transaction and returns
@@ -232,18 +250,57 @@ impl Store {
         value: impl ToSql,
     ) -> Result<LibraryEntry, StoreError> {
         let tx = self.conn.transaction().map_err(query_failed)?;
-        let changed = tx
-            .execute(
-                &format!("UPDATE entries SET {column} = ?1, updated_at = ?2 WHERE id = ?3"),
-                params![value, unix_now(), id.0],
-            )
-            .map_err(query_failed)?;
-        if changed == 0 {
-            return Err(StoreError::NotFound { id });
-        }
-        let stored = fetch(&tx, id)?;
+        let stored = set_column(&tx, id, column, value)?;
         tx.commit().map_err(query_failed)?;
         Ok(stored)
+    }
+
+    /// Writes the progress a viewing earned and the row that says so, in one
+    /// transaction, so neither can exist without the other. `at` is the
+    /// write's own clock, like `updated_at`.
+    pub fn record(&mut self, event: NewWatchEvent) -> Result<Recording, StoreError> {
+        let _span = info_span!(
+            "store.record",
+            entry = %event.entry,
+            episode = *event.episode.end()
+        )
+        .entered();
+        let tx = self.conn.transaction().map_err(query_failed)?;
+        let before = fetch(&tx, event.entry)?;
+        let entry = set_column(&tx, event.entry, "progress", *event.episode.end())?;
+        tx.execute(
+            "INSERT INTO watch_events (entry_id, episode, episode_end, progress_before, \
+             progress, raw_title, player, at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                event.entry.0,
+                event.episode.start(),
+                event.episode.end(),
+                before.progress,
+                entry.progress,
+                event.raw_title,
+                event.player,
+                unix_now(),
+            ],
+        )
+        .map_err(query_failed)?;
+        let id = WatchEventId(tx.last_insert_rowid());
+        let event = fetch_event(&tx, id)?;
+        tx.commit().map_err(query_failed)?;
+        info!(event = %id, progress = entry.progress, "progress recorded");
+        Ok(Recording { entry, event })
+    }
+
+    /// Every watch event, oldest first, undone ones included.
+    pub fn watch_events(&self) -> Result<Vec<WatchEvent>, StoreError> {
+        let _span = info_span!("store.watch_events").entered();
+        let mut stmt = self
+            .conn
+            .prepare(&format!("{SELECT_EVENT} ORDER BY id"))
+            .map_err(query_failed)?;
+        let rows = stmt
+            .query_map([], RawWatchEvent::read)
+            .map_err(query_failed)?;
+        rows.map(|row| row.map_err(query_failed)?.parse()).collect()
     }
 
     /// Reads `PRAGMA user_version`; touches nothing on disk.
@@ -366,6 +423,37 @@ fn fetch(conn: &Connection, id: EntryId) -> Result<LibraryEntry, StoreError> {
     .parse()
 }
 
+/// One column of one entry, stamped with `updated_at`, read back as stored.
+/// Runs on the caller's connection so a transaction can hold more than one
+/// write.
+fn set_column(
+    conn: &Connection,
+    id: EntryId,
+    column: &'static str,
+    value: impl ToSql,
+) -> Result<LibraryEntry, StoreError> {
+    let changed = conn
+        .execute(
+            &format!("UPDATE entries SET {column} = ?1, updated_at = ?2 WHERE id = ?3"),
+            params![value, unix_now(), id.0],
+        )
+        .map_err(query_failed)?;
+    if changed == 0 {
+        return Err(StoreError::NotFound { id });
+    }
+    fetch(conn, id)
+}
+
+fn fetch_event(conn: &Connection, id: WatchEventId) -> Result<WatchEvent, StoreError> {
+    conn.query_row(
+        &format!("{SELECT_EVENT} WHERE id = ?1"),
+        [id.0],
+        RawWatchEvent::read,
+    )
+    .map_err(query_failed)?
+    .parse()
+}
+
 /// A row as SQLite hands it over, before the domain checks in `parse`.
 struct RawEntry {
     id: i64,
@@ -464,6 +552,62 @@ impl RawLastMatch {
     }
 }
 
+/// A watch-event row as SQLite hands it over, before the domain checks in
+/// `parse`.
+struct RawWatchEvent {
+    id: i64,
+    entry_id: i64,
+    episode: i64,
+    episode_end: i64,
+    progress_before: i64,
+    progress: i64,
+    raw_title: String,
+    player: String,
+    at: i64,
+    undone_at: Option<i64>,
+}
+
+impl RawWatchEvent {
+    // Positional, so `SELECT_EVENT` only ever appends a column.
+    fn read(row: &Row<'_>) -> rusqlite::Result<RawWatchEvent> {
+        Ok(RawWatchEvent {
+            id: row.get(0)?,
+            entry_id: row.get(1)?,
+            episode: row.get(2)?,
+            episode_end: row.get(3)?,
+            progress_before: row.get(4)?,
+            progress: row.get(5)?,
+            raw_title: row.get(6)?,
+            player: row.get(7)?,
+            at: row.get(8)?,
+            undone_at: row.get(9)?,
+        })
+    }
+
+    fn parse(self) -> Result<WatchEvent, StoreError> {
+        let id = WatchEventId(self.id);
+        let invalid = |field| StoreError::InvalidWatchEvent { id, field };
+        let progress = |value: i64, field| u32::try_from(value).map_err(|_| invalid(field));
+        Ok(WatchEvent {
+            id,
+            entry: EntryId(self.entry_id),
+            episode: match episode_range(Some(self.episode), Some(self.episode_end)) {
+                Ok(Some(range)) => range,
+                Ok(None) | Err(()) => return Err(invalid("episode")),
+            },
+            progress_before: progress(self.progress_before, "progress_before")?,
+            progress: progress(self.progress, "progress")?,
+            raw_title: self.raw_title,
+            player: self.player,
+            at: unix_time(self.at).ok_or_else(|| invalid("at"))?,
+            undone_at: self
+                .undone_at
+                .map(|at| unix_time(at).ok_or_else(|| invalid("undone_at")))
+                .transpose()?,
+        })
+    }
+}
+
 /// The two episode columns read as one value: both NULL is no episode, both
 /// set and ordered is the span, anything else is a broken row.
 fn episode_range(low: Option<i64>, high: Option<i64>) -> Result<Option<RangeInclusive<u32>>, ()> {
@@ -494,6 +638,13 @@ fn unix_secs(time: SystemTime) -> i64 {
     time.duration_since(UNIX_EPOCH)
         .map(|elapsed| i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX))
         .unwrap_or(0)
+}
+
+/// Inverse of [`unix_secs`]; a negative stamp is a broken row.
+fn unix_time(secs: i64) -> Option<SystemTime> {
+    u64::try_from(secs)
+        .ok()
+        .map(|secs| UNIX_EPOCH + Duration::from_secs(secs))
 }
 
 #[cfg(test)]
@@ -543,13 +694,13 @@ mod tests {
     }
 
     #[test]
-    fn open_creates_the_database_at_schema_v4_without_recovery() {
+    fn open_creates_the_database_at_schema_v5_without_recovery() {
         let (_tmp, dir) = open_tmp();
         let store = open(&dir);
         assert!(dir.root().join("library.sqlite").is_file());
-        assert_eq!(schema_version(&store), SchemaVersion(4));
+        assert_eq!(schema_version(&store), SchemaVersion(5));
         drop(store);
-        assert_eq!(schema_version(&open(&dir)), SchemaVersion(4));
+        assert_eq!(schema_version(&open(&dir)), SchemaVersion(5));
     }
 
     #[test]
@@ -576,7 +727,7 @@ mod tests {
         let recovered = recovered.expect("recovery reported");
         assert_backup_name(&backup_name(&recovered));
         assert_eq!(fs::read(&recovered.backup).unwrap(), garbage);
-        assert_eq!(schema_version(&store), SchemaVersion(4));
+        assert_eq!(schema_version(&store), SchemaVersion(5));
         assert_eq!(store.entries().unwrap(), vec![]);
         drop(store);
 
@@ -678,7 +829,7 @@ mod tests {
     }
 
     #[test]
-    fn v1_library_migrates_to_v4_and_keeps_entries() {
+    fn v1_library_migrates_to_v5_and_keeps_entries() {
         let (_tmp, dir) = open_tmp();
         let conn = Connection::open(dir.library_db()).unwrap();
         conn.execute_batch(include_str!("../migrations/01-entries/up.sql"))
@@ -693,7 +844,7 @@ mod tests {
         drop(conn);
 
         let store = open(&dir);
-        assert_eq!(schema_version(&store), SchemaVersion(4));
+        assert_eq!(schema_version(&store), SchemaVersion(5));
         let entries = store.entries().unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].title, "Show");
@@ -723,7 +874,7 @@ mod tests {
         drop(conn);
 
         let store = open(&dir);
-        assert_eq!(schema_version(&store), SchemaVersion(4));
+        assert_eq!(schema_version(&store), SchemaVersion(5));
         assert_eq!(store.last_match().unwrap(), Some(proposed("Show - 03.mkv")));
     }
 
@@ -750,8 +901,136 @@ mod tests {
         drop(conn);
 
         let store = open(&dir);
-        assert_eq!(schema_version(&store), SchemaVersion(4));
+        assert_eq!(schema_version(&store), SchemaVersion(5));
         assert_eq!(store.last_match().unwrap(), Some(proposed("Show - 03.mkv")));
+    }
+
+    #[test]
+    fn v4_library_migrates_to_v5_with_an_empty_history() {
+        let (_tmp, dir) = open_tmp();
+        let conn = Connection::open(dir.library_db()).unwrap();
+        for sql in [
+            include_str!("../migrations/01-entries/up.sql"),
+            include_str!("../migrations/02-last_match/up.sql"),
+            include_str!("../migrations/03-drop_outcome/up.sql"),
+            include_str!("../migrations/04-episode_range_and_rewatching/up.sql"),
+        ] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO entries (id, title, status, progress, total, updated_at) \
+             VALUES (7, 'Show', 'watching', 3, 12, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO last_match (id, raw_title, parsed_title, episode, season, \
+             release_group, entry_id, confidence, player, at, episode_end) \
+             VALUES (1, 'Show - 03.mkv', 'Show', 3, 2, 'Subs', 7, 'exact', \
+             'mpv', 1700000000, 3)",
+            [],
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 4).unwrap();
+        drop(conn);
+
+        let store = open(&dir);
+        assert_eq!(schema_version(&store), SchemaVersion(5));
+        let entries = store.entries().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, EntryId(7));
+        assert_eq!(entries[0].progress, 3);
+        assert_eq!(
+            store.last_match().unwrap(),
+            Some(ProposedMatch {
+                link: Link::Exact(EntryId(7)),
+                ..proposed("Show - 03.mkv")
+            })
+        );
+        assert_eq!(store.watch_events().unwrap(), vec![]);
+    }
+
+    fn watching(id: EntryId, episode: RangeInclusive<u32>) -> NewWatchEvent {
+        NewWatchEvent {
+            entry: id,
+            episode,
+            raw_title: "Show - 03.mkv".into(),
+            player: "mpv".into(),
+        }
+    }
+
+    #[test]
+    fn record_writes_progress_and_its_row_together() {
+        let (_tmp, dir) = open_tmp();
+        let mut store = open(&dir);
+        let id = store.add(entry("Show")).unwrap().id;
+        store.set_progress(id, 2).unwrap();
+
+        let Recording { entry, event } = store.record(watching(id, 3..=4)).unwrap();
+        assert_eq!(entry.progress, 4);
+        assert_eq!(event.entry, id);
+        assert_eq!(event.episode, 3..=4);
+        assert_eq!(event.progress_before, 2);
+        assert_eq!(event.progress, 4);
+        assert_eq!(event.raw_title, "Show - 03.mkv");
+        assert_eq!(event.player, "mpv");
+        assert!(event.at >= UNIX_EPOCH + Duration::from_secs(1_700_000_000));
+        assert_eq!(event.undone_at, None);
+
+        let second = store.record(watching(id, 5..=5)).unwrap();
+        assert!(second.event.id > event.id);
+        assert_eq!(second.event.progress_before, 4);
+        drop(store);
+
+        let reopened = open(&dir);
+        assert_eq!(reopened.entries().unwrap(), vec![second.entry]);
+        assert_eq!(reopened.watch_events().unwrap(), vec![event, second.event]);
+    }
+
+    #[test]
+    fn record_on_unknown_id_is_not_found_and_inserts_nothing() {
+        let (_tmp, dir) = open_tmp();
+        let mut store = open(&dir);
+        let existing = store.add(entry("Show")).unwrap();
+        let unknown = EntryId(existing.id.0 + 100);
+        assert!(matches!(
+            store.record(watching(unknown, 1..=1)),
+            Err(StoreError::NotFound { id }) if id == unknown
+        ));
+        assert_eq!(store.entries().unwrap(), vec![existing]);
+        assert_eq!(store.watch_events().unwrap(), vec![]);
+    }
+
+    #[test]
+    fn garbage_watch_event_surfaces_as_invalid() {
+        let (_tmp, dir) = open_tmp();
+        let mut store = open(&dir);
+        let id = store.add(entry("Show")).unwrap().id;
+        let event = store.record(watching(id, 1..=1)).unwrap().event.id;
+        for (broken, field) in [
+            (
+                "UPDATE watch_events SET episode = 5, episode_end = 2",
+                "episode",
+            ),
+            (
+                "UPDATE watch_events SET episode = 1, episode_end = 1, progress = -1",
+                "progress",
+            ),
+            (
+                "UPDATE watch_events SET progress = 1, undone_at = -5",
+                "undone_at",
+            ),
+        ] {
+            store.execute_raw(broken);
+            assert!(
+                matches!(
+                    store.watch_events(),
+                    Err(StoreError::InvalidWatchEvent { id: got, field: got_field })
+                        if got == event && got_field == field
+                ),
+                "{broken}"
+            );
+        }
     }
 
     #[test]
