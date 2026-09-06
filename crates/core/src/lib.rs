@@ -249,6 +249,10 @@ pub enum Decline {
     Completed,
     NoEpisode,
     NotNext,
+    /// Numbered past a known total. Taiga's `IsValidEpisodeNumber` refuses
+    /// the same; such a file is more often absolute numbering than a real
+    /// episode.
+    PastTotal,
 }
 
 impl Decline {
@@ -259,6 +263,7 @@ impl Decline {
             Decline::Completed => "Not recorded: show is completed",
             Decline::NoEpisode => "Not recorded: no episode number",
             Decline::NotNext => "Not recorded: not the next episode",
+            Decline::PastTotal => "Not recorded: past the show's total",
         }
     }
 }
@@ -380,6 +385,10 @@ mod tests {
         assert_eq!(
             Decline::NotNext.label(),
             "Not recorded: not the next episode"
+        );
+        assert_eq!(
+            Decline::PastTotal.label(),
+            "Not recorded: past the show's total"
         );
     }
 
