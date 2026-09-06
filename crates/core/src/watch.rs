@@ -8,7 +8,7 @@
 
 use std::time::{Duration, SystemTime};
 
-use crate::{PlaybackEvent, PlaybackStatus, ProposedMatch, WatchProgress};
+use crate::{PlaybackEvent, PlaybackStatus, ProposedMatch};
 
 /// The most one event can credit when the player never says how long the
 /// file is. Position deltas are unbounded then, so wall time is the only
@@ -45,7 +45,19 @@ pub(crate) struct Observed {
     /// A titled player other than the one being watched.
     pub new_viewing: bool,
     /// `Some` whenever a viewing stands.
-    pub progress: Option<WatchProgress>,
+    pub progress: Option<Accrual>,
+}
+
+/// The session's side of the countdown. What the threshold came to is the
+/// app's to say, since only it can run the gates and the write.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Accrual {
+    /// Time credited as watched so far.
+    pub accrued: Duration,
+    /// Half the episode when its duration is known, else a flat two minutes.
+    pub threshold: Duration,
+    /// The episode has already been written for this viewing.
+    pub recorded: bool,
 }
 
 impl WatchSession {
@@ -119,14 +131,14 @@ impl WatchSession {
         }
     }
 
-    fn progress(&self) -> Option<WatchProgress> {
+    fn progress(&self) -> Option<Accrual> {
         self.key.as_ref()?;
         let threshold = if self.duration.is_zero() {
             FALLBACK_THRESHOLD
         } else {
             self.duration / 2
         };
-        Some(WatchProgress {
+        Some(Accrual {
             accrued: self.accrued,
             threshold,
             recorded: self.recorded,
@@ -189,7 +201,7 @@ mod tests {
             observed,
             Observed {
                 new_viewing: true,
-                progress: Some(WatchProgress {
+                progress: Some(Accrual {
                     accrued: Duration::ZERO,
                     threshold: secs(710),
                     recorded: false,
@@ -450,7 +462,7 @@ mod tests {
         assert!(observed.new_viewing);
         assert_eq!(
             observed.progress,
-            Some(WatchProgress {
+            Some(Accrual {
                 accrued: Duration::ZERO,
                 threshold: secs(710),
                 recorded: false,
