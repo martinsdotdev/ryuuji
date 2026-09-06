@@ -182,6 +182,9 @@ impl Ryuuji {
         {
             return Err(Decline::NotNext);
         }
+        if entry.total.is_some_and(|total| *range.end() > total) {
+            return Err(Decline::PastTotal);
+        }
         Ok(NewWatchEvent {
             entry: id,
             episode: range.clone(),
@@ -1071,6 +1074,41 @@ mod tests {
         watch_past_threshold(&mut app, "Show - 05.mkv");
         assert_eq!(app.state().library[0].progress, 5);
         assert_eq!(stored_writes(&dir), vec![(5..=5, 4, 5)]);
+    }
+
+    #[test]
+    fn an_episode_past_a_known_total_does_not_record() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::AddEntry(entry("Show")));
+        let id = app.state().library[0].id;
+        assert_eq!(app.state().library[0].total, Some(12));
+
+        watch_past_threshold(&mut app, "Show - 01-13.mkv");
+        assert_eq!(app.state().library[0].progress, 0);
+        assert_eq!(outcome(&app), RecordOutcome::Declined(Decline::PastTotal));
+
+        app.dispatch(Command::SetProgress { id, progress: 12 });
+        watch_past_threshold(&mut app, "Show - 13.mkv");
+        assert_eq!(app.state().library[0].progress, 12);
+        assert_eq!(outcome(&app), RecordOutcome::Declined(Decline::PastTotal));
+        assert_eq!(stored_events(&dir), vec![]);
+    }
+
+    #[test]
+    fn an_unknown_total_lets_any_next_episode_record() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::AddEntry(NewEntry {
+            total: None,
+            ..entry("Show")
+        }));
+        let id = app.state().library[0].id;
+        app.dispatch(Command::SetProgress { id, progress: 12 });
+
+        watch_past_threshold(&mut app, "Show - 13.mkv");
+        assert_eq!(app.state().library[0].progress, 13);
+        assert_eq!(stored_writes(&dir), vec![(13..=13, 12, 13)]);
     }
 
     #[test]
