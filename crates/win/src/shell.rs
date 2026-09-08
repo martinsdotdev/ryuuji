@@ -1,5 +1,7 @@
 //! The app shell: a NavigationView whose pane lists the core's pages and whose
-//! content area renders the selected page, or the detail open over it.
+//! content area renders the selected page, or the detail open over it. Which
+//! of the two, and the header, highlight and back arrow that go with it, come
+//! from [`Destination`]; this module only builds the WinUI that consumes it.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -15,6 +17,7 @@ use windows_reactor::{
 };
 
 use crate::debug;
+use crate::destination::{Body, Destination};
 use crate::logging::RecentEvents;
 use crate::pages;
 
@@ -84,23 +87,26 @@ impl Component for Shell {
         });
 
         let detection_down = watcher.is_err();
-        let (detail, header) = match state.detail {
-            Some(detail @ Detail::Diagnostics) => (
-                Some(component(
-                    debug::diagnostics,
-                    debug::DiagnosticsProps {
-                        dispatch: dispatch.clone(),
-                        core: core.clone(),
-                        recent: self.recent.clone(),
-                        watcher: watcher.clone(),
-                    },
-                )),
-                detail.label(),
+        let showing = Destination::of(&state);
+        // The one place a body is chosen, so a new `Detail` stops the build
+        // here until it is given an arm.
+        let body = match showing.body {
+            Body::Page(page) => {
+                pages::body(page, &state, dispatch.clone(), &self.dir, detection_down)
+            }
+            // Built here rather than in `pages`: the props carry the core
+            // handle, the log buffer and the watcher, all owned by `Shell`.
+            Body::Detail(Detail::Diagnostics) => component(
+                debug::diagnostics,
+                debug::DiagnosticsProps {
+                    dispatch: dispatch.clone(),
+                    core: core.clone(),
+                    recent: self.recent.clone(),
+                    watcher: watcher.clone(),
+                },
             ),
-            None => (None, state.page.label()),
         };
-        let on_detail = detail.is_some();
-        let body = pages::render(&state, dispatch.clone(), &self.dir, detection_down, detail);
+        let body = pages::chrome(&state.notices, dispatch.clone(), body);
 
         let back = {
             let dispatch = dispatch.clone();
@@ -108,8 +114,8 @@ impl Component for Shell {
         };
 
         NavigationView::new(menu_items, body)
-            .header(header)
-            .selected_tag(state.page.tag())
+            .header(showing.header)
+            .selected_tag(showing.tag)
             .on_selection_changed(move |tag: String| {
                 if let Some(page) = Page::from_tag(&tag) {
                     dispatch.call(Command::SelectPage(page));
@@ -121,7 +127,7 @@ impl Component for Shell {
             // minimize UI elements moving around". The toolkit forces the same
             // shape anyway: it only pushes IsBackButtonVisible when it is
             // false, so a later `true` never re-shows the arrow.
-            .back_enabled(on_detail)
+            .back_enabled(showing.back_enabled)
             .on_back_requested(back)
             .pane_display_mode(NavigationViewPaneDisplayMode::Left)
             // Settings is one of our own pages so it routes like the others.
