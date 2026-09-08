@@ -4,6 +4,7 @@ use ryuuji_core::DataDir;
 use windows_reactor::{App, Backdrop, bootstrap};
 
 mod debug;
+mod destination;
 mod logging;
 mod pages;
 mod shell;

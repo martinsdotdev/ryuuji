@@ -3,8 +3,8 @@
 //! the data folder and the way into Diagnostics, and Now playing shows the
 //! last playback observation on a card, or a placeholder in the symbolic
 //! empty-state style the UI-direction research settled on (heading required,
-//! neutral tone). An open detail is built by the caller and handed in, so
-//! this module never sees the core handle or the log buffer.
+//! neutral tone). Details are built by the shell, so this module never sees
+//! the core handle or the log buffer.
 
 use std::ops::RangeInclusive;
 use std::path::PathBuf;
@@ -23,47 +23,48 @@ use crate::ui::{
 
 const PAGE_PADDING: f64 = 24.0;
 
-/// Renders the notice bar and the body: the open `detail`, or the currently
-/// selected page when nothing is open over it.
-pub fn render(
+/// Builds one page's body. Which page is the shell's decision, not this
+/// module's, so nothing here reads [`AppState::page`].
+pub fn body(
+    page: Page,
     state: &AppState,
     dispatch: Dispatch<Command>,
     dir: &DataDir,
     detection_down: bool,
-    detail: Option<Element>,
 ) -> Element {
-    let page: Element = match detail {
-        Some(detail) => detail,
-        None => match state.page {
-            Page::Library => library(&state.library),
-            Page::NowPlaying => component(
-                now_playing,
-                NowPlayingProps {
-                    dispatch: dispatch.clone(),
-                    now_playing: state.now_playing.clone(),
-                    last_match: state.last_match.clone(),
-                    watch_progress: state.watch_progress,
-                    title: state
-                        .last_match
-                        .as_ref()
-                        .map(|m| m.title_in(&state.library).to_owned()),
-                    detection_down,
-                },
-            ),
-            Page::Settings => component(
-                settings,
-                SettingsProps {
-                    dispatch: dispatch.clone(),
-                    theme: state.settings.theme,
-                    root: dir.root().to_path_buf(),
-                },
-            ),
-        },
-    };
+    match page {
+        Page::Library => library(&state.library),
+        Page::NowPlaying => component(
+            now_playing,
+            NowPlayingProps {
+                dispatch,
+                now_playing: state.now_playing.clone(),
+                last_match: state.last_match.clone(),
+                watch_progress: state.watch_progress,
+                title: state
+                    .last_match
+                    .as_ref()
+                    .map(|m| m.title_in(&state.library).to_owned()),
+                detection_down,
+            },
+        ),
+        Page::Settings => component(
+            settings,
+            SettingsProps {
+                dispatch,
+                theme: state.settings.theme,
+                root: dir.root().to_path_buf(),
+            },
+        ),
+    }
+}
 
+/// Wraps a body in what every destination shows around it: the notice bar
+/// above, and the page padding.
+pub fn chrome(notices: &[Notice], dispatch: Dispatch<Command>, body: Element) -> Element {
     grid((
-        notice(&state.notices, dispatch),
-        border(page)
+        notice(notices, dispatch),
+        border(body)
             .padding(Thickness::uniform(PAGE_PADDING))
             .grid_row(1),
     ))
