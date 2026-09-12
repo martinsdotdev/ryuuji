@@ -21,3 +21,32 @@ executables = ["vlc.exe"]
 name = "MPC-HC"
 smtc_app_ids = ["mpc-hc64.exe", "mpc-hc.exe"]
 executables = ["mpc-hc64.exe", "mpc-hc.exe"]
+
+# Chromium browsers publish a tab's media under the id their installer
+# registered: the branded name alone for a machine-wide install, or the name,
+# a dot and a hash of the Windows account for a per-user one. So each pattern
+# is the branded name with no dot. The session carries no URL, so nothing
+# here says which site is playing.
+#
+# An installed web app reports its own id under the browser's name, such as
+# Brave._crx_..., and is attributed to that browser. ungoogled-chromium ships
+# chrome.exe, which would also claim a Google Chrome window; that affects only
+# whether the player reads as in front.
+#
+# Firefox and LibreWolf are absent: their id is a hash of the install location,
+# which differs on every machine and cannot be written here.
+
+[[player]]
+name = "Brave"
+smtc_app_ids = ["brave"]
+executables = ["brave.exe"]
+
+[[player]]
+name = "Chromium"
+smtc_app_ids = ["chromium"]
+executables = ["chrome.exe"]
+
+[[player]]
+name = "Edge"
+smtc_app_ids = ["msedge"]
+executables = ["msedge.exe"]

@@ -114,8 +114,32 @@ mod tests {
     }
 
     #[test]
-    fn builtin_table_parses_with_mpv_vlc_and_mpc_hc_in_order() {
-        assert_eq!(names(&PlayerTable::builtin()), ["mpv", "VLC", "MPC-HC"]);
+    fn builtin_table_parses_with_local_players_then_browsers_in_order() {
+        assert_eq!(
+            names(&PlayerTable::builtin()),
+            ["mpv", "VLC", "MPC-HC", "Brave", "Chromium", "Edge"]
+        );
+    }
+
+    /// Per-user Chromium installs report the branded id plus a hash of the
+    /// Windows account; machine-wide installs report the branded id alone.
+    /// The hashed ids are the ones this machine registers.
+    #[test]
+    fn browser_app_ids_match_their_own_entry_in_either_install_scope() {
+        let table = PlayerTable::builtin();
+        for (app_id, name) in [
+            ("Brave.TOV6AIDIK4HLZU7TATPUSWV77Q", "Brave"),
+            ("Brave", "Brave"),
+            ("Chromium.TOV6AIDIK4HLZU7TATPUSWV77Q", "Chromium"),
+            ("Chromium", "Chromium"),
+            ("MSEdge", "Edge"),
+        ] {
+            assert_eq!(
+                table.match_smtc(app_id).map(|p| p.name.as_str()),
+                Some(name),
+                "{app_id}"
+            );
+        }
     }
 
     #[test]
