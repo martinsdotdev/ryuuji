@@ -55,6 +55,8 @@ pub(crate) struct SessionSnapshot {
     pub start: Duration,
     pub end: Duration,
     pub position: Duration,
+    /// When the player last wrote the timeline, or `None` if it never has.
+    pub updated: Option<SystemTime>,
 }
 
 pub(crate) struct Matched<'a> {
@@ -125,12 +127,35 @@ pub(crate) fn normalize(
         player: matched.player.name.clone(),
         title: snapshot.title.clone(),
         status,
-        position: snapshot.position.saturating_sub(snapshot.start),
+        position: advanced_position(snapshot, now).saturating_sub(snapshot.start),
         duration: snapshot.end.saturating_sub(snapshot.start),
         observed_at: now,
         source: PlaybackSource::Detected,
         foreground: front.of(matched.player),
     })
+}
+
+/// Chromium writes a tab's timeline only when playback starts, pauses or
+/// seeks, so the position it reports goes stale while the video plays on. A
+/// playing session is moved on by the time since the timeline was written,
+/// and stops at the end of the item when its length is known. The playback
+/// rate is not read, because accrual already caps credit at wall time.
+/// Players that rewrite the timeline every second gain under a second.
+fn advanced_position(snapshot: &SessionSnapshot, now: SystemTime) -> Duration {
+    if snapshot.status != RawStatus::Playing {
+        return snapshot.position;
+    }
+    let Some(updated) = snapshot.updated else {
+        return snapshot.position;
+    };
+    let moved = snapshot
+        .position
+        .saturating_add(now.duration_since(updated).unwrap_or_default());
+    if snapshot.end > snapshot.start {
+        moved.min(snapshot.end)
+    } else {
+        moved
+    }
 }
 
 pub(crate) enum Observation {
@@ -237,7 +262,27 @@ mod tests {
             start: Duration::ZERO,
             end: Duration::from_secs(1440),
             position: Duration::from_secs(90),
+            updated: None,
         }
+    }
+
+    /// A playing snapshot whose timeline was written `secs` before now.
+    fn written_ago(secs: u64) -> SessionSnapshot {
+        SessionSnapshot {
+            updated: Some(now() - Duration::from_secs(secs)),
+            ..snapshot(RawStatus::Playing)
+        }
+    }
+
+    fn position_of(snapshot: SessionSnapshot) -> Duration {
+        let mpv = player("mpv");
+        let matched = Matched {
+            player: &mpv,
+            snapshot,
+        };
+        normalize(&matched, now(), &Front::Unknown)
+            .unwrap()
+            .position
     }
 
     fn now() -> SystemTime {
@@ -370,6 +415,53 @@ mod tests {
         let normalized = normalize(&matched, now(), &Front::Unknown).unwrap();
         assert_eq!(normalized.position, Duration::ZERO);
         assert_eq!(normalized.duration, Duration::ZERO);
+    }
+
+    #[test]
+    fn a_playing_position_moves_on_by_the_time_since_the_timeline_was_written() {
+        assert_eq!(position_of(written_ago(30)), Duration::from_secs(120));
+    }
+
+    #[test]
+    fn a_moved_position_stops_at_the_end_of_the_item() {
+        let near_end = SessionSnapshot {
+            position: Duration::from_secs(1430),
+            ..written_ago(60)
+        };
+        assert_eq!(position_of(near_end), Duration::from_secs(1440));
+    }
+
+    #[test]
+    fn a_position_moves_past_any_end_when_the_length_is_unknown() {
+        let unknown_length = SessionSnapshot {
+            end: Duration::ZERO,
+            ..written_ago(30)
+        };
+        assert_eq!(position_of(unknown_length), Duration::from_secs(120));
+    }
+
+    #[test]
+    fn a_paused_or_never_written_timeline_does_not_move() {
+        let paused = SessionSnapshot {
+            status: RawStatus::Paused,
+            ..written_ago(30)
+        };
+        let never_written = SessionSnapshot {
+            updated: None,
+            ..written_ago(30)
+        };
+        for snapshot in [paused, never_written] {
+            assert_eq!(position_of(snapshot), Duration::from_secs(90));
+        }
+    }
+
+    #[test]
+    fn a_timeline_written_after_now_does_not_move_the_position_back() {
+        let from_the_future = SessionSnapshot {
+            updated: Some(now() + Duration::from_secs(30)),
+            ..snapshot(RawStatus::Playing)
+        };
+        assert_eq!(position_of(from_the_future), Duration::from_secs(90));
     }
 
     #[test]
