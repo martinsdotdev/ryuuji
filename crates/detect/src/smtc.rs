@@ -347,10 +347,21 @@ fn read_snapshot(session: &Session, status: RawStatus) -> windows::core::Result<
         start: span(timeline.StartTime()?),
         end: span(timeline.EndTime()?),
         position: span(timeline.Position()?),
+        updated: instant(timeline.LastUpdatedTime()?),
     })
 }
 
 /// A WinRT `TimeSpan` as a `Duration`; negative spans read as zero.
 fn span(value: impl TryInto<Duration>) -> Duration {
     value.try_into().unwrap_or_default()
+}
+
+/// A WinRT `DateTime` as a `SystemTime`. An unset one is zero, which would
+/// otherwise read as a moment in 1601, so nothing at or before the Unix epoch
+/// counts as known.
+fn instant(value: impl TryInto<SystemTime>) -> Option<SystemTime> {
+    value
+        .try_into()
+        .ok()
+        .filter(|time| *time > SystemTime::UNIX_EPOCH)
 }
