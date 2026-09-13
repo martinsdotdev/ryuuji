@@ -5,7 +5,8 @@
 //! moving a row is how a rule's priority changes, and the diff says so.
 
 mod legacy;
+mod preidentified;
 
 use crate::engine::Step;
 
-pub(crate) const RULES: &[Step] = &[legacy::STEP];
+pub(crate) const RULES: &[Step] = &[Step::Tape(preidentified::RULE), legacy::STEP];

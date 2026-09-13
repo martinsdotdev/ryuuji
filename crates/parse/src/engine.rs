@@ -27,16 +27,18 @@ use crate::token::{Delimiters, Tape};
 pub enum RuleName {
     /// The extension strip and the file name, read before any rule runs.
     Prelude,
+    Preidentified,
     /// The passes not yet lifted into rules of their own.
     Legacy,
 }
 
 impl RuleName {
-    pub const ALL: [RuleName; 2] = [RuleName::Prelude, RuleName::Legacy];
+    pub const ALL: [RuleName; 3] = [RuleName::Prelude, RuleName::Preidentified, RuleName::Legacy];
 
     pub fn label(self) -> &'static str {
         match self {
             RuleName::Prelude => "prelude",
+            RuleName::Preidentified => "preidentified",
             RuleName::Legacy => "legacy",
         }
     }
