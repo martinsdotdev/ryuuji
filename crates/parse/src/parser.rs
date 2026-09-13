@@ -69,10 +69,8 @@ impl<'a> Parser<'a> {
             })?;
             let end = (begin..len)
                 .find(|&index| {
-                    matches!(
-                        self.tokens[index].category,
-                        TokenCategory::Bracket | TokenCategory::Identifier
-                    )
+                    self.tokens[index].is_bracket()
+                        || self.tokens[index].category == TokenCategory::Identifier
                 })
                 .unwrap_or(len);
             search_from = end;

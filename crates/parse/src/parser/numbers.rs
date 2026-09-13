@@ -129,9 +129,8 @@ impl Parser<'_> {
     }
 
     pub(super) fn is_isolated(&self, index: usize) -> bool {
-        let is_bracket = |index: Option<usize>| {
-            index.is_some_and(|index| self.tokens[index].category == TokenCategory::Bracket)
-        };
+        let is_bracket =
+            |index: Option<usize>| index.is_some_and(|index| self.tokens[index].is_bracket());
         is_bracket(token::find_prev(
             &self.tokens,
             index,
@@ -220,7 +219,7 @@ impl Parser<'_> {
             else {
                 continue;
             };
-            if self.tokens[bracket].category != TokenCategory::Bracket {
+            if !self.tokens[bracket].is_bracket() {
                 continue;
             }
             let Some(other) = token::find_next(&self.tokens, bracket, |token| {

@@ -3,7 +3,7 @@
 
 use super::scanner::{Scanner, eat_episode_separator, version};
 use super::{Extent, leading_value};
-use crate::element::ElementKind;
+use crate::element::{ElementKind, Span};
 use crate::parser::Parser;
 use crate::string;
 use crate::token::{Token, TokenCategory};
@@ -151,7 +151,13 @@ impl Parser<'_> {
         self.elements.insert(ElementKind::AnimeType, prefix.clone());
         if self.claim_number(Extent::Episode, &number, index) {
             let enclosed = self.tokens[index].enclosed;
+            let span = self.tokens[index].span;
+            let split = span.start + self.tokens[index].content.find(word).unwrap_or(0) + digit_pos;
             self.tokens[index].content = number;
+            self.tokens[index].span = Span {
+                start: split,
+                end: span.end,
+            };
             self.tokens.insert(
                 index,
                 Token {
@@ -161,6 +167,10 @@ impl Parser<'_> {
                         TokenCategory::Unknown
                     },
                     content: prefix,
+                    span: Span {
+                        start: span.start,
+                        end: split,
+                    },
                     enclosed,
                     kind: None,
                 },
