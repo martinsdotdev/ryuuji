@@ -786,3 +786,14 @@ anime_title = "Show"
 anime_season = "01"
 episode_number = "06"
 release_version = "2"
+
+[[case]]
+name = "a lone number outside the brackets is the episode when the title is inside them"
+input = "[Nyaa][Kimi no Na wa] 02 [720p].mkv"
+
+[case.elements]
+file_extension = "mkv"
+video_resolution = "720p"
+release_group = "Nyaa"
+anime_title = "Kimi no Na wa"
+episode_number = "02"

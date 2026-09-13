@@ -79,10 +79,12 @@ impl Parser<'_> {
     /// group is the release group. A group that opens with a mostly non-Latin
     /// token is skipped as well, so a CJK group name followed by a CJK title
     /// still leads to the Latin title behind them.
-    fn enclosed_title_begin(&self) -> Option<usize> {
+    pub(in crate::parser) fn enclosed_title_begin(&self) -> Option<usize> {
         let len = self.tokens.len();
         let unknown_from = |from: usize| {
-            (from..len).find(|&index| self.tokens[index].category == TokenCategory::Unknown)
+            (from..len).find(|&index| {
+                self.tokens[index].enclosed && self.tokens[index].category == TokenCategory::Unknown
+            })
         };
         let mut begin = unknown_from(0)?;
         let mut skipped_a_group = false;
