@@ -42,6 +42,24 @@ impl<'a> Parser<'a> {
     }
 
     pub(crate) fn run(mut self) {
+        self.episode_token = self
+            .elements
+            .facts()
+            .iter()
+            .find(|fact| {
+                matches!(
+                    fact.kind,
+                    ElementKind::EpisodeNumber | ElementKind::EpisodeNumberAlt
+                )
+            })
+            .and_then(|fact| {
+                self.tape
+                    .iter()
+                    .find(|(_, token)| {
+                        token.span.start <= fact.span.start && fact.span.start < token.span.end
+                    })
+                    .map(|(index, _)| index)
+            });
         self.search_keywords();
         self.search_isolated_numbers();
         if self.options.parse_episode_number {

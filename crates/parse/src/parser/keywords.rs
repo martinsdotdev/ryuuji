@@ -22,14 +22,8 @@ impl Parser<'_> {
 
             let kind;
             if let Some(keyword) = self.table.find_searchable(&upper) {
-                match keyword.kind {
-                    ElementKind::EpisodePrefix => {
-                        if keyword.valid {
-                            self.check_extent(index, Extent::Episode);
-                        }
-                    }
-                    ElementKind::VolumePrefix => self.check_extent(index, Extent::Volume),
-                    _ => {}
+                if keyword.kind == ElementKind::VolumePrefix {
+                    self.check_extent(index, Extent::Volume);
                 }
                 continue;
             } else if !self.elements.contains(ElementKind::FileChecksum)
