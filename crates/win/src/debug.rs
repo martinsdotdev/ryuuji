@@ -731,7 +731,7 @@ mod tests {
             .set_default();
         tracing::info!("gathered");
 
-        let report = Report::gather(&core, &recent, &Err(WatchError::Exited));
+        let report = Report::gather(&core, &recent, &Err(WatchError::Exited("SMTC")));
 
         assert_eq!(report.core, core.diagnostics());
         assert_eq!(report.last_match, core.state().last_match);
