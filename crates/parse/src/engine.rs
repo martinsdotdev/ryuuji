@@ -35,12 +35,13 @@ pub enum RuleName {
     Checksum,
     Resolution,
     Year,
+    IsolatedResolution,
     /// The passes not yet lifted into rules of their own.
     Legacy,
 }
 
 impl RuleName {
-    pub const ALL: [RuleName; 10] = [
+    pub const ALL: [RuleName; 11] = [
         RuleName::Prelude,
         RuleName::Preidentified,
         RuleName::Terms,
@@ -50,6 +51,7 @@ impl RuleName {
         RuleName::Checksum,
         RuleName::Resolution,
         RuleName::Year,
+        RuleName::IsolatedResolution,
         RuleName::Legacy,
     ];
 
@@ -64,6 +66,7 @@ impl RuleName {
             RuleName::Checksum => "checksum",
             RuleName::Resolution => "resolution",
             RuleName::Year => "year",
+            RuleName::IsolatedResolution => "isolated_resolution",
             RuleName::Legacy => "legacy",
         }
     }

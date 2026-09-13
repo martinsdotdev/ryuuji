@@ -20,7 +20,8 @@ fn read(tape: &Tape, _reading: &Reading) -> Verdict {
         if !token.numeric || !tape.isolated(at) {
             continue;
         }
-        if string::leading_number(&token.text).is_some_and(|number| matches!(number, 480 | 720 | 1080))
+        if string::leading_number(&token.text)
+            .is_some_and(|number| matches!(number, 480 | 720 | 1080))
         {
             return Verdict::nothing().take(ElementKind::VideoResolution, at);
         }

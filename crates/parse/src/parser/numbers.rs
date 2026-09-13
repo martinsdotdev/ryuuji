@@ -5,27 +5,6 @@ use crate::string;
 use crate::token;
 
 impl Parser<'_> {
-    pub(in crate::parser) fn search_isolated_numbers(&mut self) {
-        for index in 0..self.tape.len() {
-            if !self.tape.tokens[index].is_free()
-                || !self.tape.tokens[index].numeric
-                || !self.tape.isolated(index)
-            {
-                continue;
-            }
-            let Some(number) = string::leading_number(&self.tape.tokens[index].text) else {
-                continue;
-            };
-            if matches!(number, 480 | 720 | 1080)
-                && !self.elements.contains(ElementKind::VideoResolution)
-            {
-                let text = self.tape.tokens[index].text.clone();
-                self.record(ElementKind::VideoResolution, text, index);
-                self.retire(index, ElementKind::VideoResolution);
-            }
-        }
-    }
-
     pub(in crate::parser) fn search_episode_number(&mut self) {
         let candidates: Vec<usize> = self
             .tape
