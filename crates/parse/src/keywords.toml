@@ -30,6 +30,7 @@ values = [
     "AAC", "AACX2", "AACX3", "AACX4", "AC3", "EAC3", "E-AC-3",
     "FLAC", "FLACX2", "FLACX3", "FLACX4", "LOSSLESS", "MP3", "OGG", "VORBIS",
     "ATMOS", "DOLBY ATMOS", "DUALAUDIO", "DUAL AUDIO",
+    "DD2.0", "DD5.1",
 ]
 
 [[keyword]]
@@ -176,3 +177,11 @@ kind = "video_resolution"
 [[preidentified]]
 text = "Blu-Ray"
 kind = "source"
+
+[[preidentified]]
+text = "8 bit"
+kind = "video_term"
+
+[[preidentified]]
+text = "10 bit"
+kind = "video_term"
