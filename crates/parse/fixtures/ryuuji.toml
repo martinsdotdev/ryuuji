@@ -810,3 +810,43 @@ video_term = "x264"
 audio_term = "FLAC"
 anime_title = "Show Title"
 release_group = "nyaa"
+
+# Known ambiguous shapes, measured 2026-09-13 against the anitomy corpus.
+# anitomy itself passes 144 of its 182 cases; Ryuuji passes 156. Each shape
+# below fails in both, and no rule that the corpus supports would fix it
+# without breaking a case the corpus also expects, so they are left visible
+# here instead of guessed at:
+#
+# - A number inside the title before a dash and a word ("Kiddy Grade 2 -
+#   Pilot", "Rozen Maiden 3 - PV", "Memories Off 3.5 - 04"): the number
+#   reads as the episode, and "Title 01 - Episode Title" is the same shape
+#   with the opposite meaning.
+# - A number inside the title with no separator at all ("Byousoku 5
+#   Centimeter", "The iDOLM@STER 765 Pro to Iu Monogatari"): the last-number
+#   fallback takes it.
+# - "Special" as a title word ("Special A", "Kotoura-san - Special Short
+#   Anime"): the corpus keeps "Movie" wherever it sits in a title but drops
+#   "Special" when a word follows, and only the word itself tells them apart.
+# - The release group in the last bracket when an earlier bracket holds two
+#   short words ("Code_Geass_R2_TV_[20_of_25]_[ru_jp]_[HDTV]_[Varies_&_...]"):
+#   the first qualifying bracket wins.
+# - A group in parentheses after a comma ("(Central Anime, 720p)"), a group
+#   in the first bracket beside a dotted title ("[Juuni.Kokki]-(Les.12.
+#   Royaumes)"), "encoded by SEED" as a group, and a lone unenclosed number
+#   between bracket groups ("[Keroro].148.[Xvid.mp3]").
+# - Scene-style dotted names ("The.Animatrix.08.A.Detective.Story.720p.
+#   BluRay.DTS.x264-ESiR", "Dragon.Ball.KAI.-.01.-.1080p.BluRay.x264.DHD"):
+#   the dot glues single letters onto numbers and the trailing word is a
+#   group only by convention.
+# - Nested parentheses inside brackets ("[BD 1920x1080 h264+AAC(5.1ch
+#   JP+EN) +Sub(JP-EN-SP-FR-CH) Chap]"), a dash glued to a prefix
+#   ("Gunbuster-ep1.BD"), a dash-glued tag ("[HQR.remux-DualAudio]"), and
+#   "EX01" as a prefix the table does not know.
+# - Corner brackets as part of a title ("「K」 Image Blu-ray ...") and a
+#   fullwidth-bracketed count ("【Golden Time】[24（END）]").
+# - "__BLUE DROP 10 (1)": the corpus wants 10 alone where the equivalent-
+#   numbers rule reads "10 (1)" as one episode under two schemes.
+# - A leading number before the group ("37 [Ruberia]_Death_Note_-_37v2").
+# - The three newest corpus entries (Nintama Rantarou S23E1821, Aharen-san
+#   S01E06v2, Somali S01E01) expect no file_extension for a .mkv name; the
+#   strict comparison cannot pass them.
