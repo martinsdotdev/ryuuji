@@ -32,18 +32,20 @@ pub enum RuleName {
     SeasonWord,
     EpisodePrefix,
     VolumePrefix,
+    Checksum,
     /// The passes not yet lifted into rules of their own.
     Legacy,
 }
 
 impl RuleName {
-    pub const ALL: [RuleName; 7] = [
+    pub const ALL: [RuleName; 8] = [
         RuleName::Prelude,
         RuleName::Preidentified,
         RuleName::Terms,
         RuleName::SeasonWord,
         RuleName::EpisodePrefix,
         RuleName::VolumePrefix,
+        RuleName::Checksum,
         RuleName::Legacy,
     ];
 
@@ -55,6 +57,7 @@ impl RuleName {
             RuleName::SeasonWord => "season_word",
             RuleName::EpisodePrefix => "episode_prefix",
             RuleName::VolumePrefix => "volume_prefix",
+            RuleName::Checksum => "checksum",
             RuleName::Legacy => "legacy",
         }
     }
