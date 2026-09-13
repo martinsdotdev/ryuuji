@@ -38,16 +38,16 @@ impl Parser<'_> {
                     .as_deref()
                     .is_some_and(|title| has_word(title, &value))
             {
-                self.elements.remove_value(kind, &value);
+                self.elements.retract(kind, &value);
                 continue;
             }
             let Some(title) = episode_title.as_deref() else {
                 continue;
             };
             if title.eq_ignore_ascii_case(&value) {
-                self.elements.remove(ElementKind::EpisodeTitle);
+                self.elements.retract(ElementKind::EpisodeTitle, title);
             } else if has_word(title, &value) {
-                self.elements.remove_value(kind, &value);
+                self.elements.retract(kind, &value);
             }
         }
     }

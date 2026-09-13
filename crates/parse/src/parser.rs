@@ -5,10 +5,11 @@ mod numbers;
 mod title;
 mod validate;
 
-use crate::element::{ElementKind, Elements};
+use crate::element::{ElementKind, Elements, Fact, Span};
 use crate::engine::RuleName;
 use crate::keyword::KeywordTable;
 use crate::options::Options;
+use crate::reading::Certainty;
 use crate::token::{Delimiters, Tape};
 
 pub(crate) struct Parser<'a> {
@@ -57,6 +58,22 @@ impl<'a> Parser<'a> {
         self.elements
     }
 
+    /// Records a value read off the token at `index`.
+    fn record(&mut self, kind: ElementKind, value: impl Into<String>, index: usize) {
+        let span = self.tape.tokens[index].span;
+        self.record_span(kind, value, span);
+    }
+
+    fn record_span(&mut self, kind: ElementKind, value: impl Into<String>, span: Span) {
+        self.elements.push(Fact {
+            kind,
+            value: value.into(),
+            span,
+            by: RuleName::Legacy,
+            certainty: Certainty::Shaped,
+        });
+    }
+
     /// Takes a whole token so later passes cannot claim it again.
     fn retire(&mut self, index: usize, kind: ElementKind) {
         self.tape.take(index, RuleName::Legacy, kind, false);
@@ -82,11 +99,12 @@ impl<'a> Parser<'a> {
             Delimiters::Folded
         };
         let value = self.tape.value(begin..end, delimiters);
+        let span = self.tape.span(begin..end);
         for index in begin..end {
             if self.tape.tokens[index].is_free() {
                 self.retire(index, kind);
             }
         }
-        self.elements.insert(kind, value);
+        self.record_span(kind, value, span);
     }
 }

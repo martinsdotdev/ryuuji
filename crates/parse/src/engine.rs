@@ -6,15 +6,18 @@
 /// not exist.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RuleName {
+    /// The extension strip and the file name, read before any rule runs.
+    Prelude,
     /// The passes not yet lifted into rules of their own.
     Legacy,
 }
 
 impl RuleName {
-    pub const ALL: [RuleName; 1] = [RuleName::Legacy];
+    pub const ALL: [RuleName; 2] = [RuleName::Prelude, RuleName::Legacy];
 
     pub fn label(self) -> &'static str {
         match self {
+            RuleName::Prelude => "prelude",
             RuleName::Legacy => "legacy",
         }
     }

@@ -227,6 +227,13 @@ impl Tape {
         }
     }
 
+    pub(crate) fn span(&self, run: Range<usize>) -> Span {
+        Span {
+            start: self.tokens[run.start].span.start,
+            end: self.tokens[run.end - 1].span.end,
+        }
+    }
+
     /// Takes a whole token.
     pub(crate) fn take(&mut self, at: usize, by: RuleName, kind: ElementKind, held: bool) {
         let len = self.tokens[at].text.len();

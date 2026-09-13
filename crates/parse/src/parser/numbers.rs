@@ -71,7 +71,7 @@ impl Parser<'_> {
                 && !self.elements.contains(ElementKind::AnimeYear)
             {
                 let text = self.tape.tokens[index].text.clone();
-                self.elements.insert(ElementKind::AnimeYear, text);
+                self.record(ElementKind::AnimeYear, text, index);
                 self.retire(index, ElementKind::AnimeYear);
                 continue;
             }
@@ -79,7 +79,7 @@ impl Parser<'_> {
                 && !self.elements.contains(ElementKind::VideoResolution)
             {
                 let text = self.tape.tokens[index].text.clone();
-                self.elements.insert(ElementKind::VideoResolution, text);
+                self.record(ElementKind::VideoResolution, text, index);
                 self.retire(index, ElementKind::VideoResolution);
             }
         }
@@ -233,7 +233,7 @@ impl Parser<'_> {
             let number = self.tape.tokens[episode].text.clone();
             self.set_number(Extent::Episode, &number, episode, false);
             let number = self.tape.tokens[alt].text.clone();
-            self.elements.insert(ElementKind::EpisodeNumberAlt, number);
+            self.record(ElementKind::EpisodeNumberAlt, number, alt);
             self.retire(alt, ElementKind::EpisodeNumberAlt);
             return true;
         }
@@ -346,7 +346,7 @@ impl Parser<'_> {
             }
         }
         self.retire(index, kind);
-        self.elements.insert(kind, number);
+        self.record(kind, number, index);
         true
     }
 

@@ -51,8 +51,7 @@ impl Parser<'_> {
             return false;
         }
         self.set_number(extent, &number, index, false);
-        self.elements
-            .insert(ElementKind::ReleaseVersion, release_version);
+        self.record(ElementKind::ReleaseVersion, release_version, index);
         true
     }
 
@@ -84,7 +83,7 @@ impl Parser<'_> {
         }
         self.set_number(extent, &upper, index, false);
         for value in [lower_version, upper_version].into_iter().flatten() {
-            self.elements.insert(ElementKind::ReleaseVersion, value);
+            self.record(ElementKind::ReleaseVersion, value, index);
         }
         true
     }
@@ -120,16 +119,16 @@ impl Parser<'_> {
         if leading_value(&first_season) == 0 {
             return false;
         }
-        self.elements.insert(ElementKind::AnimeSeason, first_season);
+        self.record(ElementKind::AnimeSeason, first_season, index);
         if let Some(season) = second_season {
-            self.elements.insert(ElementKind::AnimeSeason, season);
+            self.record(ElementKind::AnimeSeason, season, index);
         }
         self.set_number(Extent::Episode, &first_episode, index, false);
         if let Some(episode) = second_episode {
             self.set_number(Extent::Episode, &episode, index, false);
         }
         if let Some(value) = release_version {
-            self.elements.insert(ElementKind::ReleaseVersion, value);
+            self.record(ElementKind::ReleaseVersion, value, index);
         }
         true
     }
@@ -149,9 +148,9 @@ impl Parser<'_> {
         };
         let prefix = prefix.to_owned();
         let number = word[digit_pos..].to_owned();
-        self.elements.insert(ElementKind::AnimeType, prefix.clone());
         let split = self.tape.tokens[index].text.find(word).unwrap_or(0) + digit_pos;
         self.tape.split(index, split);
+        self.record(ElementKind::AnimeType, prefix, index);
         if keyword.identifiable {
             self.retire(index, ElementKind::AnimeType);
         } else {
@@ -217,7 +216,7 @@ impl Parser<'_> {
             self.set_number(Extent::Episode, &episode, index, true);
         }
         if let Some(value) = release_version {
-            self.elements.insert(ElementKind::ReleaseVersion, value);
+            self.record(ElementKind::ReleaseVersion, value, index);
         }
         true
     }

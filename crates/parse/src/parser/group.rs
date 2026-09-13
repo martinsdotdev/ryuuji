@@ -47,6 +47,6 @@ impl Parser<'_> {
         }
         let group = group.to_owned();
         self.retire(last, ElementKind::ReleaseGroup);
-        self.elements.insert(ElementKind::ReleaseGroup, group);
+        self.record(ElementKind::ReleaseGroup, group, last);
     }
 }
