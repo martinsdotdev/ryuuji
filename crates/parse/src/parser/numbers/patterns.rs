@@ -114,7 +114,7 @@ impl Parser<'_> {
                 scanner.digits(4)
             })?
         });
-        version(&mut scanner);
+        let release_version = version(&mut scanner);
         if !scanner.done() {
             return false;
         }
@@ -128,6 +128,9 @@ impl Parser<'_> {
         self.set_number(Extent::Episode, &first_episode, index, false);
         if let Some(episode) = second_episode {
             self.set_number(Extent::Episode, &episode, index, false);
+        }
+        if let Some(value) = release_version {
+            self.elements.insert(ElementKind::ReleaseVersion, value);
         }
         true
     }
