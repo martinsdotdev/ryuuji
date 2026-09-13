@@ -773,3 +773,16 @@ video_resolution = "720p"
 release_group = "Nyaa"
 anime_title = "Show"
 episode_number = "05"
+
+[[case]]
+name = "a season and episode pattern keeps its version"
+input = "[Nyaa] Show - S01E06v2 [720p].mkv"
+
+[case.elements]
+file_extension = "mkv"
+video_resolution = "720p"
+release_group = "Nyaa"
+anime_title = "Show"
+anime_season = "01"
+episode_number = "06"
+release_version = "2"
