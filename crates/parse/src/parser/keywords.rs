@@ -23,7 +23,6 @@ impl Parser<'_> {
             let kind;
             if let Some(keyword) = self.table.find_searchable(&upper) {
                 match keyword.kind {
-                    ElementKind::AnimeSeasonPrefix => self.check_anime_season(index),
                     ElementKind::EpisodePrefix => {
                         if keyword.valid {
                             self.check_extent(index, Extent::Episode);
@@ -49,25 +48,6 @@ impl Parser<'_> {
         }
     }
 
-    fn check_anime_season(&mut self, index: usize) {
-        if let Some(prev) = self.tape.prev(index, token::is_not_delimiter)
-            && let Some(number) = ordinal_number(&self.tape.tokens[prev].text)
-        {
-            self.record(ElementKind::AnimeSeason, number, prev);
-            self.retire(prev, ElementKind::AnimeSeason);
-            self.retire(index, ElementKind::AnimeSeasonPrefix);
-            return;
-        }
-        if let Some(next) = self.tape.next(index, token::is_not_delimiter)
-            && self.tape.tokens[next].numeric
-        {
-            let value = self.tape.tokens[next].text.clone();
-            self.record(ElementKind::AnimeSeason, value, next);
-            self.retire(index, ElementKind::AnimeSeasonPrefix);
-            self.retire(next, ElementKind::AnimeSeason);
-        }
-    }
-
     fn check_extent(&mut self, index: usize, extent: Extent) {
         let Some(next) = self.tape.next(index, token::is_not_delimiter) else {
             return;
@@ -86,21 +66,6 @@ impl Parser<'_> {
         let value = self.tape.tokens[next].text.clone();
         self.claim_number(extent, &value, next);
         self.retire(index, extent.prefix());
-    }
-}
-
-fn ordinal_number(word: &str) -> Option<&'static str> {
-    match word.to_uppercase().as_str() {
-        "1ST" | "FIRST" => Some("1"),
-        "2ND" | "SECOND" => Some("2"),
-        "3RD" | "THIRD" => Some("3"),
-        "4TH" | "FOURTH" => Some("4"),
-        "5TH" | "FIFTH" => Some("5"),
-        "6TH" | "SIXTH" => Some("6"),
-        "7TH" | "SEVENTH" => Some("7"),
-        "8TH" | "EIGHTH" => Some("8"),
-        "9TH" | "NINTH" => Some("9"),
-        _ => None,
     }
 }
 
