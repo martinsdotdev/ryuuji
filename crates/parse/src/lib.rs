@@ -1,6 +1,7 @@
-//! Anime filename parser. A clean-room, anitomy-style element extractor:
-//! [`parse`] splits a filename into tokens and identifies known elements
-//! (resolution, source, audio and video terms, checksum, ...).
+//! Anime filename parser. An anitomy-style element extractor that follows
+//! anitomy's rules where the corpus agrees with them and its own where it
+//! does not: [`parse`] splits a filename into tokens and identifies known
+//! elements (resolution, source, audio and video terms, checksum, ...).
 
 mod element;
 mod keyword;
