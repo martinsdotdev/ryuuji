@@ -751,3 +751,14 @@ input = "Ep. 07 - Snow Falls.mkv"
 file_extension = "mkv"
 episode_number = "07"
 episode_title = "Snow Falls"
+
+[[case]]
+name = "a fraction with a leading zero is an episode"
+input = "[Nyaa] Show - 04.1 (DVD).mkv"
+
+[case.elements]
+file_extension = "mkv"
+source = "DVD"
+release_group = "Nyaa"
+anime_title = "Show"
+episode_number = "04.1"
