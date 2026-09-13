@@ -7,6 +7,8 @@
 mod city;
 #[cfg(windows)]
 mod foreground;
+#[cfg(windows)]
+mod gecko;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod players;
 #[cfg_attr(not(windows), allow(dead_code))]
