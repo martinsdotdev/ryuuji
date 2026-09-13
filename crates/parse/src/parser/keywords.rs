@@ -18,22 +18,14 @@ impl Parser<'_> {
             }
             let upper = word.to_uppercase();
 
-            let kind;
-            if self.table.find_searchable(&upper).is_some() {
-                continue;
-            } else if !self.elements.contains(ElementKind::FileChecksum)
-                && word.chars().count() == 8
-                && string::is_hex(&word)
+            if self.table.find_searchable(&upper).is_some()
+                || self.elements.contains(ElementKind::VideoResolution)
+                || !is_resolution(&word)
             {
-                kind = ElementKind::FileChecksum;
-            } else if !self.elements.contains(ElementKind::VideoResolution) && is_resolution(&word)
-            {
-                kind = ElementKind::VideoResolution;
-            } else {
                 continue;
             }
-            self.record(kind, word, index);
-            self.retire(index, kind);
+            self.record(ElementKind::VideoResolution, word, index);
+            self.retire(index, ElementKind::VideoResolution);
         }
     }
 }

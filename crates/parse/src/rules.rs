@@ -4,6 +4,7 @@
 //! inside another rule changes. The order is the engine's precedence, so
 //! moving a row is how a rule's priority changes, and the diff says so.
 
+mod checksum;
 mod episode_prefix;
 mod legacy;
 mod preidentified;
@@ -38,5 +39,6 @@ pub(crate) const RULES: &[Step] = &[
     Step::Tape(season_word::RULE),
     Step::Tape(episode_prefix::RULE),
     Step::Tape(volume_prefix::RULE),
+    Step::Tape(checksum::RULE),
     legacy::STEP,
 ];
