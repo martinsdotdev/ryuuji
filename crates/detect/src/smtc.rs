@@ -21,12 +21,64 @@ use crate::SessionFacts;
 use crate::foreground;
 use crate::gecko;
 use crate::players::PlayerTable;
-use crate::session::{Dedup, Matched, RawStatus, SessionSnapshot, observe};
+use crate::session::{Dedup, Matched, SessionSnapshot, SessionState, observe};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 /// While a session plays, the timeline is re-read on this cadence even if
 /// the player never raises a timeline event.
 const PLAYING_POLL: Duration = Duration::from_secs(1);
+
+/// `GlobalSystemMediaTransportControlsSessionPlaybackStatus` as it comes off
+/// the wire, in declaration order. Parsed into [`SessionState`] here; no
+/// other module sees six values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RawStatus {
+    Closed,
+    Opened,
+    Changing,
+    Stopped,
+    Playing,
+    Paused,
+}
+
+impl RawStatus {
+    const ALL: [RawStatus; 6] = [
+        RawStatus::Closed,
+        RawStatus::Opened,
+        RawStatus::Changing,
+        RawStatus::Stopped,
+        RawStatus::Playing,
+        RawStatus::Paused,
+    ];
+
+    fn from_winrt(value: i32) -> Option<RawStatus> {
+        usize::try_from(value)
+            .ok()
+            .and_then(|index| RawStatus::ALL.get(index).copied())
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            RawStatus::Closed => "Closed",
+            RawStatus::Opened => "Opened",
+            RawStatus::Changing => "Changing",
+            RawStatus::Stopped => "Stopped",
+            RawStatus::Playing => "Playing",
+            RawStatus::Paused => "Paused",
+        }
+    }
+
+    /// Closed and Stopped are Stopped; Opened and Changing are a session
+    /// that has not settled.
+    fn state(self) -> SessionState {
+        match self {
+            RawStatus::Closed | RawStatus::Stopped => SessionState::Stopped,
+            RawStatus::Playing => SessionState::Playing,
+            RawStatus::Paused => SessionState::Paused,
+            RawStatus::Opened | RawStatus::Changing => SessionState::Settling,
+        }
+    }
+}
 
 pub(crate) enum Msg {
     SessionsChanged,
@@ -389,7 +441,7 @@ fn read_snapshot(session: &Session, status: RawStatus) -> windows::core::Result<
     let timeline = session.GetTimelineProperties()?;
     Ok(SessionSnapshot {
         title,
-        status,
+        state: status.state(),
         start: span(timeline.StartTime()?),
         end: span(timeline.EndTime()?),
         position: span(timeline.Position()?),
@@ -410,4 +462,30 @@ fn instant(value: impl TryInto<SystemTime>) -> Option<SystemTime> {
         .try_into()
         .ok()
         .filter(|time| *time > SystemTime::UNIX_EPOCH)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn raw_status_round_trips_winrt_values() {
+        for (value, status) in RawStatus::ALL.into_iter().enumerate() {
+            assert_eq!(RawStatus::from_winrt(value as i32), Some(status));
+        }
+        assert_eq!(RawStatus::from_winrt(6), None);
+        assert_eq!(RawStatus::from_winrt(-1), None);
+        assert_eq!(RawStatus::Closed.label(), "Closed");
+        assert_eq!(RawStatus::Paused.label(), "Paused");
+    }
+
+    #[test]
+    fn closed_and_stopped_settle_as_stopped_while_opened_and_changing_do_not() {
+        assert_eq!(RawStatus::Closed.state(), SessionState::Stopped);
+        assert_eq!(RawStatus::Stopped.state(), SessionState::Stopped);
+        assert_eq!(RawStatus::Playing.state(), SessionState::Playing);
+        assert_eq!(RawStatus::Paused.state(), SessionState::Paused);
+        assert_eq!(RawStatus::Opened.state(), SessionState::Settling);
+        assert_eq!(RawStatus::Changing.state(), SessionState::Settling);
+    }
 }

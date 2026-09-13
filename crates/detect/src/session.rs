@@ -1,6 +1,6 @@
-//! The pure half of the SMTC strategy: raw session facts in, at most one
-//! normalized [`PlaybackEvent`] out. Nothing here touches WinRT, so it is
-//! tested on every platform.
+//! The pure half of every strategy: what one refresh saw in, at most one
+//! normalized [`PlaybackEvent`] out. Nothing here touches a platform API, so
+//! it is tested on every platform.
 
 use std::time::{Duration, SystemTime};
 
@@ -8,50 +8,24 @@ use ryuuji_core::{PlaybackEvent, PlaybackSource, PlaybackStatus};
 
 use crate::players::Player;
 
-/// `GlobalSystemMediaTransportControlsSessionPlaybackStatus` as it comes off
-/// the wire, in declaration order.
+/// What a session holds, in the terms every strategy can express. The
+/// platform's own vocabulary stops at the strategy: SMTC's six values and
+/// MPRIS's three strings both arrive here as these four.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum RawStatus {
-    Closed,
-    Opened,
-    Changing,
-    Stopped,
+pub(crate) enum SessionState {
     Playing,
     Paused,
-}
-
-impl RawStatus {
-    const ALL: [RawStatus; 6] = [
-        RawStatus::Closed,
-        RawStatus::Opened,
-        RawStatus::Changing,
-        RawStatus::Stopped,
-        RawStatus::Playing,
-        RawStatus::Paused,
-    ];
-
-    pub(crate) fn from_winrt(value: i32) -> Option<RawStatus> {
-        usize::try_from(value)
-            .ok()
-            .and_then(|index| RawStatus::ALL.get(index).copied())
-    }
-
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            RawStatus::Closed => "Closed",
-            RawStatus::Opened => "Opened",
-            RawStatus::Changing => "Changing",
-            RawStatus::Stopped => "Stopped",
-            RawStatus::Playing => "Playing",
-            RawStatus::Paused => "Paused",
-        }
-    }
+    Stopped,
+    /// The session exists but has said nothing yet: SMTC's Opened and
+    /// Changing, an MPRIS name that owns the bus before its properties
+    /// arrive. Never an observation.
+    Settling,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SessionSnapshot {
     pub title: String,
-    pub status: RawStatus,
+    pub state: SessionState,
     pub start: Duration,
     pub end: Duration,
     pub position: Duration,
@@ -68,7 +42,7 @@ pub(crate) struct Matched<'a> {
 pub(crate) fn choose<'a, 'b>(matched: &'b [Matched<'a>]) -> Option<&'b Matched<'a>> {
     matched
         .iter()
-        .find(|m| m.snapshot.status == RawStatus::Playing)
+        .find(|m| m.snapshot.state == SessionState::Playing)
         .or_else(|| matched.first())
 }
 
@@ -109,19 +83,19 @@ impl Front {
     }
 }
 
-/// Closed and Stopped are Stopped; Opened and Changing are not an
-/// observation yet. Times are relative to the timeline start.
+/// A settling session is not an observation yet. Times are relative to the
+/// timeline start.
 pub(crate) fn normalize(
     matched: &Matched<'_>,
     now: SystemTime,
     front: &Front,
 ) -> Option<PlaybackEvent> {
     let snapshot = &matched.snapshot;
-    let status = match snapshot.status {
-        RawStatus::Closed | RawStatus::Stopped => PlaybackStatus::Stopped,
-        RawStatus::Playing => PlaybackStatus::Playing,
-        RawStatus::Paused => PlaybackStatus::Paused,
-        RawStatus::Opened | RawStatus::Changing => return None,
+    let status = match snapshot.state {
+        SessionState::Stopped => PlaybackStatus::Stopped,
+        SessionState::Playing => PlaybackStatus::Playing,
+        SessionState::Paused => PlaybackStatus::Paused,
+        SessionState::Settling => return None,
     };
     Some(PlaybackEvent {
         player: matched.player.name.clone(),
@@ -142,7 +116,7 @@ pub(crate) fn normalize(
 /// rate is not read, because accrual already caps credit at wall time.
 /// Players that rewrite the timeline every second gain under a second.
 fn advanced_position(snapshot: &SessionSnapshot, now: SystemTime) -> Duration {
-    if snapshot.status != RawStatus::Playing {
+    if snapshot.state != SessionState::Playing {
         return snapshot.position;
     }
     let Some(updated) = snapshot.updated else {
@@ -255,10 +229,10 @@ mod tests {
         Front::Exe(name.to_owned())
     }
 
-    fn snapshot(status: RawStatus) -> SessionSnapshot {
+    fn snapshot(state: SessionState) -> SessionSnapshot {
         SessionSnapshot {
             title: "Episode 3".to_owned(),
-            status,
+            state,
             start: Duration::ZERO,
             end: Duration::from_secs(1440),
             position: Duration::from_secs(90),
@@ -270,7 +244,7 @@ mod tests {
     fn written_ago(secs: u64) -> SessionSnapshot {
         SessionSnapshot {
             updated: Some(now() - Duration::from_secs(secs)),
-            ..snapshot(RawStatus::Playing)
+            ..snapshot(SessionState::Playing)
         }
     }
 
@@ -303,27 +277,16 @@ mod tests {
     }
 
     #[test]
-    fn raw_status_round_trips_winrt_values() {
-        for (value, status) in RawStatus::ALL.into_iter().enumerate() {
-            assert_eq!(RawStatus::from_winrt(value as i32), Some(status));
-        }
-        assert_eq!(RawStatus::from_winrt(6), None);
-        assert_eq!(RawStatus::from_winrt(-1), None);
-        assert_eq!(RawStatus::Closed.label(), "Closed");
-        assert_eq!(RawStatus::Paused.label(), "Paused");
-    }
-
-    #[test]
     fn choose_prefers_the_playing_session() {
         let (mpv, vlc) = (player("mpv"), player("VLC"));
         let matched = [
             Matched {
                 player: &mpv,
-                snapshot: snapshot(RawStatus::Paused),
+                snapshot: snapshot(SessionState::Paused),
             },
             Matched {
                 player: &vlc,
-                snapshot: snapshot(RawStatus::Playing),
+                snapshot: snapshot(SessionState::Playing),
             },
         ];
         assert_eq!(choose(&matched).unwrap().player.name, "VLC");
@@ -335,11 +298,11 @@ mod tests {
         let matched = [
             Matched {
                 player: &mpv,
-                snapshot: snapshot(RawStatus::Paused),
+                snapshot: snapshot(SessionState::Paused),
             },
             Matched {
                 player: &vlc,
-                snapshot: snapshot(RawStatus::Stopped),
+                snapshot: snapshot(SessionState::Stopped),
             },
         ];
         assert_eq!(choose(&matched).unwrap().player.name, "mpv");
@@ -347,30 +310,16 @@ mod tests {
     }
 
     #[test]
-    fn normalize_maps_closed_and_stopped_to_stopped() {
+    fn normalize_maps_each_settled_state() {
         let mpv = player("mpv");
-        for status in [RawStatus::Closed, RawStatus::Stopped] {
-            let matched = Matched {
-                player: &mpv,
-                snapshot: snapshot(status),
-            };
-            assert_eq!(
-                normalize(&matched, now(), &Front::Unknown),
-                Some(event(PlaybackStatus::Stopped, 90))
-            );
-        }
-    }
-
-    #[test]
-    fn normalize_maps_playing_and_paused() {
-        let mpv = player("mpv");
-        for (raw, status) in [
-            (RawStatus::Playing, PlaybackStatus::Playing),
-            (RawStatus::Paused, PlaybackStatus::Paused),
+        for (state, status) in [
+            (SessionState::Stopped, PlaybackStatus::Stopped),
+            (SessionState::Playing, PlaybackStatus::Playing),
+            (SessionState::Paused, PlaybackStatus::Paused),
         ] {
             let matched = Matched {
                 player: &mpv,
-                snapshot: snapshot(raw),
+                snapshot: snapshot(state),
             };
             assert_eq!(
                 normalize(&matched, now(), &Front::Unknown),
@@ -380,21 +329,19 @@ mod tests {
     }
 
     #[test]
-    fn normalize_skips_opened_and_changing() {
+    fn normalize_skips_a_settling_session() {
         let mpv = player("mpv");
-        for status in [RawStatus::Opened, RawStatus::Changing] {
-            let matched = Matched {
-                player: &mpv,
-                snapshot: snapshot(status),
-            };
-            assert_eq!(normalize(&matched, now(), &Front::Unknown), None);
-        }
+        let matched = Matched {
+            player: &mpv,
+            snapshot: snapshot(SessionState::Settling),
+        };
+        assert_eq!(normalize(&matched, now(), &Front::Unknown), None);
     }
 
     #[test]
     fn normalize_subtracts_start_time_and_saturates() {
         let mpv = player("mpv");
-        let mut shifted = snapshot(RawStatus::Playing);
+        let mut shifted = snapshot(SessionState::Playing);
         shifted.start = Duration::from_secs(100);
         shifted.end = Duration::from_secs(400);
         shifted.position = Duration::from_secs(130);
@@ -443,7 +390,7 @@ mod tests {
     #[test]
     fn a_paused_or_never_written_timeline_does_not_move() {
         let paused = SessionSnapshot {
-            status: RawStatus::Paused,
+            state: SessionState::Paused,
             ..written_ago(30)
         };
         let never_written = SessionSnapshot {
@@ -459,7 +406,7 @@ mod tests {
     fn a_timeline_written_after_now_does_not_move_the_position_back() {
         let from_the_future = SessionSnapshot {
             updated: Some(now() + Duration::from_secs(30)),
-            ..snapshot(RawStatus::Playing)
+            ..snapshot(SessionState::Playing)
         };
         assert_eq!(position_of(from_the_future), Duration::from_secs(90));
     }
@@ -506,7 +453,7 @@ mod tests {
         let mpv = player("mpv");
         let matched = Matched {
             player: &mpv,
-            snapshot: snapshot(RawStatus::Playing),
+            snapshot: snapshot(SessionState::Playing),
         };
         for (front, foreground) in [
             (exe("mpv.exe"), Some(true)),
@@ -525,11 +472,11 @@ mod tests {
         let matched = [
             Matched {
                 player: &mpv,
-                snapshot: snapshot(RawStatus::Playing),
+                snapshot: snapshot(SessionState::Playing),
             },
             Matched {
                 player: &mpv,
-                snapshot: snapshot(RawStatus::Paused),
+                snapshot: snapshot(SessionState::Paused),
             },
         ];
         for m in &matched {
@@ -547,7 +494,7 @@ mod tests {
         let mpv = player("mpv");
         let matched = [Matched {
             player: &mpv,
-            snapshot: snapshot(RawStatus::Playing),
+            snapshot: snapshot(SessionState::Playing),
         }];
         assert!(matches!(
             observe(&matched, 1, now(), &Front::Unknown),
