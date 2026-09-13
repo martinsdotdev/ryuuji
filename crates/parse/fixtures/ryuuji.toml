@@ -797,3 +797,16 @@ video_resolution = "720p"
 release_group = "Nyaa"
 anime_title = "Kimi no Na wa"
 episode_number = "02"
+
+[[case]]
+name = "a scene-style group hangs off the end after a dash"
+input = "Show Title (BDrip 1920x1080 x264 FLAC)-nyaa.mkv"
+
+[case.elements]
+file_extension = "mkv"
+source = "BDrip"
+video_resolution = "1920x1080"
+video_term = "x264"
+audio_term = "FLAC"
+anime_title = "Show Title"
+release_group = "nyaa"
