@@ -1,8 +1,6 @@
 use super::Parser;
 use crate::element::ElementKind;
-use crate::numbering::Extent;
 use crate::string;
-use crate::token;
 
 impl Parser<'_> {
     pub(super) fn search_keywords(&mut self) {
@@ -21,10 +19,7 @@ impl Parser<'_> {
             let upper = word.to_uppercase();
 
             let kind;
-            if let Some(keyword) = self.table.find_searchable(&upper) {
-                if keyword.kind == ElementKind::VolumePrefix {
-                    self.check_extent(index, Extent::Volume);
-                }
+            if self.table.find_searchable(&upper).is_some() {
                 continue;
             } else if !self.elements.contains(ElementKind::FileChecksum)
                 && word.chars().count() == 8
@@ -40,26 +35,6 @@ impl Parser<'_> {
             self.record(kind, word, index);
             self.retire(index, kind);
         }
-    }
-
-    fn check_extent(&mut self, index: usize, extent: Extent) {
-        let Some(next) = self.tape.next(index, token::is_not_delimiter) else {
-            return;
-        };
-        if !self.tape.tokens[next].is_free() {
-            return;
-        }
-        if !self.tape.tokens[next]
-            .text
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_digit())
-        {
-            return;
-        }
-        let value = self.tape.tokens[next].text.clone();
-        self.claim_number(extent, &value, next);
-        self.retire(index, extent.prefix());
     }
 }
 

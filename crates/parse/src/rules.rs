@@ -9,6 +9,7 @@ mod legacy;
 mod preidentified;
 mod season_word;
 mod terms;
+mod volume_prefix;
 
 use crate::engine::{Step, Verdict};
 use crate::numbering::{self, Extent};
@@ -36,5 +37,6 @@ pub(crate) const RULES: &[Step] = &[
     Step::Tape(terms::RULE),
     Step::Tape(season_word::RULE),
     Step::Tape(episode_prefix::RULE),
+    Step::Tape(volume_prefix::RULE),
     legacy::STEP,
 ];
