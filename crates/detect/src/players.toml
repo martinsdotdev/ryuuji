@@ -3,18 +3,26 @@
 # Unpackaged apps get a system-assigned id that contains the exe name.
 # Verify each id from the Diagnostics page's "Media sessions" card.
 #
+# MPRIS ids are matched whole, case-insensitively, against the tail of the
+# player's bus name after org.mpris.MediaPlayer2. with any .instance… suffix
+# cut, or against its DesktopEntry. Whole, because the tail is the app's own
+# short name and a substring rule would let firefox claim firefox-esr-wrapper.
+#
 # Executables are matched case-insensitively against the whole file name
 # of the foreground window's process, so a skin or helper whose name merely
-# contains the player's does not pass as the player.
+# contains the player's does not pass as the player. Only the Windows
+# foreground read consults them today.
 
 [[player]]
 name = "mpv"
 smtc_app_ids = ["mpv.exe"]
+mpris_ids = ["mpv"]
 executables = ["mpv.exe"]
 
 [[player]]
 name = "VLC"
 smtc_app_ids = ["vlc.exe", "videolan.vlc"]
+mpris_ids = ["vlc"]
 executables = ["vlc.exe"]
 
 [[player]]
@@ -33,8 +41,11 @@ executables = ["mpc-hc64.exe", "mpc-hc.exe"]
 # chrome.exe, which would also claim a Google Chrome window; that affects only
 # whether the player reads as in front.
 #
-# Firefox and LibreWolf are absent: their id is a hash of the install location,
-# which differs on every machine and cannot be written here.
+# A Gecko browser's Windows id is a hash of its install directory, which
+# differs on every machine and cannot be written here. Discovery
+# (smtc/gecko.rs) computes it the first time such an id shows up: Firefox's
+# fills the smtc_app_ids this row leaves empty, tied to the row by the
+# executable; LibreWolf and the other forks are appended as rows of their own.
 
 [[player]]
 name = "Brave"
@@ -44,9 +55,15 @@ executables = ["brave.exe"]
 [[player]]
 name = "Chromium"
 smtc_app_ids = ["chromium"]
+mpris_ids = ["chromium"]
 executables = ["chrome.exe"]
 
 [[player]]
 name = "Edge"
 smtc_app_ids = ["msedge"]
 executables = ["msedge.exe"]
+
+[[player]]
+name = "Firefox"
+mpris_ids = ["firefox"]
+executables = ["firefox.exe"]

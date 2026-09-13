@@ -349,6 +349,7 @@ mod tests {
         Player {
             name: name.to_owned(),
             smtc_app_ids: Vec::new(),
+            mpris_ids: Vec::new(),
             executables: Vec::new(),
         }
     }
