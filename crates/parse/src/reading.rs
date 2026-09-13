@@ -4,6 +4,7 @@ use std::ops::RangeInclusive;
 
 use crate::element::{ElementKind, Elements, Fact, Span};
 use crate::engine::RuleName;
+use crate::options::Options;
 use crate::string::leading_number;
 
 /// The evidence behind a value, weakest first, so the minimum over a
@@ -107,15 +108,23 @@ pub struct Reading {
     /// An episode was read off a prefix, so a second episode number may be
     /// the same episode under another scheme.
     provisional_episode: bool,
+    /// The options this reading was made under; a rule that reads more
+    /// than one kind gates each on them.
+    options: Options,
 }
 
 impl Reading {
-    pub(crate) fn new(elements: Elements, alternatives: Vec<Alternative>) -> Reading {
+    pub(crate) fn new(elements: Elements, options: &Options) -> Reading {
         Reading {
             elements,
-            alternatives,
+            alternatives: Vec::new(),
             provisional_episode: false,
+            options: options.clone(),
         }
+    }
+
+    pub(crate) fn options(&self) -> &Options {
+        &self.options
     }
 
     pub fn elements(&self) -> &Elements {
@@ -222,7 +231,7 @@ mod tests {
         for (kind, value) in items {
             elements.push(fact(*kind, value));
         }
-        Reading::new(elements, Vec::new())
+        Reading::new(elements, &Options::default())
     }
 
     #[test]
@@ -301,7 +310,7 @@ mod tests {
             certainty: Certainty::Guessed,
             ..fact(ElementKind::EpisodeNumber, "5")
         });
-        let reading = Reading::new(elements, Vec::new());
+        let reading = Reading::new(elements, &Options::default());
         assert_eq!(
             reading.title().map(|t| t.certainty),
             Some(Certainty::Shaped)

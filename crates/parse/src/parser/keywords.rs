@@ -11,7 +11,7 @@ impl Parser<'_> {
                 continue;
             }
 
-            let mut word = string::trim_dashes_and_spaces(&self.tape.tokens[index].text).to_owned();
+            let word = string::trim_dashes_and_spaces(&self.tape.tokens[index].text).to_owned();
             if word.is_empty() {
                 continue;
             }
@@ -20,55 +20,32 @@ impl Parser<'_> {
             }
             let upper = word.to_uppercase();
 
-            let mut kind = None;
-            let mut identifiable = true;
+            let kind;
             if let Some(keyword) = self.table.find_searchable(&upper) {
-                if keyword.kind == ElementKind::ReleaseGroup && !self.options.parse_release_group {
-                    continue;
-                }
-                if keyword.kind.is_singular() && self.elements.contains(keyword.kind) {
-                    continue;
-                }
                 match keyword.kind {
-                    ElementKind::AnimeSeasonPrefix => {
-                        self.check_anime_season(index);
-                        continue;
-                    }
+                    ElementKind::AnimeSeasonPrefix => self.check_anime_season(index),
                     ElementKind::EpisodePrefix => {
                         if keyword.valid {
                             self.check_extent(index, Extent::Episode);
                         }
-                        continue;
                     }
-                    ElementKind::VolumePrefix => {
-                        self.check_extent(index, Extent::Volume);
-                        continue;
-                    }
-                    ElementKind::ReleaseVersion => {
-                        word.remove(0);
-                    }
+                    ElementKind::VolumePrefix => self.check_extent(index, Extent::Volume),
                     _ => {}
                 }
-                kind = Some(keyword.kind);
-                identifiable = keyword.identifiable;
+                continue;
             } else if !self.elements.contains(ElementKind::FileChecksum)
                 && word.chars().count() == 8
                 && string::is_hex(&word)
             {
-                kind = Some(ElementKind::FileChecksum);
+                kind = ElementKind::FileChecksum;
             } else if !self.elements.contains(ElementKind::VideoResolution) && is_resolution(&word)
             {
-                kind = Some(ElementKind::VideoResolution);
+                kind = ElementKind::VideoResolution;
+            } else {
+                continue;
             }
-
-            if let Some(kind) = kind {
-                self.record(kind, word, index);
-                if identifiable {
-                    self.retire(index, kind);
-                } else {
-                    self.hold(index, kind);
-                }
-            }
+            self.record(kind, word, index);
+            self.retire(index, kind);
         }
     }
 
