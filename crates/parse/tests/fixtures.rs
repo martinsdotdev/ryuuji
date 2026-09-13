@@ -159,7 +159,7 @@ fn differences(
     lines.join("\n")
 }
 
-const ANITOMY_BASELINE: usize = 143;
+const ANITOMY_BASELINE: usize = 144;
 
 /// Every failing case, not a sample: `cargo test -p ryuuji-parse -- --ignored
 /// anitomy_report --nocapture`.
