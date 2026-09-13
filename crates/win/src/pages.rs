@@ -323,6 +323,7 @@ fn progress_text(progress: &WatchProgress, episode: Option<&RangeInclusive<u32>>
 /// rather than carried on the proposal, so a reloaded one reads the same.
 fn fact_rows(m: &ProposedMatch) -> Vec<(String, String)> {
     parse(&m.raw_title, &Options::default())
+        .elements()
         .iter()
         .map(|(kind, value)| (fact_label(kind.label()), value.to_owned()))
         .collect()

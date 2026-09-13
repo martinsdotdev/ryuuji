@@ -1,8 +1,5 @@
-use std::ops::RangeInclusive;
-
 use crate::engine::RuleName;
 use crate::reading::Certainty;
-use crate::string::leading_number;
 
 /// A byte range into the string the caller passed to [`crate::parse`]. The
 /// parser never rewrites that string, so a span always slices it, and a shell
@@ -218,28 +215,6 @@ impl Elements {
             fact.kind = to;
         }
     }
-
-    pub fn episode_number(&self) -> Option<u32> {
-        leading_number(self.get(ElementKind::EpisodeNumber)?)
-    }
-
-    /// Every episode number the name carries, as the span from lowest to
-    /// highest. A batch like `01-02` parses to two values in table order,
-    /// so the ends are the min and max rather than the first and last. A
-    /// single episode is a range of one.
-    pub fn episode_range(&self) -> Option<RangeInclusive<u32>> {
-        let mut numbers = self
-            .get_all(ElementKind::EpisodeNumber)
-            .into_iter()
-            .filter_map(leading_number);
-        let first = numbers.next()?;
-        let (low, high) = numbers.fold((first, first), |(low, high), n| (low.min(n), high.max(n)));
-        Some(low..=high)
-    }
-
-    pub fn season_number(&self) -> Option<u32> {
-        leading_number(self.get(ElementKind::AnimeSeason)?)
-    }
 }
 
 #[cfg(test)]
@@ -271,83 +246,6 @@ mod tests {
             assert_eq!(ElementKind::from_label(kind.label()), Some(kind));
         }
         assert_eq!(ElementKind::from_label("no_such_kind"), None);
-    }
-
-    #[test]
-    fn episode_number_reads_the_leading_digit_run() {
-        let cases = [
-            ("01v2", Some(1)),
-            ("4a", Some(4)),
-            ("7.5", Some(7)),
-            ("v2", None),
-        ];
-        for (value, expected) in cases {
-            let elements = elements(&[(ElementKind::EpisodeNumber, value)]);
-            assert_eq!(elements.episode_number(), expected, "value {value:?}");
-        }
-        assert_eq!(Elements::default().episode_number(), None);
-    }
-
-    #[test]
-    fn episode_range_of_a_single_value_is_one_wide() {
-        let elements = elements(&[(ElementKind::EpisodeNumber, "03")]);
-        assert_eq!(elements.episode_range(), Some(3..=3));
-    }
-
-    #[test]
-    fn episode_range_spans_an_ascending_batch() {
-        let elements = elements(&[
-            (ElementKind::EpisodeNumber, "01"),
-            (ElementKind::EpisodeNumber, "02"),
-        ]);
-        assert_eq!(elements.episode_range(), Some(1..=2));
-    }
-
-    #[test]
-    fn episode_range_orders_the_ends_regardless_of_table_order() {
-        let elements = elements(&[
-            (ElementKind::EpisodeNumber, "12"),
-            (ElementKind::EpisodeNumber, "01"),
-        ]);
-        assert_eq!(elements.episode_range(), Some(1..=12));
-    }
-
-    #[test]
-    fn episode_range_is_none_without_an_episode_number() {
-        assert_eq!(Elements::default().episode_range(), None);
-        let elements = elements(&[(ElementKind::EpisodeNumberAlt, "08")]);
-        assert_eq!(elements.episode_range(), None);
-    }
-
-    #[test]
-    fn episode_range_skips_values_without_a_leading_number() {
-        let elements = elements(&[
-            (ElementKind::EpisodeNumber, "abc"),
-            (ElementKind::EpisodeNumber, "4a"),
-        ]);
-        assert_eq!(elements.episode_range(), Some(4..=4));
-        let only_garbage = self::elements(&[(ElementKind::EpisodeNumber, "v2")]);
-        assert_eq!(only_garbage.episode_range(), None);
-    }
-
-    // `Ep. 08 - 05v2` is one episode under two numbering schemes, not a
-    // batch, so the alternate number must not widen the range.
-    #[test]
-    fn episode_range_ignores_the_alternate_number() {
-        let elements = elements(&[
-            (ElementKind::EpisodeNumber, "05v2"),
-            (ElementKind::EpisodeNumberAlt, "08"),
-        ]);
-        assert_eq!(elements.episode_range(), Some(5..=5));
-    }
-
-    #[test]
-    fn season_number_reads_the_first_anime_season() {
-        let elements = elements(&[
-            (ElementKind::AnimeSeason, "2"),
-            (ElementKind::AnimeSeason, "3"),
-        ]);
-        assert_eq!(elements.season_number(), Some(2));
     }
 
     #[test]
