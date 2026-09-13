@@ -29,15 +29,17 @@ pub enum RuleName {
     Prelude,
     Preidentified,
     Terms,
+    SeasonWord,
     /// The passes not yet lifted into rules of their own.
     Legacy,
 }
 
 impl RuleName {
-    pub const ALL: [RuleName; 4] = [
+    pub const ALL: [RuleName; 5] = [
         RuleName::Prelude,
         RuleName::Preidentified,
         RuleName::Terms,
+        RuleName::SeasonWord,
         RuleName::Legacy,
     ];
 
@@ -46,6 +48,7 @@ impl RuleName {
             RuleName::Prelude => "prelude",
             RuleName::Preidentified => "preidentified",
             RuleName::Terms => "terms",
+            RuleName::SeasonWord => "season_word",
             RuleName::Legacy => "legacy",
         }
     }
