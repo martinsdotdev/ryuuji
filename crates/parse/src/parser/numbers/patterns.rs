@@ -167,13 +167,24 @@ impl Parser<'_> {
         false
     }
 
+    /// `07.5` is an episode; `1.11` and `8.0` are parts of titles and `5.1`
+    /// is an audio term, so any other fraction needs a leading zero
+    /// (`04.1`) before it counts, since no title or term writes one.
     fn match_fractional_episode(&mut self, chars: &[char], word: &str, index: usize) -> bool {
         let mut scanner = Scanner::new(chars);
-        if scanner.digits(usize::MAX).is_none()
-            || !scanner.eat('.')
-            || !scanner.eat('5')
-            || !scanner.done()
-        {
+        let Some(whole) = scanner.digits(usize::MAX) else {
+            return false;
+        };
+        if !scanner.eat('.') {
+            return false;
+        }
+        let leading_zero = whole.len() > 1 && whole.starts_with('0');
+        let fraction_ok = if leading_zero {
+            scanner.digits(1).is_some()
+        } else {
+            scanner.eat('5')
+        };
+        if !fraction_ok || !scanner.done() {
             return false;
         }
         self.set_number(Extent::Episode, word, index, true)
