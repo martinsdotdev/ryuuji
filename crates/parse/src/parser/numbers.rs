@@ -1,59 +1,10 @@
 use super::Parser;
 use crate::element::ElementKind;
+use crate::numbering::{
+    self, ANIME_YEAR_MAX, ANIME_YEAR_MIN, EPISODE_NUMBER_MAX, Extent, leading_value,
+};
 use crate::string;
 use crate::token;
-
-const ANIME_YEAR_MIN: u32 = 1900;
-const ANIME_YEAR_MAX: u32 = 2050;
-const EPISODE_NUMBER_MAX: u32 = ANIME_YEAR_MIN - 1;
-const VOLUME_NUMBER_MAX: u32 = 20;
-
-/// A number counted off against a prefix. Episodes and volumes differ only in
-/// their bounds and in whether a second number retags the first.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(in crate::parser) enum Extent {
-    Episode,
-    Volume,
-}
-
-impl Extent {
-    pub(super) fn prefix(self) -> ElementKind {
-        match self {
-            Extent::Episode => ElementKind::EpisodePrefix,
-            Extent::Volume => ElementKind::VolumePrefix,
-        }
-    }
-
-    fn number(self) -> ElementKind {
-        match self {
-            Extent::Episode => ElementKind::EpisodeNumber,
-            Extent::Volume => ElementKind::VolumeNumber,
-        }
-    }
-
-    fn max_digits(self) -> usize {
-        match self {
-            Extent::Episode => 4,
-            Extent::Volume => 2,
-        }
-    }
-
-    fn max_value(self) -> u32 {
-        match self {
-            Extent::Episode => EPISODE_NUMBER_MAX,
-            Extent::Volume => VOLUME_NUMBER_MAX,
-        }
-    }
-}
-
-mod patterns;
-mod scanner;
-
-/// A digit run that overflows `u32` compares as larger than every bound, so
-/// the validation checks reject it.
-pub(super) fn leading_value(text: &str) -> u32 {
-    string::leading_number(text).unwrap_or(u32::MAX)
-}
 
 impl Parser<'_> {
     pub(in crate::parser) fn search_isolated_numbers(&mut self) {
@@ -350,7 +301,43 @@ impl Parser<'_> {
         true
     }
 
-    /// Reads the number through the pattern matchers, falling back to taking
+    /// Reads the word through the number shapes and records what it spells.
+    /// A type glued to its number (`OVA1`) cuts the token in two so the type
+    /// can stay a title word.
+    pub(in crate::parser) fn match_patterns(
+        &mut self,
+        extent: Extent,
+        word: &str,
+        index: usize,
+    ) -> bool {
+        let Some(numbering) = numbering::read(word, extent) else {
+            return false;
+        };
+        let mut index = index;
+        for piece in numbering.pieces {
+            match piece.kind {
+                ElementKind::AnimeType => {
+                    let split =
+                        self.tape.tokens[index].text.find(word).unwrap_or(0) + piece.part.at.end;
+                    self.tape.split(index, split);
+                    self.record(ElementKind::AnimeType, piece.part.text, index);
+                    if piece.held {
+                        self.hold(index, ElementKind::AnimeType);
+                    } else {
+                        self.retire(index, ElementKind::AnimeType);
+                    }
+                    index += 1;
+                }
+                ElementKind::EpisodeNumber | ElementKind::VolumeNumber => {
+                    self.set_number(extent, &piece.part.text, index, false);
+                }
+                kind => self.record(kind, piece.part.text, index),
+            }
+        }
+        true
+    }
+
+    /// Reads the number through the number shapes, falling back to taking
     /// it whole.
     pub(in crate::parser) fn claim_number(
         &mut self,
