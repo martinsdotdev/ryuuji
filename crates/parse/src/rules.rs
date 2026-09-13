@@ -8,6 +8,7 @@ mod checksum;
 mod episode_prefix;
 mod legacy;
 mod preidentified;
+mod resolution;
 mod season_word;
 mod terms;
 mod volume_prefix;
@@ -40,5 +41,6 @@ pub(crate) const RULES: &[Step] = &[
     Step::Tape(episode_prefix::RULE),
     Step::Tape(volume_prefix::RULE),
     Step::Tape(checksum::RULE),
+    Step::Tape(resolution::RULE),
     legacy::STEP,
 ];

@@ -1,6 +1,5 @@
 mod episode_title;
 mod group;
-mod keywords;
 mod numbers;
 mod title;
 mod validate;
@@ -60,7 +59,6 @@ impl<'a> Parser<'a> {
                     })
                     .map(|(index, _)| index)
             });
-        self.search_keywords();
         self.search_isolated_numbers();
         if self.options.parse_episode_number {
             self.search_episode_number();
