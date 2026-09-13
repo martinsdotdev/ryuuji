@@ -5,17 +5,7 @@ use crate::string;
 use crate::token;
 
 impl Parser<'_> {
-    /// Pre-identified terms go in first, ahead of everything the keyword
-    /// pass finds, because the tokenizer recognised them before any pass ran
-    /// and the order of repeated kinds is part of what the fixtures pin.
     pub(super) fn search_keywords(&mut self) {
-        for index in 0..self.tape.len() {
-            if let Some(kind) = self.tape.tokens[index].term {
-                let value = self.tape.tokens[index].text.clone();
-                self.record(kind, value, index);
-                self.retire(index, kind);
-            }
-        }
         for index in 0..self.tape.len() {
             if !self.tape.tokens[index].is_free() {
                 continue;
