@@ -674,3 +674,26 @@ audio_term = "FLAC"
 release_group = "Nyaa"
 anime_title = "Show"
 episode_number = "01"
+
+[[case]]
+name = "a language code that is a word of the title is not an element"
+input = "[Nyaa] Bokura ga Ita - 07 [720p].mkv"
+
+[case.elements]
+file_extension = "mkv"
+video_resolution = "720p"
+release_group = "Nyaa"
+anime_title = "Bokura ga Ita"
+episode_number = "07"
+
+[[case]]
+name = "an episode title that is only a release keyword is not a title"
+input = "[Nyaa] Show - 12 END [720p].mkv"
+
+[case.elements]
+file_extension = "mkv"
+video_resolution = "720p"
+release_group = "Nyaa"
+anime_title = "Show"
+episode_number = "12"
+release_information = "END"

@@ -2,29 +2,73 @@ use super::Parser;
 use crate::element::ElementKind;
 
 impl Parser<'_> {
+    /// An unidentifiable keyword (`Ita`, `END`, `Opus`, ...) leaves its
+    /// token in place so a title can keep it, and that is also how it tells
+    /// the two apart: a keyword that turned out to be a word of the anime
+    /// title was never an element, and an episode title that is nothing but
+    /// such a keyword was never a title.
+    ///
+    /// Anime types are exempt from the anime-title check: the corpus keeps
+    /// `Movie` wherever it sits (`The New Movie Q`, `Movie Part 1`) yet
+    /// drops `Special` when a word follows it (`Special A`), and nothing but
+    /// the word itself separates the two. They keep only anitomy's
+    /// episode-title check.
     pub(super) fn validate_elements(&mut self) {
-        let Some(episode_title) = self.elements.get(ElementKind::EpisodeTitle) else {
-            return;
-        };
-        let title_lower = episode_title.to_lowercase();
-        let anime_types: Vec<String> = self
+        let anime_title = self
             .elements
-            .get_all(ElementKind::AnimeType)
-            .into_iter()
-            .map(str::to_owned)
+            .get(ElementKind::AnimeTitle)
+            .map(str::to_owned);
+        let episode_title = self
+            .elements
+            .get(ElementKind::EpisodeTitle)
+            .map(str::to_owned);
+        let unidentifiable: Vec<(ElementKind, String)> = self
+            .elements
+            .iter()
+            .filter(|(kind, value)| {
+                self.table
+                    .find(*kind, &value.to_uppercase())
+                    .is_some_and(|keyword| !keyword.identifiable)
+            })
+            .map(|(kind, value)| (kind, value.to_owned()))
             .collect();
-        for value in anime_types {
-            let value_lower = value.to_lowercase();
-            if title_lower == value_lower {
-                self.elements.remove(ElementKind::EpisodeTitle);
-            } else if title_lower.contains(&value_lower)
-                && self
-                    .table
-                    .find(ElementKind::AnimeType, &value.to_uppercase())
-                    .is_some()
+        for (kind, value) in unidentifiable {
+            if kind != ElementKind::AnimeType
+                && anime_title
+                    .as_deref()
+                    .is_some_and(|title| has_word(title, &value))
             {
-                self.elements.remove_value(ElementKind::AnimeType, &value);
+                self.elements.remove_value(kind, &value);
+                continue;
+            }
+            let Some(title) = episode_title.as_deref() else {
+                continue;
+            };
+            if title.eq_ignore_ascii_case(&value) {
+                self.elements.remove(ElementKind::EpisodeTitle);
+            } else if has_word(title, &value) {
+                self.elements.remove_value(kind, &value);
             }
         }
+    }
+}
+
+/// Whether `word` appears whole in `text`, case-insensitively, between
+/// non-alphanumeric characters or the ends.
+fn has_word(text: &str, word: &str) -> bool {
+    text.split(|c: char| !c.is_alphanumeric())
+        .any(|candidate| candidate.eq_ignore_ascii_case(word))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_word_matches_whole_and_case_insensitively() {
+        assert!(has_word("Bokura Ga Ita", "ITA"));
+        assert!(has_word("The End of Evangelion", "end"));
+        assert!(!has_word("Weekend", "END"));
+        assert!(!has_word("Specials", "Special"));
     }
 }
