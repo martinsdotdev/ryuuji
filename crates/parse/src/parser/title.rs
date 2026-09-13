@@ -1,22 +1,32 @@
 use super::Parser;
 use crate::element::ElementKind;
+use crate::string;
 use crate::token::{self, TokenCategory};
 
 impl Parser<'_> {
     pub(super) fn search_anime_title(&mut self) {
-        // An entirely-enclosed title (no unknown token outside brackets) is a
-        // deferred case; such filenames end up with no anime title.
-        let Some(begin) = self
+        let unenclosed = self
             .tokens
             .iter()
-            .position(|token| !token.enclosed && token.category == TokenCategory::Unknown)
-        else {
-            return;
+            .position(|token| !token.enclosed && token.category == TokenCategory::Unknown);
+        let (begin, enclosed) = match unenclosed {
+            Some(begin) => (begin, false),
+            None => match self.enclosed_title_begin() {
+                Some(begin) => (begin, true),
+                None => return,
+            },
         };
         let len = self.tokens.len();
         let mut end = (begin..len)
-            .find(|&index| self.tokens[index].category == TokenCategory::Identifier)
+            .find(|&index| {
+                self.tokens[index].category == TokenCategory::Identifier
+                    || (enclosed && self.tokens[index].category == TokenCategory::Bracket)
+            })
             .unwrap_or(len);
+        if enclosed {
+            self.build_and_insert(ElementKind::AnimeTitle, begin, end, false);
+            return;
+        }
 
         let mut last_bracket = end;
         let mut bracket_open = false;
@@ -47,5 +57,28 @@ impl Parser<'_> {
         }
 
         self.build_and_insert(ElementKind::AnimeTitle, begin, end, false);
+    }
+
+    /// Where a title that lives inside brackets starts: the first unknown
+    /// token of the second bracket group, on the assumption that the first
+    /// group is the release group. A group that opens with a mostly non-Latin
+    /// token is skipped as well, so a CJK group name followed by a CJK title
+    /// still leads to the Latin title behind them.
+    fn enclosed_title_begin(&self) -> Option<usize> {
+        let len = self.tokens.len();
+        let unknown_from = |from: usize| {
+            (from..len).find(|&index| self.tokens[index].category == TokenCategory::Unknown)
+        };
+        let mut begin = unknown_from(0)?;
+        let mut skipped_a_group = false;
+        loop {
+            if skipped_a_group && string::is_mostly_latin(&self.tokens[begin].content) {
+                return Some(begin);
+            }
+            let bracket = (begin..len)
+                .find(|&index| self.tokens[index].category == TokenCategory::Bracket)?;
+            begin = unknown_from(bracket)?;
+            skipped_a_group = true;
+        }
     }
 }

@@ -627,3 +627,26 @@ release_group = "Group"
 anime_title = "Anime"
 episode_number = "01"
 episode_title = "The Movie Begins"
+
+[[case]]
+name = "title inside the second bracket group"
+input = "[Nyaa-Subs][Kimi no Na wa][01][720p][ABCD1234].mkv"
+
+[case.elements]
+file_extension = "mkv"
+video_resolution = "720p"
+file_checksum = "ABCD1234"
+release_group = "Nyaa-Subs"
+anime_title = "Kimi no Na wa"
+episode_number = "01"
+
+[[case]]
+name = "non-latin groups are skipped on the way to an enclosed title"
+input = "[字幕組][作品名][Made in Abyss][05][1080p].mp4"
+
+[case.elements]
+file_extension = "mp4"
+video_resolution = "1080p"
+release_group = "字幕組"
+anime_title = "Made in Abyss"
+episode_number = "05"
