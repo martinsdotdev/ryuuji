@@ -16,6 +16,9 @@ impl Parser<'_> {
                 None => return,
             },
         };
+        if !enclosed && self.leads_with_episode(begin) {
+            return;
+        }
         let len = self.tokens.len();
         let mut end = (begin..len)
             .find(|&index| {
@@ -57,6 +60,18 @@ impl Parser<'_> {
         }
 
         self.build_and_insert(ElementKind::AnimeTitle, begin, end, false);
+    }
+
+    /// A name that leads with its episode and sets it off with a dash
+    /// (`03 - The Hidden Village`, `Ep. 07 - Snow Falls`) has no anime
+    /// title: what follows the dash is the episode title. Without the dash
+    /// (`Episode 14 Ore no Imouto`) the rest is the anime title as usual.
+    fn leads_with_episode(&self, begin: usize) -> bool {
+        let is_dash = |index: usize| string::is_dash(&self.tokens[index].content);
+        self.episode_token.is_some_and(|episode| episode < begin)
+            && (is_dash(begin)
+                || token::find_prev(&self.tokens, begin, token::is_not_delimiter)
+                    .is_some_and(is_dash))
     }
 
     /// Where a title that lives inside brackets starts: the first unknown
