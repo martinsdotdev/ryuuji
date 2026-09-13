@@ -2,7 +2,7 @@ use crate::element::{ElementKind, Span};
 use crate::keyword::KeywordTable;
 use crate::options::Options;
 use crate::string;
-use crate::token::{self, Token, TokenCategory};
+use crate::token::{Shape, Token};
 
 const BRACKET_PAIRS: [(char, char); 7] = [
     ('(', ')'),
@@ -63,19 +63,19 @@ pub(crate) fn tokenize(input: &str, options: &Options, table: &KeywordTable) -> 
             start = position + 1;
             continue;
         }
-        tokens.push(Token {
-            category: match expected_closer {
-                None => TokenCategory::Open,
-                Some(_) => TokenCategory::Close,
+        tokens.push(Token::new(
+            match expected_closer {
+                None => Shape::Open,
+                Some(_) => Shape::Close,
             },
-            content: chars[position].to_string(),
-            span: Span {
+            chars[position].to_string(),
+            Span {
                 start: bytes[position],
                 end: bytes[position + 1],
             },
-            enclosed: true,
-            kind: None,
-        });
+            true,
+            None,
+        ));
         expected_closer = match expected_closer {
             None => matching_closer(chars[position]),
             Some(_) => None,
@@ -128,16 +128,16 @@ fn tokenize_group(
                 tokens,
             );
         }
-        tokens.push(Token {
-            category: TokenCategory::Identifier,
-            content: chars[start..end].iter().collect(),
-            span: Span {
+        tokens.push(Token::new(
+            Shape::Term,
+            chars[start..end].iter().collect(),
+            Span {
                 start: bytes[start],
                 end: bytes[end],
             },
             enclosed,
-            kind: Some(kind),
-        });
+            Some(kind),
+        ));
         cursor = end;
     }
     if cursor < chars.len() {
@@ -168,75 +168,83 @@ fn split_by_delimiters(
             delimiters.push(c);
         }
     }
-    let push = |tokens: &mut Vec<Token>, category, from: usize, to: usize| {
-        tokens.push(Token {
-            category,
-            content: chars[from..to].iter().collect(),
-            span: Span {
+    let push = |tokens: &mut Vec<Token>, shape, from: usize, to: usize| {
+        tokens.push(Token::new(
+            shape,
+            chars[from..to].iter().collect(),
+            Span {
                 start: bytes[from],
                 end: bytes[to],
             },
             enclosed,
-            kind: None,
-        });
+            None,
+        ));
     };
     let mut start = 0;
     for (index, &c) in chars.iter().enumerate() {
         if delimiters.contains(&c) {
             if index > start {
-                push(tokens, TokenCategory::Unknown, start, index);
+                push(tokens, Shape::Word, start, index);
             }
-            push(tokens, TokenCategory::Delimiter, index, index + 1);
+            push(tokens, Shape::Delimiter, index, index + 1);
             start = index + 1;
         }
     }
     if start < chars.len() {
-        push(tokens, TokenCategory::Unknown, start, chars.len());
+        push(tokens, Shape::Word, start, chars.len());
     }
 }
 
+/// Repairs delimiters that split what reads as one word (`H.265`, `5.1`,
+/// `Ep.`, `01+02`) and promotes a delimiter sitting between two of another
+/// kind (`_&_`) to a word. A merged-away token dies in place and is dropped
+/// at the end, so indices hold throughout.
 fn validate_delimiters(tokens: &mut Vec<Token>) {
-    fn is_unknown(token: &Token) -> bool {
-        token.category == TokenCategory::Unknown
-    }
-    fn is_delimiter(token: &Token) -> bool {
-        token.category == TokenCategory::Delimiter
+    fn is_word(token: &Token) -> bool {
+        token.shape == Shape::Word
     }
     fn is_single_char(token: &Token) -> bool {
-        is_unknown(token) && token.content.chars().count() == 1 && token.content != "-"
+        is_word(token) && token.text.chars().count() == 1 && token.text != "-"
     }
     fn first_char(tokens: &[Token], index: usize) -> char {
-        tokens[index].content.chars().next().unwrap_or(' ')
+        tokens[index].text.chars().next().unwrap_or(' ')
     }
-    /// `to` always sits before `from` with nothing live between them, so
+    fn prev_alive(dead: &[bool], from: usize) -> Option<usize> {
+        (0..from).rev().find(|&index| !dead[index])
+    }
+    fn next_alive(dead: &[bool], from: usize) -> Option<usize> {
+        (from + 1..dead.len()).find(|&index| !dead[index])
+    }
+    /// `to` always sits before `from` with nothing alive between them, so
     /// the merged token is contiguous in the input.
-    fn append_to(tokens: &mut [Token], from: usize, to: usize) {
-        let content = std::mem::take(&mut tokens[from].content);
-        tokens[to].content.push_str(&content);
+    fn append_to(tokens: &mut [Token], dead: &mut [bool], from: usize, to: usize) {
+        let text = std::mem::take(&mut tokens[from].text);
+        tokens[to].text.push_str(&text);
         tokens[to].span.end = tokens[from].span.end;
-        tokens[from].category = TokenCategory::Invalid;
+        dead[from] = true;
     }
 
+    let mut dead = vec![false; tokens.len()];
     for index in 0..tokens.len() {
-        if tokens[index].category != TokenCategory::Delimiter {
+        if dead[index] || !tokens[index].is_delimiter() {
             continue;
         }
         let delimiter = first_char(tokens, index);
-        let prev = token::find_prev(tokens, index, token::is_valid);
-        let mut next = token::find_next(tokens, index, token::is_valid);
+        let prev = prev_alive(&dead, index);
+        let mut next = next_alive(&dead, index);
 
         if delimiter != ' ' && delimiter != '_' {
             if let Some(prev) = prev.filter(|&prev| is_single_char(&tokens[prev])) {
-                append_to(tokens, index, prev);
-                while let Some(unknown) = next.filter(|&next| is_unknown(&tokens[next])) {
-                    append_to(tokens, unknown, prev);
-                    next = token::find_next(tokens, unknown, token::is_valid);
+                append_to(tokens, &mut dead, index, prev);
+                while let Some(word) = next.filter(|&next| is_word(&tokens[next])) {
+                    append_to(tokens, &mut dead, word, prev);
+                    next = next_alive(&dead, word);
                     if let Some(candidate) = next
-                        && is_delimiter(&tokens[candidate])
+                        && tokens[candidate].is_delimiter()
                         && first_char(tokens, candidate) == delimiter
                     {
-                        append_to(tokens, candidate, prev);
-                        next = token::find_next(tokens, candidate, token::is_valid);
+                        append_to(tokens, &mut dead, candidate, prev);
+                        next = next_alive(&dead, candidate);
                     }
                 }
                 continue;
@@ -244,43 +252,51 @@ fn validate_delimiters(tokens: &mut Vec<Token>) {
             if let Some(next) = next.filter(|&next| is_single_char(&tokens[next]))
                 && let Some(prev) = prev
             {
-                append_to(tokens, index, prev);
-                append_to(tokens, next, prev);
+                append_to(tokens, &mut dead, index, prev);
+                append_to(tokens, &mut dead, next, prev);
                 continue;
             }
         }
 
-        if let Some(prev) = prev.filter(|&prev| is_unknown(&tokens[prev]))
-            && let Some(next) = next.filter(|&next| is_delimiter(&tokens[next]))
+        if let Some(prev) = prev.filter(|&prev| is_word(&tokens[prev]))
+            && let Some(next) = next.filter(|&next| tokens[next].is_delimiter())
         {
             let next_delimiter = first_char(tokens, next);
             if delimiter != next_delimiter
                 && delimiter != ','
                 && (next_delimiter == ' ' || next_delimiter == '_')
             {
-                append_to(tokens, index, prev);
+                append_to(tokens, &mut dead, index, prev);
                 continue;
             }
-        } else if let Some(prev) = prev.filter(|&prev| is_delimiter(&tokens[prev]))
-            && let Some(next) = next.filter(|&next| is_delimiter(&tokens[next]))
+        } else if let Some(prev) = prev.filter(|&prev| tokens[prev].is_delimiter())
+            && let Some(next) = next.filter(|&next| tokens[next].is_delimiter())
         {
             let prev_delimiter = first_char(tokens, prev);
             if prev_delimiter == first_char(tokens, next) && prev_delimiter != delimiter {
-                tokens[index].category = TokenCategory::Unknown;
+                tokens[index].shape = Shape::Word;
             }
         }
 
         if (delimiter == '&' || delimiter == '+')
-            && let Some(prev) = prev.filter(|&prev| is_unknown(&tokens[prev]))
-            && let Some(next) = next.filter(|&next| is_unknown(&tokens[next]))
-            && string::is_numeric(&tokens[prev].content)
-            && string::is_numeric(&tokens[next].content)
+            && let Some(prev) = prev.filter(|&prev| is_word(&tokens[prev]))
+            && let Some(next) = next.filter(|&next| is_word(&tokens[next]))
+            && string::is_numeric(&tokens[prev].text)
+            && string::is_numeric(&tokens[next].text)
         {
-            append_to(tokens, index, prev);
-            append_to(tokens, next, prev);
+            append_to(tokens, &mut dead, index, prev);
+            append_to(tokens, &mut dead, next, prev);
         }
     }
-    tokens.retain(|token| token.category != TokenCategory::Invalid);
+    let mut index = 0;
+    tokens.retain(|_| {
+        let keep = !dead[index];
+        index += 1;
+        keep
+    });
+    for token in tokens.iter_mut() {
+        token.numeric = string::is_numeric(&token.text);
+    }
 }
 
 #[cfg(test)]
@@ -291,10 +307,10 @@ mod tests {
         tokenize(input, &Options::default(), KeywordTable::builtin())
     }
 
-    fn summary(tokens: &[Token]) -> Vec<(TokenCategory, &str)> {
+    fn summary(tokens: &[Token]) -> Vec<(Shape, &str)> {
         tokens
             .iter()
-            .map(|token| (token.category, token.content.as_str()))
+            .map(|token| (token.shape, token.text.as_str()))
             .collect()
     }
 
@@ -304,11 +320,11 @@ mod tests {
         assert_eq!(
             summary(&tokens),
             [
-                (TokenCategory::Open, "["),
-                (TokenCategory::Unknown, "Foo"),
-                (TokenCategory::Close, "]"),
-                (TokenCategory::Delimiter, " "),
-                (TokenCategory::Unknown, "Bar"),
+                (Shape::Open, "["),
+                (Shape::Word, "Foo"),
+                (Shape::Close, "]"),
+                (Shape::Delimiter, " "),
+                (Shape::Word, "Bar"),
             ]
         );
         assert_eq!(
@@ -328,14 +344,20 @@ mod tests {
     }
 
     #[test]
-    fn a_merged_token_keeps_one_contiguous_span() {
-        let input = "Foo H.265 Bar";
+    fn a_merged_token_keeps_one_contiguous_span_and_its_number_flag() {
+        let input = "Foo H.265 01+02";
         let tokens = tokens(input);
-        let merged = tokens
-            .iter()
-            .find(|token| token.content == "H.265")
-            .unwrap();
+        let merged = tokens.iter().find(|token| token.text == "H.265").unwrap();
         assert_eq!(merged.span.slice(input), "H.265");
+        assert!(!merged.numeric);
+        let batch = tokens.iter().find(|token| token.text == "01+02").unwrap();
+        assert_eq!(batch.span.slice(input), "01+02");
+        assert!(!batch.numeric);
+        assert!(
+            tokens
+                .iter()
+                .all(|token| token.numeric == string::is_numeric(&token.text))
+        );
     }
 
     #[test]
@@ -343,11 +365,11 @@ mod tests {
         assert_eq!(
             summary(&tokens("[[Foo] Bar")),
             [
-                (TokenCategory::Open, "["),
-                (TokenCategory::Unknown, "Foo"),
-                (TokenCategory::Close, "]"),
-                (TokenCategory::Delimiter, " "),
-                (TokenCategory::Unknown, "Bar"),
+                (Shape::Open, "["),
+                (Shape::Word, "Foo"),
+                (Shape::Close, "]"),
+                (Shape::Delimiter, " "),
+                (Shape::Word, "Bar"),
             ]
         );
     }
@@ -358,15 +380,15 @@ mod tests {
         assert_eq!(
             summary(&tokens),
             [
-                (TokenCategory::Open, "["),
-                (TokenCategory::Unknown, "Alpha"),
-                (TokenCategory::Delimiter, ","),
-                (TokenCategory::Unknown, "Beta"),
-                (TokenCategory::Close, "]"),
-                (TokenCategory::Delimiter, "_"),
-                (TokenCategory::Unknown, "Gamma"),
-                (TokenCategory::Delimiter, " "),
-                (TokenCategory::Unknown, "Delta"),
+                (Shape::Open, "["),
+                (Shape::Word, "Alpha"),
+                (Shape::Delimiter, ","),
+                (Shape::Word, "Beta"),
+                (Shape::Close, "]"),
+                (Shape::Delimiter, "_"),
+                (Shape::Word, "Gamma"),
+                (Shape::Delimiter, " "),
+                (Shape::Word, "Delta"),
             ]
         );
     }
@@ -381,11 +403,11 @@ mod tests {
         assert_eq!(
             summary(&tokens),
             [
-                (TokenCategory::Unknown, "Anime"),
-                (TokenCategory::Delimiter, " "),
-                (TokenCategory::Unknown, "-"),
-                (TokenCategory::Delimiter, " "),
-                (TokenCategory::Unknown, "01"),
+                (Shape::Word, "Anime"),
+                (Shape::Delimiter, " "),
+                (Shape::Word, "-"),
+                (Shape::Delimiter, " "),
+                (Shape::Word, "01"),
             ]
         );
     }
@@ -395,48 +417,42 @@ mod tests {
         assert_eq!(
             summary(&tokens("Ep. 01")),
             [
-                (TokenCategory::Unknown, "Ep."),
-                (TokenCategory::Delimiter, " "),
-                (TokenCategory::Unknown, "01"),
+                (Shape::Word, "Ep."),
+                (Shape::Delimiter, " "),
+                (Shape::Word, "01"),
             ]
         );
     }
 
     #[test]
-    fn delimiter_between_matching_delimiters_becomes_unknown() {
+    fn delimiter_between_matching_delimiters_becomes_a_word() {
         assert_eq!(
             summary(&tokens("A_&_B")),
             [
-                (TokenCategory::Unknown, "A"),
-                (TokenCategory::Delimiter, "_"),
-                (TokenCategory::Unknown, "&"),
-                (TokenCategory::Delimiter, "_"),
-                (TokenCategory::Unknown, "B"),
+                (Shape::Word, "A"),
+                (Shape::Delimiter, "_"),
+                (Shape::Word, "&"),
+                (Shape::Delimiter, "_"),
+                (Shape::Word, "B"),
             ]
         );
     }
 
     #[test]
     fn plus_between_numbers_merges_them() {
-        assert_eq!(
-            summary(&tokens("01+02")),
-            [(TokenCategory::Unknown, "01+02")]
-        );
+        assert_eq!(summary(&tokens("01+02")), [(Shape::Word, "01+02")]);
     }
 
     #[test]
     fn single_char_runs_merge_across_the_same_delimiter() {
-        assert_eq!(
-            summary(&tokens("H.265")),
-            [(TokenCategory::Unknown, "H.265")]
-        );
-        assert_eq!(summary(&tokens("5.1")), [(TokenCategory::Unknown, "5.1")]);
+        assert_eq!(summary(&tokens("H.265")), [(Shape::Word, "H.265")]);
+        assert_eq!(summary(&tokens("5.1")), [(Shape::Word, "5.1")]);
     }
 
     #[test]
-    fn preidentified_text_becomes_an_identifier_token() {
+    fn preidentified_text_becomes_a_term() {
         let tokens = tokens("H.264");
-        assert_eq!(summary(&tokens), [(TokenCategory::Identifier, "H.264")]);
-        assert_eq!(tokens[0].kind, Some(ElementKind::VideoTerm));
+        assert_eq!(summary(&tokens), [(Shape::Term, "H.264")]);
+        assert_eq!(tokens[0].term, Some(ElementKind::VideoTerm));
     }
 }

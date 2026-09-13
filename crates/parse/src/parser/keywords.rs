@@ -2,27 +2,26 @@ use super::Parser;
 use super::numbers::Extent;
 use crate::element::ElementKind;
 use crate::string;
-use crate::token::{self, TokenCategory};
+use crate::token;
 
 impl Parser<'_> {
     /// Pre-identified terms go in first, ahead of everything the keyword
     /// pass finds, because the tokenizer recognised them before any pass ran
     /// and the order of repeated kinds is part of what the fixtures pin.
     pub(super) fn search_keywords(&mut self) {
-        for index in 0..self.tokens.len() {
-            if self.tokens[index].category == TokenCategory::Identifier
-                && let Some(kind) = self.tokens[index].kind
-            {
-                let value = self.tokens[index].content.clone();
+        for index in 0..self.tape.len() {
+            if let Some(kind) = self.tape.tokens[index].term {
+                let value = self.tape.tokens[index].text.clone();
                 self.elements.insert(kind, value);
+                self.retire(index, kind);
             }
         }
-        for index in 0..self.tokens.len() {
-            if self.tokens[index].category != TokenCategory::Unknown {
+        for index in 0..self.tape.len() {
+            if !self.tape.tokens[index].is_free() {
                 continue;
             }
 
-            let mut word = string::trim_dashes_and_spaces(&self.tokens[index].content).to_owned();
+            let mut word = string::trim_dashes_and_spaces(&self.tape.tokens[index].text).to_owned();
             if word.is_empty() {
                 continue;
             }
@@ -75,49 +74,51 @@ impl Parser<'_> {
             if let Some(kind) = kind {
                 self.elements.insert(kind, word);
                 if identifiable {
-                    self.tokens[index].category = TokenCategory::Identifier;
+                    self.retire(index, kind);
+                } else {
+                    self.hold(index, kind);
                 }
             }
         }
     }
 
     fn check_anime_season(&mut self, index: usize) {
-        if let Some(prev) = token::find_prev(&self.tokens, index, token::is_not_delimiter)
-            && let Some(number) = ordinal_number(&self.tokens[prev].content)
+        if let Some(prev) = self.tape.prev(index, token::is_not_delimiter)
+            && let Some(number) = ordinal_number(&self.tape.tokens[prev].text)
         {
             self.elements.insert(ElementKind::AnimeSeason, number);
-            self.tokens[prev].category = TokenCategory::Identifier;
-            self.tokens[index].category = TokenCategory::Identifier;
+            self.retire(prev, ElementKind::AnimeSeason);
+            self.retire(index, ElementKind::AnimeSeasonPrefix);
             return;
         }
-        if let Some(next) = token::find_next(&self.tokens, index, token::is_not_delimiter)
-            && string::is_numeric(&self.tokens[next].content)
+        if let Some(next) = self.tape.next(index, token::is_not_delimiter)
+            && self.tape.tokens[next].numeric
         {
-            let value = self.tokens[next].content.clone();
+            let value = self.tape.tokens[next].text.clone();
             self.elements.insert(ElementKind::AnimeSeason, value);
-            self.tokens[index].category = TokenCategory::Identifier;
-            self.tokens[next].category = TokenCategory::Identifier;
+            self.retire(index, ElementKind::AnimeSeasonPrefix);
+            self.retire(next, ElementKind::AnimeSeason);
         }
     }
 
     fn check_extent(&mut self, index: usize, extent: Extent) {
-        let Some(next) = token::find_next(&self.tokens, index, token::is_not_delimiter) else {
+        let Some(next) = self.tape.next(index, token::is_not_delimiter) else {
             return;
         };
-        if self.tokens[next].category != TokenCategory::Unknown {
+        if !self.tape.tokens[next].is_free() {
             return;
         }
-        if !self.tokens[next]
-            .content
+        if !self.tape.tokens[next]
+            .text
             .chars()
             .next()
             .is_some_and(|c| c.is_ascii_digit())
         {
             return;
         }
-        let value = self.tokens[next].content.clone();
+        let value = self.tape.tokens[next].text.clone();
         self.claim_number(extent, &value, next);
-        self.tokens[index].category = TokenCategory::Identifier;
+        self.retire(index, extent.prefix());
     }
 }
 

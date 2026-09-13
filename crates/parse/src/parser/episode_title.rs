@@ -7,12 +7,13 @@ impl Parser<'_> {
         if !self.elements.contains(ElementKind::EpisodeNumber) {
             return;
         }
-        let Some((begin, end)) = self
-            .unknown_spans(false)
-            .find(|&(begin, end)| end - begin > 2 || !string::is_dash(&self.tokens[begin].content))
+        let Some(run) = self
+            .tape
+            .free_runs(false)
+            .find(|run| run.len() > 2 || !string::is_dash(&self.tape.tokens[run.start].text))
         else {
             return;
         };
-        self.build_and_insert(ElementKind::EpisodeTitle, begin, end, false);
+        self.build_and_insert(ElementKind::EpisodeTitle, run.start, run.end, false);
     }
 }

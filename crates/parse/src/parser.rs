@@ -6,13 +6,13 @@ mod title;
 mod validate;
 
 use crate::element::{ElementKind, Elements};
+use crate::engine::RuleName;
 use crate::keyword::KeywordTable;
 use crate::options::Options;
-use crate::string;
-use crate::token::{Token, TokenCategory};
+use crate::token::{Delimiters, Tape};
 
 pub(crate) struct Parser<'a> {
-    tokens: Vec<Token>,
+    tape: Tape,
     elements: Elements,
     options: &'a Options,
     table: &'a KeywordTable,
@@ -25,13 +25,13 @@ pub(crate) struct Parser<'a> {
 
 impl<'a> Parser<'a> {
     pub(crate) fn new(
-        tokens: Vec<Token>,
+        tape: Tape,
         elements: Elements,
         options: &'a Options,
         table: &'a KeywordTable,
     ) -> Parser<'a> {
         Parser {
-            tokens,
+            tape,
             elements,
             options,
             table,
@@ -57,28 +57,17 @@ impl<'a> Parser<'a> {
         self.elements
     }
 
-    /// Each run of unknown tokens carrying the given `enclosed` flag, ending
-    /// at the next bracket, identifier, or the end of the token list.
-    fn unknown_spans(&self, enclosed: bool) -> impl Iterator<Item = (usize, usize)> + '_ {
-        let len = self.tokens.len();
-        let mut search_from = 0;
-        std::iter::from_fn(move || {
-            let begin = (search_from..len).find(|&index| {
-                self.tokens[index].enclosed == enclosed
-                    && self.tokens[index].category == TokenCategory::Unknown
-            })?;
-            let end = (begin..len)
-                .find(|&index| {
-                    self.tokens[index].is_bracket()
-                        || self.tokens[index].category == TokenCategory::Identifier
-                })
-                .unwrap_or(len);
-            search_from = end;
-            Some((begin, end))
-        })
+    /// Takes a whole token so later passes cannot claim it again.
+    fn retire(&mut self, index: usize, kind: ElementKind) {
+        self.tape.take(index, RuleName::Legacy, kind, false);
     }
 
-    /// Builds an element from the span, then retires its unknown tokens so
+    /// Reads a value off a token but leaves it free for a title.
+    fn hold(&mut self, index: usize, kind: ElementKind) {
+        self.tape.take(index, RuleName::Legacy, kind, true);
+    }
+
+    /// Builds an element from the span, then retires its free tokens so
     /// later passes cannot claim them again.
     fn build_and_insert(
         &mut self,
@@ -87,10 +76,15 @@ impl<'a> Parser<'a> {
         end: usize,
         keep_delimiters: bool,
     ) {
-        let value = string::build_element(&self.tokens[begin..end], keep_delimiters);
-        for token in &mut self.tokens[begin..end] {
-            if token.category == TokenCategory::Unknown {
-                token.category = TokenCategory::Identifier;
+        let delimiters = if keep_delimiters {
+            Delimiters::Kept
+        } else {
+            Delimiters::Folded
+        };
+        let value = self.tape.value(begin..end, delimiters);
+        for index in begin..end {
+            if self.tape.tokens[index].is_free() {
+                self.retire(index, kind);
             }
         }
         self.elements.insert(kind, value);

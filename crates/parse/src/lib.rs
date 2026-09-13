@@ -4,6 +4,7 @@
 //! elements (resolution, source, audio and video terms, checksum, ...).
 
 mod element;
+mod engine;
 mod keyword;
 mod options;
 mod parser;
@@ -12,6 +13,7 @@ mod token;
 mod tokenizer;
 
 pub use element::{ElementKind, Elements, Span};
+pub use engine::RuleName;
 pub use options::Options;
 
 pub fn parse(input: &str, options: &Options) -> Elements {
@@ -46,7 +48,8 @@ pub fn parse(input: &str, options: &Options) -> Elements {
             };
         }
     }
-    parser::Parser::new(tokens, elements, options, table).run()
+    let tape = token::Tape::new(tokens);
+    parser::Parser::new(tape, elements, options, table).run()
 }
 
 /// Removes every ignored string from `text`. When one was found, returns the
