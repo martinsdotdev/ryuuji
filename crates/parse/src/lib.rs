@@ -9,6 +9,7 @@ mod keyword;
 mod options;
 mod parser;
 mod reading;
+mod rules;
 mod string;
 mod token;
 mod tokenizer;
@@ -19,6 +20,12 @@ pub use options::Options;
 pub use reading::{Alternative, Certainty, Claim, Reading, Sense};
 
 pub fn parse(input: &str, options: &Options) -> Reading {
+    parse_until(input, options, None)
+}
+
+/// The prelude (extension, ignored strings, file name), the tokenizer, then
+/// the rule table up to and including `until`, or all of it.
+fn parse_until(input: &str, options: &Options, until: Option<RuleName>) -> Reading {
     let table = keyword::KeywordTable::builtin();
     let mut elements = Elements::default();
     let mut text = input.to_owned();
@@ -70,9 +77,7 @@ pub fn parse(input: &str, options: &Options) -> Reading {
             };
         }
     }
-    let tape = token::Tape::new(tokens);
-    let elements = parser::Parser::new(tape, elements, options, table).run();
-    Reading::new(elements, Vec::new())
+    engine::run(token::Tape::new(tokens), elements, options, until)
 }
 
 /// Removes every ignored string from `text`. When one was found, returns the
