@@ -6,6 +6,7 @@
 
 mod checksum;
 mod episode_prefix;
+mod isolated_resolution;
 mod legacy;
 mod preidentified;
 mod resolution;
@@ -44,5 +45,6 @@ pub(crate) const RULES: &[Step] = &[
     Step::Tape(checksum::RULE),
     Step::Tape(resolution::RULE),
     Step::Tape(year::RULE),
+    Step::Tape(isolated_resolution::RULE),
     legacy::STEP,
 ];
