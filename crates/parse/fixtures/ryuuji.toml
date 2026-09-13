@@ -697,3 +697,39 @@ release_group = "Nyaa"
 anime_title = "Show"
 episode_number = "12"
 release_information = "END"
+
+[[case]]
+name = "a bit depth written with a space is one video term"
+input = "[Nyaa] Show - 01 (720p 10 bit AAC).mkv"
+
+[case.elements]
+file_extension = "mkv"
+video_resolution = "720p"
+video_term = "10 bit"
+audio_term = "AAC"
+release_group = "Nyaa"
+anime_title = "Show"
+episode_number = "01"
+
+[[case]]
+name = "dolby digital channel terms"
+input = "[Nyaa] Show - 02 [DVD DD5.1].mkv"
+
+[case.elements]
+file_extension = "mkv"
+source = "DVD"
+audio_term = "DD5.1"
+release_group = "Nyaa"
+anime_title = "Show"
+episode_number = "02"
+
+[[case]]
+name = "an interlaced resolution"
+input = "[Nyaa] Show - 03 [1080i].mkv"
+
+[case.elements]
+file_extension = "mkv"
+video_resolution = "1080i"
+release_group = "Nyaa"
+anime_title = "Show"
+episode_number = "03"

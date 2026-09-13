@@ -151,7 +151,7 @@ fn is_resolution(word: &str) -> bool {
             let height = digit_run(rest);
             (3..=4).contains(&height) && height == rest.len()
         }
-        Some('p' | 'P') => chars.len() == width + 1,
+        Some('p' | 'P' | 'i' | 'I') => chars.len() == width + 1,
         _ => false,
     }
 }
@@ -162,7 +162,7 @@ mod tests {
 
     #[test]
     fn resolutions_match_dimensions_and_scanlines() {
-        for word in ["1280x720", "1920X1080", "640×480", "720p", "1080P"] {
+        for word in ["1280x720", "1920X1080", "640×480", "720p", "1080P", "1080i"] {
             assert!(is_resolution(word), "{word}");
         }
         for word in ["10x10", "720", "720px", "x264", "1080pp"] {
