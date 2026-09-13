@@ -12,7 +12,7 @@ impl Parser<'_> {
         for index in 0..self.tape.len() {
             if let Some(kind) = self.tape.tokens[index].term {
                 let value = self.tape.tokens[index].text.clone();
-                self.elements.insert(kind, value);
+                self.record(kind, value, index);
                 self.retire(index, kind);
             }
         }
@@ -72,7 +72,7 @@ impl Parser<'_> {
             }
 
             if let Some(kind) = kind {
-                self.elements.insert(kind, word);
+                self.record(kind, word, index);
                 if identifiable {
                     self.retire(index, kind);
                 } else {
@@ -86,7 +86,7 @@ impl Parser<'_> {
         if let Some(prev) = self.tape.prev(index, token::is_not_delimiter)
             && let Some(number) = ordinal_number(&self.tape.tokens[prev].text)
         {
-            self.elements.insert(ElementKind::AnimeSeason, number);
+            self.record(ElementKind::AnimeSeason, number, prev);
             self.retire(prev, ElementKind::AnimeSeason);
             self.retire(index, ElementKind::AnimeSeasonPrefix);
             return;
@@ -95,7 +95,7 @@ impl Parser<'_> {
             && self.tape.tokens[next].numeric
         {
             let value = self.tape.tokens[next].text.clone();
-            self.elements.insert(ElementKind::AnimeSeason, value);
+            self.record(ElementKind::AnimeSeason, value, next);
             self.retire(index, ElementKind::AnimeSeasonPrefix);
             self.retire(next, ElementKind::AnimeSeason);
         }

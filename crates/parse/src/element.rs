@@ -1,5 +1,7 @@
 use std::ops::RangeInclusive;
 
+use crate::engine::RuleName;
+use crate::reading::Certainty;
 use crate::string::leading_number;
 
 /// A byte range into the string the caller passed to [`crate::parse`]. The
@@ -131,71 +133,89 @@ impl ElementKind {
     }
 }
 
-/// The elements parsed out of one filename, in the order they were found.
+/// One value the parser read, and the evidence behind it: where in the
+/// input, which rule, and how sure that rule is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Fact {
+    pub kind: ElementKind,
+    /// Not always the spanned text as written: `v2` reads as `2`, and a
+    /// title's delimiters fold to spaces.
+    pub value: String,
+    pub span: Span,
+    pub by: RuleName,
+    pub certainty: Certainty,
+}
+
+/// The elements parsed out of one filename, in the order the rules read
+/// them. Never sorted by position: the fixtures pin the order of repeated
+/// kinds, and a pre-identified term comes before one the table matched
+/// whatever their places in the name.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Elements {
-    items: Vec<(ElementKind, String)>,
+    facts: Vec<Fact>,
 }
 
 impl Elements {
     pub fn get(&self, kind: ElementKind) -> Option<&str> {
-        self.items
-            .iter()
-            .find(|(k, _)| *k == kind)
-            .map(|(_, value)| value.as_str())
+        self.fact(kind).map(|fact| fact.value.as_str())
     }
 
     pub fn get_all(&self, kind: ElementKind) -> Vec<&str> {
-        self.items
+        self.facts
             .iter()
-            .filter(|(k, _)| *k == kind)
-            .map(|(_, value)| value.as_str())
+            .filter(|fact| fact.kind == kind)
+            .map(|fact| fact.value.as_str())
             .collect()
     }
 
     pub fn contains(&self, kind: ElementKind) -> bool {
-        self.items.iter().any(|(k, _)| *k == kind)
+        self.facts.iter().any(|fact| fact.kind == kind)
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (ElementKind, &str)> {
-        self.items
+        self.facts
             .iter()
-            .map(|(kind, value)| (*kind, value.as_str()))
+            .map(|fact| (fact.kind, fact.value.as_str()))
+    }
+
+    pub fn facts(&self) -> &[Fact] {
+        &self.facts
+    }
+
+    /// The first fact of a kind.
+    pub fn fact(&self, kind: ElementKind) -> Option<&Fact> {
+        self.facts.iter().find(|fact| fact.kind == kind)
     }
 
     pub fn len(&self) -> usize {
-        self.items.len()
+        self.facts.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.items.is_empty()
+        self.facts.is_empty()
     }
 
-    pub fn insert(&mut self, kind: ElementKind, value: impl Into<String>) {
-        let value = value.into();
-        if value.is_empty() {
-            return;
+    /// An empty value is no fact at all.
+    pub(crate) fn push(&mut self, fact: Fact) {
+        if !fact.value.is_empty() {
+            self.facts.push(fact);
         }
-        self.items.push((kind, value));
     }
 
-    pub fn remove(&mut self, kind: ElementKind) {
-        self.items.retain(|(k, _)| *k != kind);
-    }
-
-    pub(crate) fn remove_value(&mut self, kind: ElementKind, value: &str) {
+    /// Drops the first fact of the kind with this value.
+    pub(crate) fn retract(&mut self, kind: ElementKind, value: &str) {
         if let Some(position) = self
-            .items
+            .facts
             .iter()
-            .position(|(k, v)| *k == kind && v == value)
+            .position(|fact| fact.kind == kind && fact.value == value)
         {
-            self.items.remove(position);
+            self.facts.remove(position);
         }
     }
 
     pub(crate) fn retag_first(&mut self, from: ElementKind, to: ElementKind) {
-        if let Some(item) = self.items.iter_mut().find(|(k, _)| *k == from) {
-            item.0 = to;
+        if let Some(fact) = self.facts.iter_mut().find(|fact| fact.kind == from) {
+            fact.kind = to;
         }
     }
 
@@ -223,8 +243,27 @@ impl Elements {
 }
 
 #[cfg(test)]
+pub(crate) fn fact(kind: ElementKind, value: &str) -> Fact {
+    Fact {
+        kind,
+        value: value.to_owned(),
+        span: Span { start: 0, end: 0 },
+        by: RuleName::Legacy,
+        certainty: Certainty::Shaped,
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    fn elements(items: &[(ElementKind, &str)]) -> Elements {
+        let mut elements = Elements::default();
+        for (kind, value) in items {
+            elements.push(fact(*kind, value));
+        }
+        elements
+    }
 
     #[test]
     fn labels_round_trip_for_every_kind() {
@@ -243,8 +282,7 @@ mod tests {
             ("v2", None),
         ];
         for (value, expected) in cases {
-            let mut elements = Elements::default();
-            elements.insert(ElementKind::EpisodeNumber, value);
+            let elements = elements(&[(ElementKind::EpisodeNumber, value)]);
             assert_eq!(elements.episode_number(), expected, "value {value:?}");
         }
         assert_eq!(Elements::default().episode_number(), None);
@@ -252,43 +290,43 @@ mod tests {
 
     #[test]
     fn episode_range_of_a_single_value_is_one_wide() {
-        let mut elements = Elements::default();
-        elements.insert(ElementKind::EpisodeNumber, "03");
+        let elements = elements(&[(ElementKind::EpisodeNumber, "03")]);
         assert_eq!(elements.episode_range(), Some(3..=3));
     }
 
     #[test]
     fn episode_range_spans_an_ascending_batch() {
-        let mut elements = Elements::default();
-        elements.insert(ElementKind::EpisodeNumber, "01");
-        elements.insert(ElementKind::EpisodeNumber, "02");
+        let elements = elements(&[
+            (ElementKind::EpisodeNumber, "01"),
+            (ElementKind::EpisodeNumber, "02"),
+        ]);
         assert_eq!(elements.episode_range(), Some(1..=2));
     }
 
     #[test]
     fn episode_range_orders_the_ends_regardless_of_table_order() {
-        let mut elements = Elements::default();
-        elements.insert(ElementKind::EpisodeNumber, "12");
-        elements.insert(ElementKind::EpisodeNumber, "01");
+        let elements = elements(&[
+            (ElementKind::EpisodeNumber, "12"),
+            (ElementKind::EpisodeNumber, "01"),
+        ]);
         assert_eq!(elements.episode_range(), Some(1..=12));
     }
 
     #[test]
     fn episode_range_is_none_without_an_episode_number() {
         assert_eq!(Elements::default().episode_range(), None);
-        let mut elements = Elements::default();
-        elements.insert(ElementKind::EpisodeNumberAlt, "08");
+        let elements = elements(&[(ElementKind::EpisodeNumberAlt, "08")]);
         assert_eq!(elements.episode_range(), None);
     }
 
     #[test]
     fn episode_range_skips_values_without_a_leading_number() {
-        let mut elements = Elements::default();
-        elements.insert(ElementKind::EpisodeNumber, "abc");
-        elements.insert(ElementKind::EpisodeNumber, "4a");
+        let elements = elements(&[
+            (ElementKind::EpisodeNumber, "abc"),
+            (ElementKind::EpisodeNumber, "4a"),
+        ]);
         assert_eq!(elements.episode_range(), Some(4..=4));
-        let mut only_garbage = Elements::default();
-        only_garbage.insert(ElementKind::EpisodeNumber, "v2");
+        let only_garbage = self::elements(&[(ElementKind::EpisodeNumber, "v2")]);
         assert_eq!(only_garbage.episode_range(), None);
     }
 
@@ -296,27 +334,30 @@ mod tests {
     // batch, so the alternate number must not widen the range.
     #[test]
     fn episode_range_ignores_the_alternate_number() {
-        let mut elements = Elements::default();
-        elements.insert(ElementKind::EpisodeNumber, "05v2");
-        elements.insert(ElementKind::EpisodeNumberAlt, "08");
+        let elements = elements(&[
+            (ElementKind::EpisodeNumber, "05v2"),
+            (ElementKind::EpisodeNumberAlt, "08"),
+        ]);
         assert_eq!(elements.episode_range(), Some(5..=5));
     }
 
     #[test]
     fn season_number_reads_the_first_anime_season() {
-        let mut elements = Elements::default();
-        elements.insert(ElementKind::AnimeSeason, "2");
-        elements.insert(ElementKind::AnimeSeason, "3");
+        let elements = elements(&[
+            (ElementKind::AnimeSeason, "2"),
+            (ElementKind::AnimeSeason, "3"),
+        ]);
         assert_eq!(elements.season_number(), Some(2));
     }
 
     #[test]
-    fn insert_appends_for_every_kind() {
-        let mut elements = Elements::default();
-        elements.insert(ElementKind::AudioTerm, "FLAC");
-        elements.insert(ElementKind::AudioTerm, "Dual Audio");
-        elements.insert(ElementKind::VideoResolution, "720p");
-        elements.insert(ElementKind::VideoResolution, "1080p");
+    fn push_appends_for_every_kind() {
+        let elements = elements(&[
+            (ElementKind::AudioTerm, "FLAC"),
+            (ElementKind::AudioTerm, "Dual Audio"),
+            (ElementKind::VideoResolution, "720p"),
+            (ElementKind::VideoResolution, "1080p"),
+        ]);
         assert_eq!(
             elements.get_all(ElementKind::AudioTerm),
             ["FLAC", "Dual Audio"]
@@ -331,9 +372,17 @@ mod tests {
     }
 
     #[test]
+    fn retract_drops_the_first_matching_fact_only() {
+        let mut elements = elements(&[(ElementKind::Other, "Ita"), (ElementKind::Other, "Ita")]);
+        elements.retract(ElementKind::Other, "Ita");
+        assert_eq!(elements.get_all(ElementKind::Other), ["Ita"]);
+        elements.retract(ElementKind::Other, "END");
+        assert_eq!(elements.len(), 1);
+    }
+
+    #[test]
     fn empty_values_are_ignored() {
-        let mut elements = Elements::default();
-        elements.insert(ElementKind::AnimeTitle, "");
+        let elements = elements(&[(ElementKind::AnimeTitle, "")]);
         assert!(elements.is_empty());
     }
 }

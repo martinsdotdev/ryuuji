@@ -8,13 +8,15 @@ mod engine;
 mod keyword;
 mod options;
 mod parser;
+mod reading;
 mod string;
 mod token;
 mod tokenizer;
 
-pub use element::{ElementKind, Elements, Span};
+pub use element::{ElementKind, Elements, Fact, Span};
 pub use engine::RuleName;
 pub use options::Options;
+pub use reading::Certainty;
 
 pub fn parse(input: &str, options: &Options) -> Elements {
     let table = keyword::KeywordTable::builtin();
@@ -31,14 +33,34 @@ pub fn parse(input: &str, options: &Options) -> Elements {
                 .find(ElementKind::FileExtension, &extension.to_uppercase())
                 .is_some()
         {
-            elements.insert(ElementKind::FileExtension, extension);
+            elements.push(Fact {
+                kind: ElementKind::FileExtension,
+                value: extension,
+                span: Span {
+                    start: dot + 1,
+                    end: text.len(),
+                },
+                by: RuleName::Prelude,
+                certainty: Certainty::Stated,
+            });
             text.truncate(dot);
         }
     }
 
     let origin = remove_ignored(&mut text, &options.ignored_strings);
 
-    elements.insert(ElementKind::FileName, text.clone());
+    elements.push(Fact {
+        kind: ElementKind::FileName,
+        value: text.clone(),
+        span: Span {
+            start: 0,
+            end: origin
+                .as_ref()
+                .map_or(text.len(), |origin| origin[text.len()]),
+        },
+        by: RuleName::Prelude,
+        certainty: Certainty::Stated,
+    });
     let mut tokens = tokenizer::tokenize(&text, options, table);
     if let Some(origin) = origin {
         for token in &mut tokens {
