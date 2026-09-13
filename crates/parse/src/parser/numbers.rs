@@ -304,10 +304,16 @@ impl Parser<'_> {
             if index == 0 || self.tokens[index].enclosed {
                 continue;
             }
-            if self.tokens[..index]
+            // The episode comes after the title, so the first token outside
+            // brackets is not it, unless it is the only one and a title
+            // waits inside a bracket group (`[Group][Title] 02 [720p]`).
+            let first_outside = self.tokens[..index]
                 .iter()
-                .all(|token| token.enclosed || token.category == TokenCategory::Delimiter)
-            {
+                .all(|token| token.enclosed || token.category == TokenCategory::Delimiter);
+            let only_outside = !self.tokens[index + 1..]
+                .iter()
+                .any(|token| !token.enclosed && token.category == TokenCategory::Unknown);
+            if first_outside && !(only_outside && self.enclosed_title_begin().is_some()) {
                 continue;
             }
             if let Some(prev) = token::find_prev(&self.tokens, index, token::is_not_delimiter)
