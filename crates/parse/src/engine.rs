@@ -28,17 +28,24 @@ pub enum RuleName {
     /// The extension strip and the file name, read before any rule runs.
     Prelude,
     Preidentified,
+    Terms,
     /// The passes not yet lifted into rules of their own.
     Legacy,
 }
 
 impl RuleName {
-    pub const ALL: [RuleName; 3] = [RuleName::Prelude, RuleName::Preidentified, RuleName::Legacy];
+    pub const ALL: [RuleName; 4] = [
+        RuleName::Prelude,
+        RuleName::Preidentified,
+        RuleName::Terms,
+        RuleName::Legacy,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             RuleName::Prelude => "prelude",
             RuleName::Preidentified => "preidentified",
+            RuleName::Terms => "terms",
             RuleName::Legacy => "legacy",
         }
     }
@@ -204,6 +211,25 @@ impl Verdict {
             at,
             part: None,
             value: None,
+            held: true,
+        });
+        self
+    }
+
+    /// Reads a value of the rule's choosing off a token and leaves the
+    /// token free.
+    pub(crate) fn hold_part(
+        mut self,
+        kind: ElementKind,
+        at: usize,
+        part: Range<usize>,
+        value: impl Into<String>,
+    ) -> Verdict {
+        self.ops.push(Op::Take {
+            kind,
+            at,
+            part: Some(part),
+            value: Some(value.into()),
             held: true,
         });
         self
@@ -453,7 +479,7 @@ pub(crate) fn run(
     options: &Options,
     until: Option<RuleName>,
 ) -> Reading {
-    let mut reading = Reading::new(elements, Vec::new());
+    let mut reading = Reading::new(elements, options);
     for step in RULES {
         match step {
             Step::Tape(rule) => run_rule(rule, &mut tape, &mut reading, options),
@@ -537,7 +563,7 @@ mod tests {
     }
 
     fn reading() -> Reading {
-        Reading::new(Elements::default(), Vec::new())
+        Reading::new(Elements::default(), &Options::default())
     }
 
     fn facts(reading: &Reading) -> Vec<(ElementKind, &str, Span)> {
@@ -634,7 +660,7 @@ mod tests {
         let mut tape = tape();
         let mut elements = Elements::default();
         elements.push(fact(ElementKind::ReleaseVersion, "1"));
-        let mut reading = Reading::new(elements, Vec::new());
+        let mut reading = Reading::new(elements, &Options::default());
         let verdict = Verdict::nothing()
             .take_part(ElementKind::EpisodeNumber, 2, 0..2, "05")
             .take_part(ElementKind::ReleaseVersion, 2, 2..4, "2");
@@ -713,7 +739,7 @@ mod tests {
             span: Span { start: 0, end: 4 },
             ..fact(ElementKind::Other, "Show")
         });
-        let mut reading = Reading::new(elements, Vec::new());
+        let mut reading = Reading::new(elements, &Options::default());
         apply(
             RuleName::Prelude,
             Certainty::Stated,

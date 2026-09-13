@@ -3,7 +3,7 @@
 /// Deserializes field by field over [`Options::default`], so a document may
 /// name only the knobs it changes, and an unknown key is an error rather
 /// than a silently ignored typo.
-#[derive(Clone, Debug, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Options {
     /// Characters that may split a token group; `-` is never a delimiter.
