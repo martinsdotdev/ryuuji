@@ -733,3 +733,21 @@ video_resolution = "1080i"
 release_group = "Nyaa"
 anime_title = "Show"
 episode_number = "03"
+
+[[case]]
+name = "a name that opens with its episode number has no anime title"
+input = "03 - The Hidden Village.mkv"
+
+[case.elements]
+file_extension = "mkv"
+episode_number = "03"
+episode_title = "The Hidden Village"
+
+[[case]]
+name = "a name that opens with an episode prefix has no anime title"
+input = "Ep. 07 - Snow Falls.mkv"
+
+[case.elements]
+file_extension = "mkv"
+episode_number = "07"
+episode_title = "Snow Falls"

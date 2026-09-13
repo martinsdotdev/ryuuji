@@ -17,6 +17,10 @@ pub(crate) struct Parser<'a> {
     options: &'a Options,
     table: &'a KeywordTable,
     found_episode_keyword: bool,
+    /// The token the first episode number was read from, so the title
+    /// search can tell a name that leads with its episode from one that
+    /// leads with its title.
+    episode_token: Option<usize>,
 }
 
 impl<'a> Parser<'a> {
@@ -32,6 +36,7 @@ impl<'a> Parser<'a> {
             options,
             table,
             found_episode_keyword: false,
+            episode_token: None,
         }
     }
 

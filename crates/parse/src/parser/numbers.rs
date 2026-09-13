@@ -252,19 +252,35 @@ impl Parser<'_> {
         false
     }
 
+    /// A number set off by a dash: `Title - 08`, or `08 - Episode Title` when
+    /// the number opens the name and nothing but the dash follows it.
     fn search_separated_numbers(&mut self, numeric: &[usize]) -> bool {
         for &index in numeric {
-            let Some(prev) = token::find_prev(&self.tokens, index, token::is_not_delimiter) else {
-                continue;
+            let dash = |neighbour: Option<usize>| {
+                neighbour.filter(|&neighbour| {
+                    self.tokens[neighbour].category == TokenCategory::Unknown
+                        && string::is_dash(&self.tokens[neighbour].content)
+                })
             };
-            if self.tokens[prev].category == TokenCategory::Unknown
-                && string::is_dash(&self.tokens[prev].content)
-            {
-                let number = self.tokens[index].content.clone();
-                if self.set_number(Extent::Episode, &number, index, true) {
-                    self.tokens[prev].category = TokenCategory::Identifier;
-                    return true;
+            let prev = token::find_prev(&self.tokens, index, token::is_not_delimiter);
+            let separator = match dash(prev) {
+                Some(prev) => prev,
+                None if prev.is_none() => {
+                    let Some(next) = dash(token::find_next(
+                        &self.tokens,
+                        index,
+                        token::is_not_delimiter,
+                    )) else {
+                        continue;
+                    };
+                    next
                 }
+                None => continue,
+            };
+            let number = self.tokens[index].content.clone();
+            if self.set_number(Extent::Episode, &number, index, true) {
+                self.tokens[separator].category = TokenCategory::Identifier;
+                return true;
             }
         }
         false
@@ -320,6 +336,9 @@ impl Parser<'_> {
             return false;
         }
         self.tokens[index].category = TokenCategory::Identifier;
+        if extent == Extent::Episode && self.episode_token.is_none() {
+            self.episode_token = Some(index);
+        }
         let mut kind = extent.number();
         if extent == Extent::Episode
             && self.found_episode_keyword
