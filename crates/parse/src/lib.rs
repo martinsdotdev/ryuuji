@@ -16,9 +16,9 @@ mod tokenizer;
 pub use element::{ElementKind, Elements, Fact, Span};
 pub use engine::RuleName;
 pub use options::Options;
-pub use reading::Certainty;
+pub use reading::{Alternative, Certainty, Claim, Reading, Sense};
 
-pub fn parse(input: &str, options: &Options) -> Elements {
+pub fn parse(input: &str, options: &Options) -> Reading {
     let table = keyword::KeywordTable::builtin();
     let mut elements = Elements::default();
     let mut text = input.to_owned();
@@ -71,7 +71,8 @@ pub fn parse(input: &str, options: &Options) -> Elements {
         }
     }
     let tape = token::Tape::new(tokens);
-    parser::Parser::new(tape, elements, options, table).run()
+    let elements = parser::Parser::new(tape, elements, options, table).run();
+    Reading::new(elements, Vec::new())
 }
 
 /// Removes every ignored string from `text`. When one was found, returns the
@@ -99,9 +100,13 @@ fn remove_ignored(text: &mut String, ignored: &[String]) -> Option<Vec<usize>> {
 mod tests {
     use super::*;
 
+    fn elements(input: &str, options: &Options) -> Elements {
+        parse(input, options).elements().clone()
+    }
+
     #[test]
     fn known_extension_is_stripped_with_original_case() {
-        let elements = parse("Toradora!.MKV", &Options::default());
+        let elements = elements("Toradora!.MKV", &Options::default());
         assert_eq!(elements.get(ElementKind::FileExtension), Some("MKV"));
         assert_eq!(elements.get(ElementKind::FileName), Some("Toradora!"));
     }
@@ -112,14 +117,14 @@ mod tests {
             parse_file_extension: false,
             ..Options::default()
         };
-        let elements = parse("Toradora!.mkv", &options);
+        let elements = elements("Toradora!.mkv", &options);
         assert_eq!(elements.get(ElementKind::FileExtension), None);
         assert_eq!(elements.get(ElementKind::FileName), Some("Toradora!.mkv"));
     }
 
     #[test]
     fn unknown_extension_stays() {
-        let elements = parse("Toradora!.xyz", &Options::default());
+        let elements = elements("Toradora!.xyz", &Options::default());
         assert_eq!(elements.get(ElementKind::FileExtension), None);
         assert_eq!(elements.get(ElementKind::FileName), Some("Toradora!.xyz"));
     }
@@ -142,7 +147,7 @@ mod tests {
             ignored_strings: vec!["Enigma".to_owned()],
             ..Options::default()
         };
-        let elements = parse("[EnigmaBD 1080p].mkv", &options);
+        let elements = elements("[EnigmaBD 1080p].mkv", &options);
         assert_eq!(elements.get(ElementKind::FileName), Some("[BD 1080p]"));
         assert_eq!(elements.get(ElementKind::Source), Some("BD"));
     }

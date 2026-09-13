@@ -7,7 +7,7 @@
 use std::ops::RangeInclusive;
 use std::time::SystemTime;
 
-use ryuuji_parse::{ElementKind, Options, parse};
+use ryuuji_parse::{Options, parse};
 
 use crate::tagged::tagged_enum;
 use crate::{EntryId, LibraryEntry, PlaybackEvent};
@@ -277,11 +277,11 @@ pub(crate) fn resolve(parsed_title: &str, library: &[LibraryEntry]) -> Resolutio
 
 /// Parses one playback title and decides which library entry it names.
 pub fn propose(event: &PlaybackEvent, library: &[LibraryEntry]) -> ProposedMatch {
-    let parsed = parse(&event.title, &Options::default());
-    let parsed_title = parsed
-        .get(ElementKind::AnimeTitle)
-        .unwrap_or_default()
-        .to_owned();
+    let reading = parse(&event.title, &Options::default());
+    let parsed_title = reading
+        .title()
+        .map(|title| title.value.to_owned())
+        .unwrap_or_default();
     let resolution = resolve(&parsed_title, library);
     let score = match resolution {
         Resolution::Likely { score, .. } => Some(score),
@@ -297,9 +297,9 @@ pub fn propose(event: &PlaybackEvent, library: &[LibraryEntry]) -> ProposedMatch
     ProposedMatch {
         raw_title: event.title.clone(),
         parsed_title,
-        episode: parsed.episode_range(),
-        season: parsed.season_number(),
-        release_group: parsed.get(ElementKind::ReleaseGroup).map(str::to_owned),
+        episode: reading.episodes().map(|episodes| episodes.value),
+        season: reading.season().map(|season| season.value),
+        release_group: reading.release_group().map(|group| group.value.to_owned()),
         link,
         player: event.player.clone(),
         at: event.observed_at,

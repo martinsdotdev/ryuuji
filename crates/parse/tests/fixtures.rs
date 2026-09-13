@@ -80,7 +80,7 @@ fn ryuuji_fixtures_parse_exactly() {
             );
         }
         let expected = expected_map(&case.elements);
-        let mut parsed = parsed_map(&parse(&case.input, &case.options));
+        let mut parsed = parsed_map(parse(&case.input, &case.options).elements());
         if !case.strict {
             parsed.retain(|label, _| expected.contains_key(label));
         }
@@ -130,7 +130,7 @@ fn run_anitomy() -> (usize, usize, Vec<String>) {
     let mut failures = Vec::new();
     for (index, case) in cases.iter().enumerate() {
         let expected = expected_map(&case.expected);
-        let parsed = parsed_map(&parse(&case.file_name, &case.options()));
+        let parsed = parsed_map(parse(&case.file_name, &case.options()).elements());
         if parsed == expected {
             passed += 1;
         } else {
