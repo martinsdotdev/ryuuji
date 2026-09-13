@@ -64,6 +64,7 @@ pub(crate) fn discover() -> Vec<Player> {
             players.push(Player {
                 name,
                 smtc_app_ids: vec![id],
+                mpris_ids: Vec::new(),
                 executables: vec![file.to_string_lossy().into_owned()],
             });
         }
