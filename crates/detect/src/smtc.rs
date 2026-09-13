@@ -2,6 +2,7 @@
 //! the event subscriptions and the dedup state; WinRT callbacks only post a
 //! message to it, so the sink never runs on a WinRT thread.
 
+use std::collections::HashSet;
 use std::io;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -18,6 +19,7 @@ use windows::core::EventRevoker;
 
 use crate::SessionFacts;
 use crate::foreground;
+use crate::gecko;
 use crate::players::PlayerTable;
 use crate::session::{Dedup, Matched, RawStatus, SessionSnapshot, observe};
 
@@ -144,9 +146,11 @@ impl Spawn {
             subscriptions_stale: true,
             dedup: Dedup::default(),
             retry: false,
+            unknown_hashes: HashSet::new(),
             facts: self.facts,
             sink: self.sink,
         };
+        worker.discover_browsers();
         worker.refresh_and_log();
         while worker.wait(&self.rx) {
             worker.refresh_and_log();
@@ -169,11 +173,35 @@ struct Worker {
     dedup: Dedup,
     /// The last refresh left a matched session unread; poll again soon.
     retry: bool,
+    /// Hash-shaped app ids that stayed unmatched after a discovery, so one
+    /// unknown browser does not scan the registry on every refresh.
+    unknown_hashes: HashSet<String>,
     facts: Arc<Mutex<Vec<SessionFacts>>>,
     sink: Sink,
 }
 
 impl Worker {
+    /// Adds the browsers registered on this machine to the table. Called
+    /// at start and again when a session shows an install hash the table
+    /// does not know, so a browser installed while Ryuuji runs is picked up.
+    fn discover_browsers(&mut self) -> usize {
+        let found = gecko::discover();
+        for player in &found {
+            debug!(
+                name = player.name,
+                app_id = player.smtc_app_ids[0],
+                "discovered browser"
+            );
+        }
+        match self.table.extend(found) {
+            Ok(added) => added,
+            Err(err) => {
+                warn!(error = %err, "discovered browsers rejected");
+                0
+            }
+        }
+    }
+
     /// Blocks until the next refresh is due. False means stop.
     fn wait(&mut self, rx: &Receiver<Msg>) -> bool {
         let first = if self.dedup.is_playing() || self.retry {
@@ -224,6 +252,7 @@ impl Worker {
         let mut matched = Vec::new();
         let mut live = Vec::new();
         let mut unreadable = 0;
+        let mut new_hash = false;
         for session in &self.manager.GetSessions()? {
             let (app_id, raw) = match read_session(&session) {
                 Ok(read) => read,
@@ -237,6 +266,12 @@ impl Worker {
                 status.map_or_else(|| format!("Unknown({raw})"), |s| s.label().to_owned());
             debug!(app_id, status = status_label, "smtc session");
             let player = self.table.match_smtc(&app_id);
+            if player.is_none()
+                && gecko::is_install_hash(&app_id)
+                && !self.unknown_hashes.contains(&app_id)
+            {
+                new_hash = true;
+            }
             let mut title = String::new();
             if let (Some(player), Some(status)) = (player, status) {
                 match read_snapshot(&session, status) {
@@ -276,6 +311,17 @@ impl Worker {
         }
         let observation = observe(&matched, unreadable, now, &front);
         self.retry = unreadable > 0;
+        if new_hash {
+            let added = self.discover_browsers();
+            for fact in facts.iter().filter(|fact| fact.player.is_none()) {
+                if self.table.match_smtc(&fact.app_id).is_some() {
+                    let _ = self.tx.send(Msg::SessionChanged);
+                } else if gecko::is_install_hash(&fact.app_id) {
+                    self.unknown_hashes.insert(fact.app_id.clone());
+                }
+            }
+            debug!(added, "rescanned browsers for an unknown install hash");
+        }
         *self.facts.lock().unwrap_or_else(PoisonError::into_inner) = facts;
         if let Some(event) = self.dedup.admit(observation, now) {
             debug!(

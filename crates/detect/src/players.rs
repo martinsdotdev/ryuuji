@@ -54,21 +54,7 @@ impl PlayerTable {
         let document: Document = toml::from_str(text).map_err(TableError::Parse)?;
         let mut players = document.player;
         for (index, player) in players.iter().enumerate() {
-            for (field, patterns) in [
-                ("smtc_app_ids", &player.smtc_app_ids),
-                ("executables", &player.executables),
-            ] {
-                if let Some(pattern) = patterns
-                    .iter()
-                    .find(|pattern| pattern.chars().count() < MIN_PATTERN_LEN)
-                {
-                    return Err(TableError::ShortPattern {
-                        name: player.name.clone(),
-                        field,
-                        pattern: pattern.clone(),
-                    });
-                }
-            }
+            check_patterns(player)?;
             if players[..index]
                 .iter()
                 .any(|earlier| earlier.name == player.name)
@@ -78,13 +64,28 @@ impl PlayerTable {
                 });
             }
         }
-        for pattern in players
-            .iter_mut()
-            .flat_map(|p| p.smtc_app_ids.iter_mut().chain(&mut p.executables))
-        {
-            *pattern = pattern.to_lowercase();
-        }
+        players.iter_mut().for_each(lowercase_patterns);
         Ok(PlayerTable { players })
+    }
+
+    /// Appends players found at runtime after the table's own entries, so
+    /// a built-in entry still wins a match. A name already in the table is
+    /// skipped rather than rejected, because discovery lists every installed
+    /// browser and the table already names some of them. A short pattern
+    /// rejects the whole batch, like [`PlayerTable::parse`]. Returns how
+    /// many players were added.
+    pub(crate) fn extend(&mut self, players: Vec<Player>) -> Result<usize, TableError> {
+        players.iter().try_for_each(check_patterns)?;
+        let mut added = 0;
+        for mut player in players {
+            if self.players.iter().any(|known| known.name == player.name) {
+                continue;
+            }
+            lowercase_patterns(&mut player);
+            self.players.push(player);
+            added += 1;
+        }
+        Ok(added)
     }
 
     #[cfg(test)]
@@ -105,12 +106,92 @@ impl PlayerTable {
     }
 }
 
+fn check_patterns(player: &Player) -> Result<(), TableError> {
+    for (field, patterns) in [
+        ("smtc_app_ids", &player.smtc_app_ids),
+        ("executables", &player.executables),
+    ] {
+        if let Some(pattern) = patterns
+            .iter()
+            .find(|pattern| pattern.chars().count() < MIN_PATTERN_LEN)
+        {
+            return Err(TableError::ShortPattern {
+                name: player.name.clone(),
+                field,
+                pattern: pattern.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn lowercase_patterns(player: &mut Player) {
+    for pattern in player
+        .smtc_app_ids
+        .iter_mut()
+        .chain(&mut player.executables)
+    {
+        *pattern = pattern.to_lowercase();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn names(table: &PlayerTable) -> Vec<&str> {
-        table.players().iter().map(|p| p.name.as_str()).collect()
+    fn names(table: &PlayerTable) -> Vec<String> {
+        table.players().iter().map(|p| p.name.clone()).collect()
+    }
+
+    fn player(name: &str, app_id: &str) -> Player {
+        Player {
+            name: name.to_owned(),
+            smtc_app_ids: vec![app_id.to_owned()],
+            executables: vec![format!("{}.exe", name.to_lowercase())],
+        }
+    }
+
+    #[test]
+    fn extend_appends_after_the_builtins_and_lowercases() {
+        let mut table = PlayerTable::builtin();
+        let added = table
+            .extend(vec![player("LibreWolf", "83C1C0F3FA8524B1")])
+            .unwrap();
+        assert_eq!(added, 1);
+        assert_eq!(names(&table).last().map(String::as_str), Some("LibreWolf"));
+        assert_eq!(
+            table
+                .match_smtc("83C1C0F3FA8524B1;PrivateBrowsingAUMID")
+                .map(|p| p.name.as_str()),
+            Some("LibreWolf")
+        );
+    }
+
+    #[test]
+    fn extend_skips_a_name_the_table_already_has_so_the_builtin_wins() {
+        let mut table = PlayerTable::builtin();
+        let before = names(&table);
+        let added = table
+            .extend(vec![player("Brave", "0123456789ABCDEF")])
+            .unwrap();
+        assert_eq!(added, 0);
+        assert_eq!(names(&table), before);
+        assert_eq!(table.match_smtc("0123456789ABCDEF"), None);
+    }
+
+    #[test]
+    fn extend_rejects_a_short_pattern_and_adds_nothing() {
+        let mut table = PlayerTable::builtin();
+        let before = names(&table);
+        let result = table.extend(vec![
+            player("LibreWolf", "83C1C0F3FA8524B1"),
+            player("Odd", "ab"),
+        ]);
+        assert!(
+            matches!(result, Err(TableError::ShortPattern { ref name, .. }) if name == "Odd"),
+            "{result:?}"
+        );
+        assert_eq!(names(&table), before);
     }
 
     #[test]

@@ -475,10 +475,12 @@ version = "0.1.0"
 dependencies = [
  "ryuuji-core",
  "serde",
+ "tempfile",
  "thiserror",
  "toml",
  "tracing",
  "windows",
+ "windows-registry",
 ]
 
 [[package]]
@@ -973,6 +975,16 @@ source = "git+https://github.com/microsoft/windows-rs?rev=acaaa37be53e68f8c1be57
 dependencies = [
  "windows-core",
  "windows-time",
+]
+
+[[package]]
+name = "windows-registry"
+version = "0.100.0"
+source = "git+https://github.com/microsoft/windows-rs?rev=acaaa37be53e68f8c1be575d24dcbebce1e92b1a#acaaa37be53e68f8c1be575d24dcbebce1e92b1a"
+dependencies = [
+ "windows-link 0.100.0",
+ "windows-result",
+ "windows-strings",
 ]
 
 [[package]]
