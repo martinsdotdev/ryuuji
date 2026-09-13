@@ -13,8 +13,8 @@ use crate::reading::Certainty;
 use crate::token::{Delimiters, Tape};
 
 pub(crate) struct Parser<'a> {
-    tape: Tape,
-    elements: Elements,
+    tape: &'a mut Tape,
+    elements: &'a mut Elements,
     options: &'a Options,
     table: &'a KeywordTable,
     found_episode_keyword: bool,
@@ -26,8 +26,8 @@ pub(crate) struct Parser<'a> {
 
 impl<'a> Parser<'a> {
     pub(crate) fn new(
-        tape: Tape,
-        elements: Elements,
+        tape: &'a mut Tape,
+        elements: &'a mut Elements,
         options: &'a Options,
         table: &'a KeywordTable,
     ) -> Parser<'a> {
@@ -41,7 +41,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    pub(crate) fn run(mut self) -> Elements {
+    pub(crate) fn run(mut self) {
         self.search_keywords();
         self.search_isolated_numbers();
         if self.options.parse_episode_number {
@@ -55,7 +55,6 @@ impl<'a> Parser<'a> {
             self.search_episode_title();
         }
         self.validate_elements();
-        self.elements
     }
 
     /// Records a value read off the token at `index`.

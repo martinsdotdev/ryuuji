@@ -104,6 +104,9 @@ fn describe(kind: Option<ElementKind>, text: &str) -> String {
 pub struct Reading {
     elements: Elements,
     alternatives: Vec<Alternative>,
+    /// An episode was read off a prefix, so a second episode number may be
+    /// the same episode under another scheme.
+    provisional_episode: bool,
 }
 
 impl Reading {
@@ -111,11 +114,28 @@ impl Reading {
         Reading {
             elements,
             alternatives,
+            provisional_episode: false,
         }
     }
 
     pub fn elements(&self) -> &Elements {
         &self.elements
+    }
+
+    pub(crate) fn elements_mut(&mut self) -> &mut Elements {
+        &mut self.elements
+    }
+
+    pub(crate) fn push_alternative(&mut self, alternative: Alternative) {
+        self.alternatives.push(alternative);
+    }
+
+    pub(crate) fn provisional_episode(&self) -> bool {
+        self.provisional_episode
+    }
+
+    pub(crate) fn set_provisional_episode(&mut self) {
+        self.provisional_episode = true;
     }
 
     pub fn alternatives(&self) -> &[Alternative] {
