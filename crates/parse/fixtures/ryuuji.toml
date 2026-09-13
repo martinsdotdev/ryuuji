@@ -650,3 +650,15 @@ video_resolution = "1080p"
 release_group = "字幕組"
 anime_title = "Made in Abyss"
 episode_number = "05"
+
+[[case]]
+name = "a bracketed number after the episode is the alternative numbering"
+input = "[Nyaa] Long Running Show - 02 (100) [720p].mkv"
+
+[case.elements]
+file_extension = "mkv"
+video_resolution = "720p"
+release_group = "Nyaa"
+anime_title = "Long Running Show"
+episode_number = "02"
+episode_number_alt = "100"
