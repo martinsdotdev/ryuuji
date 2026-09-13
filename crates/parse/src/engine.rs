@@ -33,12 +33,13 @@ pub enum RuleName {
     EpisodePrefix,
     VolumePrefix,
     Checksum,
+    Resolution,
     /// The passes not yet lifted into rules of their own.
     Legacy,
 }
 
 impl RuleName {
-    pub const ALL: [RuleName; 8] = [
+    pub const ALL: [RuleName; 9] = [
         RuleName::Prelude,
         RuleName::Preidentified,
         RuleName::Terms,
@@ -46,6 +47,7 @@ impl RuleName {
         RuleName::EpisodePrefix,
         RuleName::VolumePrefix,
         RuleName::Checksum,
+        RuleName::Resolution,
         RuleName::Legacy,
     ];
 
@@ -58,6 +60,7 @@ impl RuleName {
             RuleName::EpisodePrefix => "episode_prefix",
             RuleName::VolumePrefix => "volume_prefix",
             RuleName::Checksum => "checksum",
+            RuleName::Resolution => "resolution",
             RuleName::Legacy => "legacy",
         }
     }
