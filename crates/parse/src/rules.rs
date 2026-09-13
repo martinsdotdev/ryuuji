@@ -4,16 +4,37 @@
 //! inside another rule changes. The order is the engine's precedence, so
 //! moving a row is how a rule's priority changes, and the diff says so.
 
+mod episode_prefix;
 mod legacy;
 mod preidentified;
 mod season_word;
 mod terms;
 
-use crate::engine::Step;
+use crate::engine::{Step, Verdict};
+use crate::numbering::{self, Extent};
+
+/// Reads the number at `at` through the word shapes, or takes it whole.
+/// Every piece is taken as the bytes it came from, and the bytes the shape
+/// used up are spent so no stray letter is left for a title.
+pub(super) fn take_number(verdict: Verdict, at: usize, word: &str, extent: Extent) -> Verdict {
+    let Some(numbering) = numbering::read(word, extent) else {
+        return verdict.take(extent.number(), at);
+    };
+    let mut verdict = verdict;
+    for piece in numbering.pieces {
+        verdict = if piece.held {
+            verdict.hold_part(piece.kind, at, piece.part.at, piece.part.text)
+        } else {
+            verdict.take_part(piece.kind, at, piece.part.at, piece.part.text)
+        };
+    }
+    verdict.spend_part(extent.number(), at, numbering.used)
+}
 
 pub(crate) const RULES: &[Step] = &[
     Step::Tape(preidentified::RULE),
     Step::Tape(terms::RULE),
     Step::Tape(season_word::RULE),
+    Step::Tape(episode_prefix::RULE),
     legacy::STEP,
 ];

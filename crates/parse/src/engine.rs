@@ -30,16 +30,18 @@ pub enum RuleName {
     Preidentified,
     Terms,
     SeasonWord,
+    EpisodePrefix,
     /// The passes not yet lifted into rules of their own.
     Legacy,
 }
 
 impl RuleName {
-    pub const ALL: [RuleName; 5] = [
+    pub const ALL: [RuleName; 6] = [
         RuleName::Prelude,
         RuleName::Preidentified,
         RuleName::Terms,
         RuleName::SeasonWord,
+        RuleName::EpisodePrefix,
         RuleName::Legacy,
     ];
 
@@ -49,6 +51,7 @@ impl RuleName {
             RuleName::Preidentified => "preidentified",
             RuleName::Terms => "terms",
             RuleName::SeasonWord => "season_word",
+            RuleName::EpisodePrefix => "episode_prefix",
             RuleName::Legacy => "legacy",
         }
     }
@@ -121,10 +124,11 @@ enum Op {
         delimiters: Delimiters,
     },
     /// A taking without a fact: the `Ep.` before a number, the dash that
-    /// set one off.
+    /// set one off, the letters of `S01E06` around its digits.
     Spend {
         kind: ElementKind,
         at: usize,
+        part: Option<Range<usize>>,
     },
     Retract {
         kind: ElementKind,
@@ -240,7 +244,26 @@ impl Verdict {
 
     /// Takes a token without reading a value.
     pub(crate) fn spend(mut self, kind: ElementKind, at: usize) -> Verdict {
-        self.ops.push(Op::Spend { kind, at });
+        self.ops.push(Op::Spend {
+            kind,
+            at,
+            part: None,
+        });
+        self
+    }
+
+    /// Takes part of a token without reading a value.
+    pub(crate) fn spend_part(
+        mut self,
+        kind: ElementKind,
+        at: usize,
+        part: Range<usize>,
+    ) -> Verdict {
+        self.ops.push(Op::Spend {
+            kind,
+            at,
+            part: Some(part),
+        });
         self
     }
 
@@ -338,9 +361,6 @@ fn apply(
     if refused {
         return;
     }
-    if verdict.provisional {
-        reading.set_provisional_episode();
-    }
     for op in verdict.ops {
         match op {
             Op::Take {
@@ -393,7 +413,10 @@ fn apply(
                     certainty,
                 });
             }
-            Op::Spend { kind, at } => tape.take(at, name, kind, false),
+            Op::Spend { kind, at, part } => {
+                let part = part.unwrap_or(0..tape.tokens[at].text.len());
+                tape.tokens[at].take(name, kind, part, false);
+            }
             Op::Retract { kind, value } => {
                 if let Some(fact) = reading
                     .elements()
@@ -436,6 +459,11 @@ fn apply(
                 });
             }
         }
+    }
+    // Only a later verdict's episode settles against this one's, so a
+    // batch read off one prefix keeps both ends.
+    if verdict.provisional {
+        reading.set_provisional_episode();
     }
 }
 

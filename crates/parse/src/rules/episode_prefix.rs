@@ -51,7 +51,11 @@ fn read(tape: &Tape, _reading: &Reading) -> Verdict {
         );
         read_one = true;
     }
-    if read_one { verdict.provisional() } else { verdict }
+    if read_one {
+        verdict.provisional()
+    } else {
+        verdict
+    }
 }
 
 #[cfg(test)]
@@ -86,7 +90,10 @@ mod tests {
     #[test]
     fn a_second_number_settles_as_another_scheme() {
         let reading = crate::parse("Show Ep. 08 - 05v2.mkv", &crate::Options::default());
-        assert_eq!(reading.elements().get(ElementKind::EpisodeNumber), Some("05"));
+        assert_eq!(
+            reading.elements().get(ElementKind::EpisodeNumber),
+            Some("05")
+        );
         assert_eq!(
             reading.elements().get(ElementKind::EpisodeNumberAlt),
             Some("08")
