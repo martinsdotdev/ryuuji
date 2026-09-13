@@ -1,9 +1,10 @@
-use crate::element::ElementKind;
+use crate::element::{ElementKind, Span};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TokenCategory {
     Unknown,
-    Bracket,
+    Open,
+    Close,
     Delimiter,
     Identifier,
     Invalid,
@@ -13,9 +14,18 @@ pub(crate) enum TokenCategory {
 pub(crate) struct Token {
     pub(crate) category: TokenCategory,
     pub(crate) content: String,
+    /// Where the token sits in the string the caller passed to
+    /// [`crate::parse`].
+    pub(crate) span: Span,
     pub(crate) enclosed: bool,
     /// Set only for pre-identified tokens.
     pub(crate) kind: Option<ElementKind>,
+}
+
+impl Token {
+    pub(crate) fn is_bracket(&self) -> bool {
+        matches!(self.category, TokenCategory::Open | TokenCategory::Close)
+    }
 }
 
 pub(crate) fn find_next(

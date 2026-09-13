@@ -1,7 +1,7 @@
 use super::Parser;
 use crate::element::ElementKind;
 use crate::string;
-use crate::token::{self, TokenCategory};
+use crate::token::{self, Token, TokenCategory};
 
 impl Parser<'_> {
     pub(super) fn search_anime_title(&mut self) {
@@ -23,7 +23,7 @@ impl Parser<'_> {
         let mut end = (begin..len)
             .find(|&index| {
                 self.tokens[index].category == TokenCategory::Identifier
-                    || (enclosed && self.tokens[index].category == TokenCategory::Bracket)
+                    || (enclosed && self.tokens[index].is_bracket())
             })
             .unwrap_or(len);
         if enclosed {
@@ -34,7 +34,7 @@ impl Parser<'_> {
         let mut last_bracket = end;
         let mut bracket_open = false;
         for index in begin..end {
-            if self.tokens[index].category == TokenCategory::Bracket {
+            if self.tokens[index].is_bracket() {
                 last_bracket = index;
                 bracket_open = !bracket_open;
             }
@@ -47,12 +47,10 @@ impl Parser<'_> {
         // so a title like "Anime (TV)" stays intact.
         let mut last = token::find_prev(&self.tokens, end, token::is_not_delimiter);
         while let Some(index) = last
-            && self.tokens[index].category == TokenCategory::Bracket
+            && self.tokens[index].is_bracket()
             && !self.tokens[index].content.starts_with(')')
         {
-            let Some(opener) = token::find_prev(&self.tokens, index, |token| {
-                token.category == TokenCategory::Bracket
-            }) else {
+            let Some(opener) = token::find_prev(&self.tokens, index, Token::is_bracket) else {
                 break;
             };
             end = opener;
@@ -92,8 +90,7 @@ impl Parser<'_> {
             if skipped_a_group && string::is_mostly_latin(&self.tokens[begin].content) {
                 return Some(begin);
             }
-            let bracket = (begin..len)
-                .find(|&index| self.tokens[index].category == TokenCategory::Bracket)?;
+            let bracket = (begin..len).find(|&index| self.tokens[index].is_bracket())?;
             begin = unknown_from(bracket)?;
             skipped_a_group = true;
         }

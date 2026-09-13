@@ -2,6 +2,21 @@ use std::ops::RangeInclusive;
 
 use crate::string::leading_number;
 
+/// A byte range into the string the caller passed to [`crate::parse`]. The
+/// parser never rewrites that string, so a span always slices it, and a shell
+/// can point at what a rule read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Span {
+    pub start: usize,
+    pub end: usize,
+}
+
+impl Span {
+    pub fn slice<'a>(&self, input: &'a str) -> &'a str {
+        &input[self.start..self.end]
+    }
+}
+
 /// A category of information extracted from a filename.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ElementKind {

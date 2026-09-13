@@ -44,7 +44,9 @@ pub(crate) fn build_element(tokens: &[Token], keep_delimiters: bool) -> String {
     let mut element = String::new();
     for token in tokens {
         match token.category {
-            TokenCategory::Unknown | TokenCategory::Bracket => element.push_str(&token.content),
+            TokenCategory::Unknown | TokenCategory::Open | TokenCategory::Close => {
+                element.push_str(&token.content)
+            }
             TokenCategory::Delimiter => {
                 if keep_delimiters {
                     element.push_str(&token.content);
@@ -73,6 +75,7 @@ mod tests {
         Token {
             category,
             content: content.to_owned(),
+            span: crate::element::Span { start: 0, end: 0 },
             enclosed: false,
             kind: None,
         }
@@ -100,9 +103,9 @@ mod tests {
     fn build_element_keeps_bracket_content() {
         let tokens = [
             token(TokenCategory::Unknown, "Fate"),
-            token(TokenCategory::Bracket, "("),
+            token(TokenCategory::Open, "("),
             token(TokenCategory::Unknown, "Zero"),
-            token(TokenCategory::Bracket, ")"),
+            token(TokenCategory::Close, ")"),
         ];
         assert_eq!(build_element(&tokens, false), "Fate(Zero)");
     }

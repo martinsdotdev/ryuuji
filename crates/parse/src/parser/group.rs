@@ -9,9 +9,9 @@ impl Parser<'_> {
         }
         let Some((begin, end)) = self.unknown_spans(true).find(|&(begin, end)| {
             end < self.tokens.len()
-                && self.tokens[end].category == TokenCategory::Bracket
+                && self.tokens[end].is_bracket()
                 && token::find_prev(&self.tokens, begin, token::is_not_delimiter)
-                    .is_none_or(|prev| self.tokens[prev].category == TokenCategory::Bracket)
+                    .is_none_or(|prev| self.tokens[prev].is_bracket())
         }) else {
             self.search_trailing_release_group();
             return;
@@ -38,7 +38,7 @@ impl Parser<'_> {
             return;
         }
         let after_bracket = token::find_prev(&self.tokens, last, token::is_not_delimiter)
-            .is_some_and(|prev| self.tokens[prev].category == TokenCategory::Bracket);
+            .is_some_and(|prev| self.tokens[prev].is_bracket());
         if !after_bracket {
             return;
         }

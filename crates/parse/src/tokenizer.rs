@@ -1,4 +1,4 @@
-use crate::element::ElementKind;
+use crate::element::{ElementKind, Span};
 use crate::keyword::KeywordTable;
 use crate::options::Options;
 use crate::string;
@@ -21,8 +21,14 @@ fn matching_closer(open: char) -> Option<char> {
         .map(|(_, close)| *close)
 }
 
+/// Splits `input` into tokens whose spans index `input` itself.
 pub(crate) fn tokenize(input: &str, options: &Options, table: &KeywordTable) -> Vec<Token> {
     let chars: Vec<char> = input.chars().collect();
+    let bytes: Vec<usize> = input
+        .char_indices()
+        .map(|(offset, _)| offset)
+        .chain(std::iter::once(input.len()))
+        .collect();
     let entries: Vec<(Vec<char>, ElementKind)> = table
         .preidentified()
         .iter()
@@ -43,6 +49,7 @@ pub(crate) fn tokenize(input: &str, options: &Options, table: &KeywordTable) -> 
         if end > start {
             tokenize_group(
                 &chars[start..end],
+                &bytes[start..=end],
                 expected_closer.is_some(),
                 options,
                 &entries,
@@ -57,8 +64,15 @@ pub(crate) fn tokenize(input: &str, options: &Options, table: &KeywordTable) -> 
             continue;
         }
         tokens.push(Token {
-            category: TokenCategory::Bracket,
+            category: match expected_closer {
+                None => TokenCategory::Open,
+                Some(_) => TokenCategory::Close,
+            },
             content: chars[position].to_string(),
+            span: Span {
+                start: bytes[position],
+                end: bytes[position + 1],
+            },
             enclosed: true,
             kind: None,
         });
@@ -72,8 +86,12 @@ pub(crate) fn tokenize(input: &str, options: &Options, table: &KeywordTable) -> 
     tokens
 }
 
+/// `bytes` holds the byte offset of every char in `chars` plus the offset
+/// just past the last one, so `bytes[a]..bytes[b]` is the span of
+/// `chars[a..b]`.
 fn tokenize_group(
     chars: &[char],
+    bytes: &[usize],
     enclosed: bool,
     options: &Options,
     entries: &[(Vec<char>, ElementKind)],
@@ -102,22 +120,44 @@ fn tokenize_group(
     let mut cursor = 0;
     for &(start, end, kind) in &claims {
         if start > cursor {
-            split_by_delimiters(&chars[cursor..start], enclosed, options, tokens);
+            split_by_delimiters(
+                &chars[cursor..start],
+                &bytes[cursor..=start],
+                enclosed,
+                options,
+                tokens,
+            );
         }
         tokens.push(Token {
             category: TokenCategory::Identifier,
             content: chars[start..end].iter().collect(),
+            span: Span {
+                start: bytes[start],
+                end: bytes[end],
+            },
             enclosed,
             kind: Some(kind),
         });
         cursor = end;
     }
     if cursor < chars.len() {
-        split_by_delimiters(&chars[cursor..], enclosed, options, tokens);
+        split_by_delimiters(
+            &chars[cursor..],
+            &bytes[cursor..],
+            enclosed,
+            options,
+            tokens,
+        );
     }
 }
 
-fn split_by_delimiters(chars: &[char], enclosed: bool, options: &Options, tokens: &mut Vec<Token>) {
+fn split_by_delimiters(
+    chars: &[char],
+    bytes: &[usize],
+    enclosed: bool,
+    options: &Options,
+    tokens: &mut Vec<Token>,
+) {
     let mut delimiters: Vec<char> = Vec::new();
     for &c in chars {
         if !c.is_ascii_alphanumeric()
@@ -128,10 +168,14 @@ fn split_by_delimiters(chars: &[char], enclosed: bool, options: &Options, tokens
             delimiters.push(c);
         }
     }
-    let push = |tokens: &mut Vec<Token>, category, content: String| {
+    let push = |tokens: &mut Vec<Token>, category, from: usize, to: usize| {
         tokens.push(Token {
             category,
-            content,
+            content: chars[from..to].iter().collect(),
+            span: Span {
+                start: bytes[from],
+                end: bytes[to],
+            },
             enclosed,
             kind: None,
         });
@@ -140,22 +184,14 @@ fn split_by_delimiters(chars: &[char], enclosed: bool, options: &Options, tokens
     for (index, &c) in chars.iter().enumerate() {
         if delimiters.contains(&c) {
             if index > start {
-                push(
-                    tokens,
-                    TokenCategory::Unknown,
-                    chars[start..index].iter().collect(),
-                );
+                push(tokens, TokenCategory::Unknown, start, index);
             }
-            push(tokens, TokenCategory::Delimiter, c.to_string());
+            push(tokens, TokenCategory::Delimiter, index, index + 1);
             start = index + 1;
         }
     }
     if start < chars.len() {
-        push(
-            tokens,
-            TokenCategory::Unknown,
-            chars[start..].iter().collect(),
-        );
+        push(tokens, TokenCategory::Unknown, start, chars.len());
     }
 }
 
@@ -172,9 +208,12 @@ fn validate_delimiters(tokens: &mut Vec<Token>) {
     fn first_char(tokens: &[Token], index: usize) -> char {
         tokens[index].content.chars().next().unwrap_or(' ')
     }
+    /// `to` always sits before `from` with nothing live between them, so
+    /// the merged token is contiguous in the input.
     fn append_to(tokens: &mut [Token], from: usize, to: usize) {
         let content = std::mem::take(&mut tokens[from].content);
         tokens[to].content.push_str(&content);
+        tokens[to].span.end = tokens[from].span.end;
         tokens[from].category = TokenCategory::Invalid;
     }
 
@@ -265,9 +304,9 @@ mod tests {
         assert_eq!(
             summary(&tokens),
             [
-                (TokenCategory::Bracket, "["),
+                (TokenCategory::Open, "["),
                 (TokenCategory::Unknown, "Foo"),
-                (TokenCategory::Bracket, "]"),
+                (TokenCategory::Close, "]"),
                 (TokenCategory::Delimiter, " "),
                 (TokenCategory::Unknown, "Bar"),
             ]
@@ -279,13 +318,34 @@ mod tests {
     }
 
     #[test]
+    fn spans_index_the_input_in_bytes() {
+        let input = "[Fóo]_Bar";
+        let spans: Vec<&str> = tokens(input)
+            .iter()
+            .map(|token| token.span.slice(input))
+            .collect();
+        assert_eq!(spans, ["[", "Fóo", "]", "_", "Bar"]);
+    }
+
+    #[test]
+    fn a_merged_token_keeps_one_contiguous_span() {
+        let input = "Foo H.265 Bar";
+        let tokens = tokens(input);
+        let merged = tokens
+            .iter()
+            .find(|token| token.content == "H.265")
+            .unwrap();
+        assert_eq!(merged.span.slice(input), "H.265");
+    }
+
+    #[test]
     fn a_doubled_opener_is_dropped() {
         assert_eq!(
             summary(&tokens("[[Foo] Bar")),
             [
-                (TokenCategory::Bracket, "["),
+                (TokenCategory::Open, "["),
                 (TokenCategory::Unknown, "Foo"),
-                (TokenCategory::Bracket, "]"),
+                (TokenCategory::Close, "]"),
                 (TokenCategory::Delimiter, " "),
                 (TokenCategory::Unknown, "Bar"),
             ]
@@ -298,11 +358,11 @@ mod tests {
         assert_eq!(
             summary(&tokens),
             [
-                (TokenCategory::Bracket, "["),
+                (TokenCategory::Open, "["),
                 (TokenCategory::Unknown, "Alpha"),
                 (TokenCategory::Delimiter, ","),
                 (TokenCategory::Unknown, "Beta"),
-                (TokenCategory::Bracket, "]"),
+                (TokenCategory::Close, "]"),
                 (TokenCategory::Delimiter, "_"),
                 (TokenCategory::Unknown, "Gamma"),
                 (TokenCategory::Delimiter, " "),
