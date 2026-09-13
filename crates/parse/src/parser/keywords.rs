@@ -1,6 +1,6 @@
 use super::Parser;
-use super::numbers::Extent;
 use crate::element::ElementKind;
+use crate::numbering::Extent;
 use crate::string;
 use crate::token;
 
