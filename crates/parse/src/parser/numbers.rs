@@ -1,7 +1,7 @@
 use super::Parser;
 use crate::element::ElementKind;
 use crate::string;
-use crate::token::{self, TokenCategory};
+use crate::token;
 
 const ANIME_YEAR_MIN: u32 = 1900;
 const ANIME_YEAR_MAX: u32 = 2050;
@@ -17,7 +17,7 @@ pub(in crate::parser) enum Extent {
 }
 
 impl Extent {
-    fn prefix(self) -> ElementKind {
+    pub(super) fn prefix(self) -> ElementKind {
         match self {
             Extent::Episode => ElementKind::EpisodePrefix,
             Extent::Volume => ElementKind::VolumePrefix,
@@ -57,43 +57,40 @@ pub(super) fn leading_value(text: &str) -> u32 {
 
 impl Parser<'_> {
     pub(in crate::parser) fn search_isolated_numbers(&mut self) {
-        for index in 0..self.tokens.len() {
-            if self.tokens[index].category != TokenCategory::Unknown
-                || !string::is_numeric(&self.tokens[index].content)
-                || !self.is_isolated(index)
+        for index in 0..self.tape.len() {
+            if !self.tape.tokens[index].is_free()
+                || !self.tape.tokens[index].numeric
+                || !self.tape.isolated(index)
             {
                 continue;
             }
-            let Some(number) = string::leading_number(&self.tokens[index].content) else {
+            let Some(number) = string::leading_number(&self.tape.tokens[index].text) else {
                 continue;
             };
             if (ANIME_YEAR_MIN..=ANIME_YEAR_MAX).contains(&number)
                 && !self.elements.contains(ElementKind::AnimeYear)
             {
-                let content = self.tokens[index].content.clone();
-                self.elements.insert(ElementKind::AnimeYear, content);
-                self.tokens[index].category = TokenCategory::Identifier;
+                let text = self.tape.tokens[index].text.clone();
+                self.elements.insert(ElementKind::AnimeYear, text);
+                self.retire(index, ElementKind::AnimeYear);
                 continue;
             }
             if matches!(number, 480 | 720 | 1080)
                 && !self.elements.contains(ElementKind::VideoResolution)
             {
-                let content = self.tokens[index].content.clone();
-                self.elements.insert(ElementKind::VideoResolution, content);
-                self.tokens[index].category = TokenCategory::Identifier;
+                let text = self.tape.tokens[index].text.clone();
+                self.elements.insert(ElementKind::VideoResolution, text);
+                self.retire(index, ElementKind::VideoResolution);
             }
         }
     }
 
     pub(in crate::parser) fn search_episode_number(&mut self) {
-        let candidates: Vec<usize> = (0..self.tokens.len())
-            .filter(|&index| {
-                self.tokens[index].category == TokenCategory::Unknown
-                    && self.tokens[index]
-                        .content
-                        .chars()
-                        .any(|c| c.is_ascii_digit())
-            })
+        let candidates: Vec<usize> = self
+            .tape
+            .free()
+            .filter(|(_, token)| token.text.chars().any(|c| c.is_ascii_digit()))
+            .map(|(index, _)| index)
             .collect();
         if candidates.is_empty() {
             return;
@@ -110,7 +107,7 @@ impl Parser<'_> {
 
         let numeric: Vec<usize> = candidates
             .into_iter()
-            .filter(|&index| string::is_numeric(&self.tokens[index].content))
+            .filter(|&index| self.tape.tokens[index].numeric)
             .collect();
         if numeric.is_empty() {
             return;
@@ -128,24 +125,14 @@ impl Parser<'_> {
         self.search_last_number(&numeric);
     }
 
-    pub(super) fn is_isolated(&self, index: usize) -> bool {
-        let is_bracket =
-            |index: Option<usize>| index.is_some_and(|index| self.tokens[index].is_bracket());
-        is_bracket(token::find_prev(
-            &self.tokens,
-            index,
-            token::is_not_delimiter,
-        )) && is_bracket(token::find_next(
-            &self.tokens,
-            index,
-            token::is_not_delimiter,
-        ))
-    }
-
     fn search_episode_patterns(&mut self, candidates: &[usize]) -> bool {
-        for &index in candidates {
-            let starts_with_digit = self.tokens[index]
-                .content
+        // A pattern may split its token in two, shifting every index after
+        // it, so the candidates are walked by value and re-read.
+        let mut offset = 0;
+        for &candidate in candidates {
+            let index = candidate + offset;
+            let starts_with_digit = self.tape.tokens[index]
+                .text
                 .chars()
                 .next()
                 .is_some_and(|c| c.is_ascii_digit());
@@ -158,94 +145,96 @@ impl Parser<'_> {
             } else if self.number_comes_before_another_number(index) {
                 return true;
             }
-            let word = self.tokens[index].content.clone();
+            let word = self.tape.tokens[index].text.clone();
+            let before = self.tape.len();
             if self.match_patterns(Extent::Episode, &word, index) {
                 return true;
             }
+            offset += self.tape.len() - before;
         }
         false
     }
 
     fn number_comes_after_prefix(&mut self, index: usize) -> Option<Extent> {
-        let content = self.tokens[index].content.clone();
-        let digit_pos = content.find(|c: char| c.is_ascii_digit())?;
-        let prefix = content[..digit_pos].to_uppercase();
+        let text = self.tape.tokens[index].text.clone();
+        let digit_pos = text.find(|c: char| c.is_ascii_digit())?;
+        let prefix = text[..digit_pos].to_uppercase();
         let extent = [Extent::Episode, Extent::Volume]
             .into_iter()
             .find(|extent| self.table.find(extent.prefix(), &prefix).is_some())?;
-        self.claim_number(extent, &content[digit_pos..], index);
+        self.claim_number(extent, &text[digit_pos..], index);
         Some(extent)
     }
 
     fn number_comes_before_another_number(&mut self, index: usize) -> bool {
-        let Some(separator) = token::find_next(&self.tokens, index, token::is_not_delimiter) else {
+        let Some(separator) = self.tape.next(index, token::is_not_delimiter) else {
             return false;
         };
-        let content = &self.tokens[separator].content;
-        let includes_other = if content == "&" {
+        let text = &self.tape.tokens[separator].text;
+        let includes_other = if text == "&" {
             true
-        } else if content.eq_ignore_ascii_case("of") {
+        } else if text.eq_ignore_ascii_case("of") {
             false
         } else {
             return false;
         };
-        let Some(other) = token::find_next(&self.tokens, separator, token::is_not_delimiter) else {
+        let Some(other) = self.tape.next(separator, token::is_not_delimiter) else {
             return false;
         };
-        if !string::is_numeric(&self.tokens[other].content) {
+        if !self.tape.tokens[other].numeric {
             return false;
         }
-        let number = self.tokens[index].content.clone();
+        let number = self.tape.tokens[index].text.clone();
         self.set_number(Extent::Episode, &number, index, false);
         if includes_other {
-            let number = self.tokens[other].content.clone();
+            let number = self.tape.tokens[other].text.clone();
             self.set_number(Extent::Episode, &number, other, false);
         }
-        self.tokens[separator].category = TokenCategory::Identifier;
-        self.tokens[other].category = TokenCategory::Identifier;
+        self.retire(separator, ElementKind::EpisodeNumber);
+        self.retire(other, ElementKind::EpisodeNumber);
         true
     }
+
     /// `02 (100)`: a plain number followed by an isolated one in brackets is
     /// one episode under two numbering schemes. The smaller is the episode
     /// and the larger the alternative, whichever comes first.
     fn search_equivalent_numbers(&mut self, numeric: &[usize]) -> bool {
         let within_bound =
-            |index: usize| leading_value(&self.tokens[index].content) <= EPISODE_NUMBER_MAX;
+            |index: usize| leading_value(&self.tape.tokens[index].text) <= EPISODE_NUMBER_MAX;
         for &index in numeric {
-            if self.is_isolated(index) || !within_bound(index) {
+            if self.tape.isolated(index) || !within_bound(index) {
                 continue;
             }
-            let Some(bracket) = token::find_next(&self.tokens, index, token::is_not_delimiter)
-            else {
+            let Some(bracket) = self.tape.next(index, token::is_not_delimiter) else {
                 continue;
             };
-            if !self.tokens[bracket].is_bracket() {
+            if !self.tape.tokens[bracket].is_bracket() {
                 continue;
             }
-            let Some(other) = token::find_next(&self.tokens, bracket, |token| {
+            let Some(other) = self.tape.next(bracket, |token| {
                 token.enclosed && token::is_not_delimiter(token)
             }) else {
                 continue;
             };
-            if self.tokens[other].category != TokenCategory::Unknown
-                || !string::is_numeric(&self.tokens[other].content)
-                || !self.is_isolated(other)
+            if !self.tape.tokens[other].is_free()
+                || !self.tape.tokens[other].numeric
+                || !self.tape.isolated(other)
                 || !within_bound(other)
             {
                 continue;
             }
-            let (episode, alt) = if leading_value(&self.tokens[other].content)
-                < leading_value(&self.tokens[index].content)
+            let (episode, alt) = if leading_value(&self.tape.tokens[other].text)
+                < leading_value(&self.tape.tokens[index].text)
             {
                 (other, index)
             } else {
                 (index, other)
             };
-            let number = self.tokens[episode].content.clone();
+            let number = self.tape.tokens[episode].text.clone();
             self.set_number(Extent::Episode, &number, episode, false);
-            let number = self.tokens[alt].content.clone();
+            let number = self.tape.tokens[alt].text.clone();
             self.elements.insert(ElementKind::EpisodeNumberAlt, number);
-            self.tokens[alt].category = TokenCategory::Identifier;
+            self.retire(alt, ElementKind::EpisodeNumberAlt);
             return true;
         }
         false
@@ -257,28 +246,24 @@ impl Parser<'_> {
         for &index in numeric {
             let dash = |neighbour: Option<usize>| {
                 neighbour.filter(|&neighbour| {
-                    self.tokens[neighbour].category == TokenCategory::Unknown
-                        && string::is_dash(&self.tokens[neighbour].content)
+                    self.tape.tokens[neighbour].is_free()
+                        && string::is_dash(&self.tape.tokens[neighbour].text)
                 })
             };
-            let prev = token::find_prev(&self.tokens, index, token::is_not_delimiter);
+            let prev = self.tape.prev(index, token::is_not_delimiter);
             let separator = match dash(prev) {
                 Some(prev) => prev,
                 None if prev.is_none() => {
-                    let Some(next) = dash(token::find_next(
-                        &self.tokens,
-                        index,
-                        token::is_not_delimiter,
-                    )) else {
+                    let Some(next) = dash(self.tape.next(index, token::is_not_delimiter)) else {
                         continue;
                     };
                     next
                 }
                 None => continue,
             };
-            let number = self.tokens[index].content.clone();
+            let number = self.tape.tokens[index].text.clone();
             if self.set_number(Extent::Episode, &number, index, true) {
-                self.tokens[separator].category = TokenCategory::Identifier;
+                self.retire(separator, ElementKind::EpisodeNumber);
                 return true;
             }
         }
@@ -287,10 +272,10 @@ impl Parser<'_> {
 
     fn search_isolated_episode_numbers(&mut self, numeric: &[usize]) -> bool {
         for &index in numeric {
-            if !self.tokens[index].enclosed || !self.is_isolated(index) {
+            if !self.tape.tokens[index].enclosed || !self.tape.isolated(index) {
                 continue;
             }
-            let number = self.tokens[index].content.clone();
+            let number = self.tape.tokens[index].text.clone();
             if self.set_number(Extent::Episode, &number, index, true) {
                 return true;
             }
@@ -300,29 +285,29 @@ impl Parser<'_> {
 
     fn search_last_number(&mut self, numeric: &[usize]) -> bool {
         for &index in numeric.iter().rev() {
-            if index == 0 || self.tokens[index].enclosed {
+            if index == 0 || self.tape.tokens[index].enclosed {
                 continue;
             }
             // The episode comes after the title, so the first token outside
             // brackets is not it, unless it is the only one and a title
             // waits inside a bracket group (`[Group][Title] 02 [720p]`).
-            let first_outside = self.tokens[..index]
+            let first_outside = self.tape.tokens[..index]
                 .iter()
-                .all(|token| token.enclosed || token.category == TokenCategory::Delimiter);
-            let only_outside = !self.tokens[index + 1..]
+                .all(|token| token.enclosed || token.is_delimiter());
+            let only_outside = !self.tape.tokens[index + 1..]
                 .iter()
-                .any(|token| !token.enclosed && token.category == TokenCategory::Unknown);
+                .any(|token| !token.enclosed && token.is_free());
             if first_outside && !(only_outside && self.enclosed_title_begin().is_some()) {
                 continue;
             }
-            if let Some(prev) = token::find_prev(&self.tokens, index, token::is_not_delimiter)
-                && self.tokens[prev].category == TokenCategory::Unknown
-                && (self.tokens[prev].content.eq_ignore_ascii_case("movie")
-                    || self.tokens[prev].content.eq_ignore_ascii_case("part"))
+            if let Some(prev) = self.tape.prev(index, token::is_not_delimiter)
+                && self.tape.tokens[prev].is_free()
+                && (self.tape.tokens[prev].text.eq_ignore_ascii_case("movie")
+                    || self.tape.tokens[prev].text.eq_ignore_ascii_case("part"))
             {
                 continue;
             }
-            let number = self.tokens[index].content.clone();
+            let number = self.tape.tokens[index].text.clone();
             if self.set_number(Extent::Episode, &number, index, true) {
                 return true;
             }
@@ -340,7 +325,6 @@ impl Parser<'_> {
         if validate && leading_value(number) > extent.max_value() {
             return false;
         }
-        self.tokens[index].category = TokenCategory::Identifier;
         if extent == Extent::Episode && self.episode_token.is_none() {
             self.episode_token = Some(index);
         }
@@ -357,9 +341,11 @@ impl Parser<'_> {
                 self.elements
                     .retag_first(ElementKind::EpisodeNumber, ElementKind::EpisodeNumberAlt);
             } else {
+                self.retire(index, kind);
                 return false;
             }
         }
+        self.retire(index, kind);
         self.elements.insert(kind, number);
         true
     }

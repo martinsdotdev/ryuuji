@@ -1,5 +1,3 @@
-use crate::token::{Token, TokenCategory};
-
 pub(crate) fn is_numeric(text: &str) -> bool {
     !text.is_empty() && text.chars().all(|c| c.is_ascii_digit())
 }
@@ -40,75 +38,9 @@ pub(crate) fn trim_dashes_and_spaces(text: &str) -> &str {
     text.trim_matches(|c: char| c == ' ' || is_dash_char(c))
 }
 
-pub(crate) fn build_element(tokens: &[Token], keep_delimiters: bool) -> String {
-    let mut element = String::new();
-    for token in tokens {
-        match token.category {
-            TokenCategory::Unknown | TokenCategory::Open | TokenCategory::Close => {
-                element.push_str(&token.content)
-            }
-            TokenCategory::Delimiter => {
-                if keep_delimiters {
-                    element.push_str(&token.content);
-                } else if let Some(delimiter) = token.content.chars().next() {
-                    element.push(match delimiter {
-                        ',' | '&' => delimiter,
-                        _ => ' ',
-                    });
-                }
-            }
-            TokenCategory::Identifier | TokenCategory::Invalid => {}
-        }
-    }
-    if keep_delimiters {
-        element
-    } else {
-        trim_dashes_and_spaces(&element).to_owned()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn token(category: TokenCategory, content: &str) -> Token {
-        Token {
-            category,
-            content: content.to_owned(),
-            span: crate::element::Span { start: 0, end: 0 },
-            enclosed: false,
-            kind: None,
-        }
-    }
-
-    #[test]
-    fn build_element_maps_delimiters_and_trims_the_ends() {
-        let tokens = [
-            token(TokenCategory::Delimiter, " "),
-            token(TokenCategory::Unknown, "\u{2013}"),
-            token(TokenCategory::Delimiter, " "),
-            token(TokenCategory::Unknown, "Foo"),
-            token(TokenCategory::Delimiter, "&"),
-            token(TokenCategory::Unknown, "Bar"),
-            token(TokenCategory::Delimiter, "."),
-            token(TokenCategory::Unknown, "Baz"),
-            token(TokenCategory::Identifier, "720p"),
-            token(TokenCategory::Delimiter, " "),
-        ];
-        assert_eq!(build_element(&tokens, false), "Foo&Bar Baz");
-        assert_eq!(build_element(&tokens, true), " \u{2013} Foo&Bar.Baz ");
-    }
-
-    #[test]
-    fn build_element_keeps_bracket_content() {
-        let tokens = [
-            token(TokenCategory::Unknown, "Fate"),
-            token(TokenCategory::Open, "("),
-            token(TokenCategory::Unknown, "Zero"),
-            token(TokenCategory::Close, ")"),
-        ];
-        assert_eq!(build_element(&tokens, false), "Fate(Zero)");
-    }
 
     #[test]
     fn leading_number_reads_the_digit_run() {
