@@ -12,6 +12,7 @@ mod resolution;
 mod season_word;
 mod terms;
 mod volume_prefix;
+mod year;
 
 use crate::engine::{Step, Verdict};
 use crate::numbering::{self, Extent};
@@ -42,5 +43,6 @@ pub(crate) const RULES: &[Step] = &[
     Step::Tape(volume_prefix::RULE),
     Step::Tape(checksum::RULE),
     Step::Tape(resolution::RULE),
+    Step::Tape(year::RULE),
     legacy::STEP,
 ];

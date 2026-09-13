@@ -1,8 +1,6 @@
 use super::Parser;
 use crate::element::ElementKind;
-use crate::numbering::{
-    self, ANIME_YEAR_MAX, ANIME_YEAR_MIN, EPISODE_NUMBER_MAX, Extent, leading_value,
-};
+use crate::numbering::{self, EPISODE_NUMBER_MAX, Extent, leading_value};
 use crate::string;
 use crate::token;
 
@@ -18,14 +16,6 @@ impl Parser<'_> {
             let Some(number) = string::leading_number(&self.tape.tokens[index].text) else {
                 continue;
             };
-            if (ANIME_YEAR_MIN..=ANIME_YEAR_MAX).contains(&number)
-                && !self.elements.contains(ElementKind::AnimeYear)
-            {
-                let text = self.tape.tokens[index].text.clone();
-                self.record(ElementKind::AnimeYear, text, index);
-                self.retire(index, ElementKind::AnimeYear);
-                continue;
-            }
             if matches!(number, 480 | 720 | 1080)
                 && !self.elements.contains(ElementKind::VideoResolution)
             {
