@@ -116,6 +116,9 @@ impl Parser<'_> {
             return;
         }
 
+        if self.search_equivalent_numbers(&numeric) {
+            return;
+        }
         if self.search_separated_numbers(&numeric) {
             return;
         }
@@ -203,6 +206,52 @@ impl Parser<'_> {
         self.tokens[other].category = TokenCategory::Identifier;
         true
     }
+    /// `02 (100)`: a plain number followed by an isolated one in brackets is
+    /// one episode under two numbering schemes. The smaller is the episode
+    /// and the larger the alternative, whichever comes first.
+    fn search_equivalent_numbers(&mut self, numeric: &[usize]) -> bool {
+        let within_bound =
+            |index: usize| leading_value(&self.tokens[index].content) <= EPISODE_NUMBER_MAX;
+        for &index in numeric {
+            if self.is_isolated(index) || !within_bound(index) {
+                continue;
+            }
+            let Some(bracket) = token::find_next(&self.tokens, index, token::is_not_delimiter)
+            else {
+                continue;
+            };
+            if self.tokens[bracket].category != TokenCategory::Bracket {
+                continue;
+            }
+            let Some(other) = token::find_next(&self.tokens, bracket, |token| {
+                token.enclosed && token::is_not_delimiter(token)
+            }) else {
+                continue;
+            };
+            if self.tokens[other].category != TokenCategory::Unknown
+                || !string::is_numeric(&self.tokens[other].content)
+                || !self.is_isolated(other)
+                || !within_bound(other)
+            {
+                continue;
+            }
+            let (episode, alt) = if leading_value(&self.tokens[other].content)
+                < leading_value(&self.tokens[index].content)
+            {
+                (other, index)
+            } else {
+                (index, other)
+            };
+            let number = self.tokens[episode].content.clone();
+            self.set_number(Extent::Episode, &number, episode, false);
+            let number = self.tokens[alt].content.clone();
+            self.elements.insert(ElementKind::EpisodeNumberAlt, number);
+            self.tokens[alt].category = TokenCategory::Identifier;
+            return true;
+        }
+        false
+    }
+
     fn search_separated_numbers(&mut self, numeric: &[usize]) -> bool {
         for &index in numeric {
             let Some(prev) = token::find_prev(&self.tokens, index, token::is_not_delimiter) else {
