@@ -4,6 +4,8 @@
 //! (`Windows.Media.Control`); the table and the session logic are portable.
 
 #[cfg(windows)]
+mod city;
+#[cfg(windows)]
 mod foreground;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod players;
