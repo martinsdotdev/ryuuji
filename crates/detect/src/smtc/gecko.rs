@@ -17,8 +17,10 @@ use std::path::{Path, PathBuf};
 
 use windows_registry::{CURRENT_USER, Key, LOCAL_MACHINE};
 
-use crate::city::city_hash_64;
 use crate::players::Player;
+
+mod city;
+use city::city_hash_64;
 
 const BROWSERS: &str = r"SOFTWARE\Clients\StartMenuInternet";
 const MOZILLA: &str = r"SOFTWARE\Mozilla";
@@ -57,7 +59,8 @@ pub(crate) fn discover() -> Vec<Player> {
                 .ok()
                 .filter(|name| !name.is_empty())
                 .unwrap_or(key);
-            let id = taskbar_id(dir).unwrap_or_else(|| install_id(dir));
+            let canonical = canonical(dir);
+            let id = taskbar_id(dir, &canonical).unwrap_or_else(|| hash_of(&canonical));
             players.push(Player {
                 name,
                 smtc_app_ids: vec![id],
@@ -77,8 +80,8 @@ pub(crate) fn is_install_hash(app_id: &str) -> bool {
 
 /// The id Firefox computes for an install directory: CityHash64 of the
 /// canonical path's UTF-16 bytes, no trailing separator, uppercase hex.
-pub(crate) fn install_id(dir: &Path) -> String {
-    let bytes: Vec<u8> = canonical(dir)
+fn hash_of(canonical_dir: &str) -> String {
+    let bytes: Vec<u8> = canonical_dir
         .encode_utf16()
         .flat_map(u16::to_le_bytes)
         .collect();
@@ -99,8 +102,9 @@ fn canonical(dir: &Path) -> String {
 
 /// An id pinned in the registry for this install directory, checked
 /// before the hash because Firefox checks it first.
-fn taskbar_id(dir: &Path) -> Option<String> {
-    let names = [dir.to_string_lossy().into_owned(), canonical(dir)];
+fn taskbar_id(dir: &Path, canonical: &str) -> Option<String> {
+    let raw = dir.to_string_lossy();
+    let names = [raw.as_ref(), canonical];
     for hive in HIVES {
         let Ok(root) = hive.open(MOZILLA) else {
             continue;
@@ -141,6 +145,10 @@ fn executable(command: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn install_id(dir: &Path) -> String {
+        hash_of(&canonical(dir))
+    }
 
     #[test]
     fn librewolfs_install_directory_gives_its_observed_app_id() {

@@ -6,6 +6,7 @@ use std::time::{Duration, SystemTime};
 
 use ryuuji_core::{PlaybackEvent, PlaybackSource, PlaybackStatus};
 
+use crate::SessionFacts;
 use crate::players::Player;
 
 /// What a session holds, in the terms every strategy can express. The
@@ -38,6 +39,53 @@ pub(crate) struct Matched<'a> {
     pub snapshot: SessionSnapshot,
 }
 
+/// Everything one refresh saw. The front is read once per refresh, not
+/// once per session, so two sessions of one player agree about it.
+pub(crate) struct Reading<'a> {
+    pub front: Front,
+    pub sessions: Vec<Seen<'a>>,
+}
+
+/// One session, whether or not anything can be done with it. The tracking
+/// hangs off the row, so a strategy cannot watch a session without also
+/// listing it for Diagnostics.
+pub(crate) struct Seen<'a> {
+    pub app_id: String,
+    /// The platform's own word for the state.
+    pub status: String,
+    pub tracking: Tracking<'a>,
+}
+
+pub(crate) enum Tracking<'a> {
+    /// No table entry claimed this session's id.
+    Unknown,
+    /// The table claimed it, but the platform would not say what it holds
+    /// this refresh. Keeps the observation out of `Absent`.
+    Unreadable(&'a Player),
+    Watched(Matched<'a>),
+}
+
+impl Seen<'_> {
+    /// The Diagnostics row. The title and the player come off the tracking,
+    /// so an unmatched session cannot carry either.
+    pub(crate) fn facts(&self) -> SessionFacts {
+        let (title, player) = match &self.tracking {
+            Tracking::Unknown => (String::new(), None),
+            Tracking::Unreadable(player) => (String::new(), Some(player.name.clone())),
+            Tracking::Watched(matched) => (
+                matched.snapshot.title.clone(),
+                Some(matched.player.name.clone()),
+            ),
+        };
+        SessionFacts {
+            app_id: self.app_id.clone(),
+            title,
+            status: self.status.clone(),
+            player,
+        }
+    }
+}
+
 /// Prefer the Playing session, else the first.
 pub(crate) fn choose<'a, 'b>(matched: &'b [Matched<'a>]) -> Option<&'b Matched<'a>> {
     matched
@@ -60,6 +108,7 @@ pub(crate) enum Front {
 impl Front {
     /// Every packaged app's window belongs to ApplicationFrameHost, so that
     /// name says nothing about which app is in front.
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) fn from_reading(own: bool, exe: Option<String>) -> Front {
         if own {
             return Front::Own;
@@ -409,6 +458,43 @@ mod tests {
             ..snapshot(SessionState::Playing)
         };
         assert_eq!(position_of(from_the_future), Duration::from_secs(90));
+    }
+
+    fn seen<'a>(app_id: &str, tracking: Tracking<'a>) -> Seen<'a> {
+        Seen {
+            app_id: app_id.to_owned(),
+            status: "Playing".to_owned(),
+            tracking,
+        }
+    }
+
+    #[test]
+    fn the_row_carries_a_title_only_for_a_watched_session_and_a_player_for_any_matched_one() {
+        let mpv = player("mpv");
+        let unknown = seen("Spotify.exe", Tracking::Unknown).facts();
+        assert_eq!(
+            (unknown.title.as_str(), unknown.player.as_deref()),
+            ("", None)
+        );
+        let unreadable = seen("mpv.exe", Tracking::Unreadable(&mpv)).facts();
+        assert_eq!(
+            (unreadable.title.as_str(), unreadable.player.as_deref()),
+            ("", Some("mpv"))
+        );
+        let watched = seen(
+            "mpv.exe",
+            Tracking::Watched(Matched {
+                player: &mpv,
+                snapshot: snapshot(SessionState::Playing),
+            }),
+        )
+        .facts();
+        assert_eq!(
+            (watched.title.as_str(), watched.player.as_deref()),
+            ("Episode 3", Some("mpv"))
+        );
+        assert_eq!(watched.app_id, "mpv.exe");
+        assert_eq!(watched.status, "Playing");
     }
 
     #[test]
