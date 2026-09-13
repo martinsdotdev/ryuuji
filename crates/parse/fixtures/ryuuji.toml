@@ -762,3 +762,14 @@ source = "DVD"
 release_group = "Nyaa"
 anime_title = "Show"
 episode_number = "04.1"
+
+[[case]]
+name = "a doubled opening bracket does not become part of the group"
+input = "[[Nyaa] Show - 05 [720p].mkv"
+
+[case.elements]
+file_extension = "mkv"
+video_resolution = "720p"
+release_group = "Nyaa"
+anime_title = "Show"
+episode_number = "05"

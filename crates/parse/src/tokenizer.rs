@@ -50,6 +50,12 @@ pub(crate) fn tokenize(input: &str, options: &Options, table: &KeywordTable) -> 
             );
         }
         let Some(position) = bracket else { break };
+        // An opener doubled up (`[[Zero-Raws]`) opens an empty group; the
+        // stray first one is dropped so the real group keeps its name.
+        if expected_closer.is_none() && chars.get(position + 1) == Some(&chars[position]) {
+            start = position + 1;
+            continue;
+        }
         tokens.push(Token {
             category: TokenCategory::Bracket,
             content: chars[position].to_string(),
@@ -269,6 +275,20 @@ mod tests {
         assert_eq!(
             tokens.iter().map(|t| t.enclosed).collect::<Vec<_>>(),
             [true, true, true, false, false]
+        );
+    }
+
+    #[test]
+    fn a_doubled_opener_is_dropped() {
+        assert_eq!(
+            summary(&tokens("[[Foo] Bar")),
+            [
+                (TokenCategory::Bracket, "["),
+                (TokenCategory::Unknown, "Foo"),
+                (TokenCategory::Bracket, "]"),
+                (TokenCategory::Delimiter, " "),
+                (TokenCategory::Unknown, "Bar"),
+            ]
         );
     }
 
