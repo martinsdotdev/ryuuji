@@ -128,31 +128,47 @@ fn run_anitomy() -> (usize, usize, Vec<String>) {
         .expect("anitomy.json parses");
     let mut passed = 0;
     let mut failures = Vec::new();
-    for case in &cases {
+    for (index, case) in cases.iter().enumerate() {
         let expected = expected_map(&case.expected);
         let parsed = parsed_map(&parse(&case.file_name, &case.options()));
         if parsed == expected {
             passed += 1;
         } else {
-            let input = &case.file_name;
-            failures.push(format!(
-                "{input}
-  expected: {expected:?}
-  parsed:   {parsed:?}"
-            ));
+            failures.push(differences(index, &case.file_name, &expected, &parsed));
         }
     }
     (cases.len(), passed, failures)
 }
 
+/// The case's index and name, then one line per kind whose values differ,
+/// so a report of every failure stays readable.
+fn differences(
+    index: usize,
+    input: &str,
+    expected: &BTreeMap<String, Vec<String>>,
+    parsed: &BTreeMap<String, Vec<String>>,
+) -> String {
+    let mut lines = vec![format!("#{index} {input}")];
+    let kinds: std::collections::BTreeSet<&String> = expected.keys().chain(parsed.keys()).collect();
+    for kind in kinds {
+        let (want, got) = (expected.get(kind), parsed.get(kind));
+        if want != got {
+            lines.push(format!("    {kind}: expected {want:?} parsed {got:?}"));
+        }
+    }
+    lines.join("\n")
+}
+
 const ANITOMY_BASELINE: usize = 134;
 
+/// Every failing case, not a sample: `cargo test -p ryuuji-parse -- --ignored
+/// anitomy_report --nocapture`.
 #[test]
 #[ignore]
 fn anitomy_report() {
     let (total, passed, failures) = run_anitomy();
     eprintln!("anitomy conformance: {passed}/{total} passed");
-    for failure in failures.iter().take(20) {
+    for failure in &failures {
         eprintln!("{failure}");
     }
 }
