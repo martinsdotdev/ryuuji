@@ -23,6 +23,7 @@ mod isolated_resolution;
 mod legacy;
 mod preidentified;
 mod release_group;
+mod release_group_trailing;
 mod resolution;
 mod season_episode;
 mod season_word;
@@ -153,5 +154,6 @@ pub(crate) const RULES: &[Step] = &[
     Step::Tape(episode_last::RULE),
     Step::Tape(title::RULE),
     Step::Tape(release_group::RULE),
+    Step::Tape(release_group_trailing::RULE),
     legacy::STEP,
 ];
