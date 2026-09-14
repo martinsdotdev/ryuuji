@@ -17,6 +17,7 @@ mod episode_prefix;
 mod episode_range;
 mod episode_separated;
 mod episode_sign;
+mod episode_title;
 mod episode_type;
 mod episode_version;
 mod isolated_resolution;
@@ -155,5 +156,6 @@ pub(crate) const RULES: &[Step] = &[
     Step::Tape(title::RULE),
     Step::Tape(release_group::RULE),
     Step::Tape(release_group_trailing::RULE),
+    Step::Tape(episode_title::RULE),
     legacy::STEP,
 ];

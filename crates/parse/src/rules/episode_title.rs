@@ -36,13 +36,22 @@ mod tests {
     #[test]
     fn the_run_after_the_episode_is_the_episode_title() {
         assert_eq!(
-            probe(RuleName::EpisodeTitle, "[Group] Show - 03 - Snow Falls [720p].mkv"),
+            probe(
+                RuleName::EpisodeTitle,
+                "[Group] Show - 03 - Snow Falls [720p].mkv"
+            ),
             [(ElementKind::EpisodeTitle, "Snow Falls".to_owned())]
         );
     }
 
     #[test]
     fn without_an_episode_there_is_no_episode_title() {
-        assert!(probe(RuleName::EpisodeTitle, "[Group] Show - Snow Falls [720p].mkv").is_empty());
+        assert!(
+            probe(
+                RuleName::EpisodeTitle,
+                "[Group] Show - Snow Falls [720p].mkv"
+            )
+            .is_empty()
+        );
     }
 }

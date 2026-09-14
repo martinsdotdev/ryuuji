@@ -11,12 +11,6 @@ use crate::token::Tape;
 
 pub(crate) const STEP: Step = Step::Legacy(run);
 
-fn run(tape: &mut Tape, reading: &mut Reading, options: &Options) {
-    Parser::new(
-        tape,
-        reading.elements_mut(),
-        options,
-        KeywordTable::builtin(),
-    )
-    .run();
+fn run(_tape: &mut Tape, reading: &mut Reading, _options: &Options) {
+    Parser::new(reading.elements_mut(), KeywordTable::builtin()).run();
 }
