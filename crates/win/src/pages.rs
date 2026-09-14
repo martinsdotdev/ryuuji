@@ -11,8 +11,9 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 use ryuuji_core::{
-    AppState, Command, DataDir, Detail, LibraryEntry, Notice, NowPlaying, Options, Page,
-    ProposedMatch, RecordOutcome, StoreError, ThemePreference, WatchProgress, error_chain, parse,
+    AppState, Certainty, Command, DataDir, Detail, ElementKind, LibraryEntry, Notice, NowPlaying,
+    Options, Page, ProposedMatch, RecordOutcome, StoreError, ThemePreference, WatchProgress,
+    error_chain, parse,
 };
 use windows_reactor::*;
 
@@ -284,6 +285,7 @@ fn match_caption(m: &ProposedMatch, idle: bool, now: SystemTime) -> String {
     let mut parts = Vec::new();
     if let Some(episode) = &m.episode {
         parts.push(episode_text(episode));
+        parts.extend(episode_doubt(m));
     }
     parts.push(m.link.confidence().label().to_owned());
     if idle {
@@ -291,6 +293,24 @@ fn match_caption(m: &ProposedMatch, idle: bool, now: SystemTime) -> String {
         parts.push(age_of(m.at, now));
     }
     parts.join(" \u{b7} ")
+}
+
+/// `Guess: episode 5, or a word of the title`, when the parser had to
+/// guess the episode and says what else the number could have been.
+/// Re-parsed from the raw title like the facts grid, so nothing about the
+/// doubt is carried on the proposal.
+fn episode_doubt(m: &ProposedMatch) -> Option<String> {
+    let reading = parse(&m.raw_title, &Options::default());
+    if reading.episodes()?.certainty != Certainty::Guessed {
+        return None;
+    }
+    let doubts: Vec<String> = reading
+        .alternatives()
+        .iter()
+        .filter(|alternative| alternative.taken.kind == Some(ElementKind::EpisodeNumber))
+        .map(|alternative| alternative.description())
+        .collect();
+    Some(format!("Guess: {}", doubts.join("; ")))
 }
 
 /// `Episode 3`, or `Episodes 1–12` for a batch.
@@ -499,6 +519,28 @@ mod tests {
         assert_eq!(
             match_caption(&proposal(), false, SystemTime::UNIX_EPOCH),
             "No library entry"
+        );
+    }
+
+    #[test]
+    fn match_caption_says_when_the_episode_was_a_guess() {
+        let m = ProposedMatch {
+            raw_title: "Byousoku 5 Centimeter [1080p].mkv".to_owned(),
+            episode: Some(5..=5),
+            ..proposal()
+        };
+        assert_eq!(
+            match_caption(&m, false, SystemTime::UNIX_EPOCH),
+            "Episode 5 \u{b7} Guess: episode 5, or a word of the title \u{b7} No library entry"
+        );
+        let sure = ProposedMatch {
+            raw_title: "[Subs] Show - 05 [1080p].mkv".to_owned(),
+            episode: Some(5..=5),
+            ..proposal()
+        };
+        assert_eq!(
+            match_caption(&sure, false, SystemTime::UNIX_EPOCH),
+            "Episode 5 \u{b7} No library entry"
         );
     }
 
