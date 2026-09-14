@@ -14,10 +14,6 @@ impl Parser<'_> {
     /// the word itself separates the two. They keep only anitomy's
     /// episode-title check.
     pub(super) fn validate_elements(&mut self) {
-        let anime_title = self
-            .elements
-            .get(ElementKind::AnimeTitle)
-            .map(str::to_owned);
         let episode_title = self
             .elements
             .get(ElementKind::EpisodeTitle)
@@ -33,14 +29,6 @@ impl Parser<'_> {
             .map(|(kind, value)| (kind, value.to_owned()))
             .collect();
         for (kind, value) in unidentifiable {
-            if kind != ElementKind::AnimeType
-                && anime_title
-                    .as_deref()
-                    .is_some_and(|title| has_word(title, &value))
-            {
-                self.elements.retract(kind, &value);
-                continue;
-            }
             let Some(title) = episode_title.as_deref() else {
                 continue;
             };

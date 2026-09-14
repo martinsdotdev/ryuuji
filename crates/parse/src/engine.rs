@@ -6,14 +6,6 @@
 //! rule test compares verdicts, no rule can see a later rule's work, and
 //! no rule can half-apply a decision it then abandons.
 
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the verdict ops arrive ahead of the rules that use them"
-    )
-)]
-
 use std::ops::Range;
 
 use crate::element::{ElementKind, Elements, Fact, Span};
@@ -58,12 +50,13 @@ pub enum RuleName {
     ReleaseGroup,
     ReleaseGroupTrailing,
     EpisodeTitle,
+    TermInAnimeTitle,
     /// The passes not yet lifted into rules of their own.
     Legacy,
 }
 
 impl RuleName {
-    pub const ALL: [RuleName; 30] = [
+    pub const ALL: [RuleName; 31] = [
         RuleName::Prelude,
         RuleName::Preidentified,
         RuleName::Terms,
@@ -93,6 +86,7 @@ impl RuleName {
         RuleName::ReleaseGroup,
         RuleName::ReleaseGroupTrailing,
         RuleName::EpisodeTitle,
+        RuleName::TermInAnimeTitle,
         RuleName::Legacy,
     ];
 
@@ -127,6 +121,7 @@ impl RuleName {
             RuleName::ReleaseGroup => "release_group",
             RuleName::ReleaseGroupTrailing => "release_group_trailing",
             RuleName::EpisodeTitle => "episode_title",
+            RuleName::TermInAnimeTitle => "term_in_anime_title",
             RuleName::Legacy => "legacy",
         }
     }

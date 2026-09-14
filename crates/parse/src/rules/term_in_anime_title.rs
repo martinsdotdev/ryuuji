@@ -79,6 +79,9 @@ mod tests {
     #[test]
     fn an_anime_type_stays_whatever_the_title_keeps() {
         let reading = crate::parse("[Group] The New Movie Q - 03.mkv", &Options::default());
-        assert_eq!(reading.elements().get(ElementKind::AnimeType), Some("Movie"));
+        assert_eq!(
+            reading.elements().get(ElementKind::AnimeType),
+            Some("Movie")
+        );
     }
 }
