@@ -8,7 +8,7 @@
 
 use std::ops::Range;
 
-use crate::element::{ElementKind, Elements, Fact, Span};
+use crate::element::{ElementKind, Elements, Fact};
 use crate::options::Options;
 use crate::reading::{Alternative, Certainty, Reading, Sense};
 use crate::rules::RULES;
@@ -438,10 +438,7 @@ fn apply(
                 let token = &tape.tokens[at];
                 let part = part.unwrap_or(0..token.text.len());
                 let value = value.unwrap_or_else(|| token.text[part.clone()].to_owned());
-                let span = Span {
-                    start: token.span.start + part.start,
-                    end: token.span.start + part.end,
-                };
+                let span = tape.input_span(at, part.clone());
                 let kind = if kind == ElementKind::EpisodeNumber && reading.provisional_episode() {
                     settle_scheme(reading.elements_mut(), &value)
                 } else {
@@ -608,7 +605,7 @@ pub(crate) fn probe(rule: RuleName, input: &str) -> Vec<(ElementKind, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::element::fact;
+    use crate::element::{Span, fact};
     use crate::token::{Shape, Token};
 
     #[test]

@@ -56,28 +56,22 @@ fn parse_until(input: &str, options: &Options, until: Option<RuleName>) -> Readi
 
     let origin = remove_ignored(&mut text, &options.ignored_strings);
 
+    let mut tape = token::Tape::new(tokenizer::tokenize(&text, options, table));
+    if let Some(origin) = origin {
+        tape = tape.with_origin(origin);
+    }
+    let name_end = tape.tokens.last().map_or(0, |token| token.span.end);
     elements.push(Fact {
         kind: ElementKind::FileName,
-        value: text.clone(),
+        value: text,
         span: Span {
             start: 0,
-            end: origin
-                .as_ref()
-                .map_or(text.len(), |origin| origin[text.len()]),
+            end: name_end,
         },
         by: RuleName::Prelude,
         certainty: Certainty::Stated,
     });
-    let mut tokens = tokenizer::tokenize(&text, options, table);
-    if let Some(origin) = origin {
-        for token in &mut tokens {
-            token.span = Span {
-                start: origin[token.span.start],
-                end: origin[token.span.end],
-            };
-        }
-    }
-    engine::run(token::Tape::new(tokens), elements, options, until)
+    engine::run(tape, elements, options, until)
 }
 
 /// Removes every ignored string from `text`. When one was found, returns the
@@ -144,6 +138,48 @@ mod tests {
         assert_eq!(&input[origin[4]..origin[9]], "1080p");
         assert_eq!(origin[text.len()], input.len());
         assert_eq!(remove_ignored(&mut text, &["Enigma".to_owned()]), None);
+    }
+
+    fn span_text<'a>(input: &'a str, ignored: &str, kind: ElementKind) -> &'a str {
+        let options = Options {
+            ignored_strings: vec![ignored.to_owned()],
+            ..Options::default()
+        };
+        let reading = parse(input, &options);
+        let fact = reading
+            .elements()
+            .fact(kind)
+            .unwrap_or_else(|| panic!("no {} in {input:?}", kind.label()));
+        fact.span.slice(input)
+    }
+
+    #[test]
+    fn a_string_cut_from_inside_a_word_leaves_its_parts_on_their_own_bytes() {
+        let input = "Show - 05Enigmav2.mkv";
+        assert_eq!(span_text(input, "Enigma", ElementKind::EpisodeNumber), "05");
+        assert_eq!(
+            span_text(input, "Enigma", ElementKind::ReleaseVersion),
+            "v2"
+        );
+    }
+
+    #[test]
+    fn a_string_cut_right_after_a_word_stays_out_of_its_span() {
+        let input = "[BDEnigma 1080p].mkv";
+        assert_eq!(span_text(input, "Enigma", ElementKind::Source), "BD");
+    }
+
+    #[test]
+    fn a_multibyte_string_cut_from_a_word_keeps_spans_on_char_boundaries() {
+        let input = "Show - 0\u{f6}5v2.mkv";
+        assert_eq!(
+            span_text(input, "\u{f6}", ElementKind::EpisodeNumber),
+            "0\u{f6}5"
+        );
+        assert_eq!(
+            span_text(input, "\u{f6}", ElementKind::ReleaseVersion),
+            "v2"
+        );
     }
 
     #[test]

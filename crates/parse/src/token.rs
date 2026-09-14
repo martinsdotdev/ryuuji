@@ -35,6 +35,9 @@ pub(crate) struct Token {
     /// Where the token sits in the string the caller passed to
     /// [`crate::parse`].
     pub(crate) span: Span,
+    /// Where the token's text starts in the text the tokenizer read, which
+    /// is the caller's input unless ignored strings were removed from it.
+    pub(crate) offset: usize,
     pub(crate) enclosed: bool,
     /// The text is one run of ASCII digits; cached because every number
     /// rule asks.
@@ -56,6 +59,7 @@ impl Token {
         Token {
             shape,
             text,
+            offset: span.start,
             span,
             enclosed,
             numeric,
@@ -148,11 +152,56 @@ pub(crate) enum Delimiters {
 #[derive(Debug)]
 pub(crate) struct Tape {
     pub(crate) tokens: Vec<Token>,
+    /// The caller's byte offset of every byte of the tokenized text, and of
+    /// its end, when ignored strings were removed before tokenizing.
+    origin: Option<Vec<usize>>,
+}
+
+/// Maps `part` of a token's text back to the caller's input. The end maps
+/// from the last char's own offset, so a token that ends just before a
+/// removed string does not swallow it.
+fn input_range(origin: Option<&[usize]>, offset: usize, text: &str, part: Range<usize>) -> Span {
+    let Some(origin) = origin else {
+        return Span {
+            start: offset + part.start,
+            end: offset + part.end,
+        };
+    };
+    let start = origin[offset + part.start];
+    let end = match text[part.start..part.end].char_indices().last() {
+        Some((last, c)) => origin[offset + part.start + last] + c.len_utf8(),
+        None => start,
+    };
+    Span { start, end }
 }
 
 impl Tape {
     pub(crate) fn new(tokens: Vec<Token>) -> Tape {
-        Tape { tokens }
+        Tape {
+            tokens,
+            origin: None,
+        }
+    }
+
+    /// The tape of a text that ignored strings were cut from: every token's
+    /// span is mapped back to the caller's input through `origin`.
+    pub(crate) fn with_origin(mut self, origin: Vec<usize>) -> Tape {
+        for token in &mut self.tokens {
+            token.span = input_range(
+                Some(&origin),
+                token.offset,
+                &token.text,
+                0..token.text.len(),
+            );
+        }
+        self.origin = Some(origin);
+        self
+    }
+
+    /// Where `part` of the token at `at` sits in the caller's input.
+    pub(crate) fn input_span(&self, at: usize, part: Range<usize>) -> Span {
+        let token = &self.tokens[at];
+        input_range(self.origin.as_deref(), token.offset, &token.text, part)
     }
 
     pub(crate) fn len(&self) -> usize {
