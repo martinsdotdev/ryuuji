@@ -283,6 +283,64 @@ fn differences(
     lines.join("\n")
 }
 
+/// Every span a reading reports slices the caller's input on char
+/// boundaries, whatever the options removed from it first.
+fn span_mismatches(input: &str, reading: &Reading) -> Vec<String> {
+    let slices = |start: usize, end: usize| {
+        start <= end
+            && end <= input.len()
+            && input.is_char_boundary(start)
+            && input.is_char_boundary(end)
+    };
+    let facts = reading
+        .elements()
+        .facts()
+        .iter()
+        .filter(|fact| !slices(fact.span.start, fact.span.end))
+        .map(|fact| {
+            format!(
+                "{} {:?} span {:?}",
+                fact.kind.label(),
+                fact.value,
+                fact.span
+            )
+        });
+    let alternatives = reading
+        .alternatives()
+        .iter()
+        .filter(|alternative| !slices(alternative.span.start, alternative.span.end))
+        .map(|alternative| {
+            format!(
+                "alternative {:?} span {:?}",
+                alternative.text, alternative.span
+            )
+        });
+    facts
+        .chain(alternatives)
+        .map(|mismatch| format!("{input:?}: {mismatch}"))
+        .collect()
+}
+
+#[test]
+fn every_span_slices_its_input() {
+    let document: Document =
+        toml::from_str(include_str!("../fixtures/ryuuji.toml")).expect("ryuuji.toml parses");
+    let anitomy: Vec<AnitomyCase> = serde_json::from_str(include_str!("../fixtures/anitomy.json"))
+        .expect("anitomy.json parses");
+    let ryuuji = document
+        .case
+        .iter()
+        .map(|case| (case.input.as_str(), case.options.clone()));
+    let anitomy = anitomy
+        .iter()
+        .map(|case| (case.file_name.as_str(), case.options()));
+    let mismatches: Vec<String> = ryuuji
+        .chain(anitomy)
+        .flat_map(|(input, options)| span_mismatches(input, &parse(input, &options)))
+        .collect();
+    assert!(mismatches.is_empty(), "\n{}", mismatches.join("\n"));
+}
+
 const ANITOMY_BASELINE: usize = 156;
 
 /// Every failing case, not a sample: `cargo test -p ryuuji-parse -- --ignored
