@@ -18,23 +18,7 @@ impl Parser<'_> {
             return;
         }
 
-        if self.search_isolated_episode_numbers(&numeric) {
-            return;
-        }
         self.search_last_number(&numeric);
-    }
-
-    fn search_isolated_episode_numbers(&mut self, numeric: &[usize]) -> bool {
-        for &index in numeric {
-            if !self.tape.tokens[index].enclosed || !self.tape.isolated(index) {
-                continue;
-            }
-            let number = self.tape.tokens[index].text.clone();
-            if self.set_number(Extent::Episode, &number, index, true) {
-                return true;
-            }
-        }
-        false
     }
 
     fn search_last_number(&mut self, numeric: &[usize]) -> bool {
