@@ -9,6 +9,7 @@ mod episode_counter;
 mod episode_equivalent;
 mod episode_fraction;
 mod episode_in_word;
+mod episode_isolated;
 mod episode_pair;
 mod episode_partial;
 mod episode_prefix;
@@ -104,5 +105,6 @@ pub(crate) const RULES: &[Step] = &[
     },
     Step::Tape(episode_equivalent::RULE),
     Step::Tape(episode_separated::RULE),
+    Step::Tape(episode_isolated::RULE),
     legacy::STEP,
 ];
