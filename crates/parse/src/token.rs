@@ -239,35 +239,6 @@ impl Tape {
         let len = self.tokens[at].text.len();
         self.tokens[at].take(by, kind, 0..len, held);
     }
-
-    /// Cuts one token in two at a byte offset of its text; the second half
-    /// lands at `at + 1`. Neither half keeps a taking.
-    pub(crate) fn split(&mut self, at: usize, byte: usize) {
-        let token = &self.tokens[at];
-        let split = token.span.start + byte;
-        let head = Token::new(
-            token.shape,
-            token.text[..byte].to_owned(),
-            Span {
-                start: token.span.start,
-                end: split,
-            },
-            token.enclosed,
-            None,
-        );
-        let tail = Token::new(
-            token.shape,
-            token.text[byte..].to_owned(),
-            Span {
-                start: split,
-                end: token.span.end,
-            },
-            token.enclosed,
-            None,
-        );
-        self.tokens[at] = tail;
-        self.tokens.insert(at, head);
-    }
 }
 
 #[cfg(test)]
@@ -376,22 +347,5 @@ mod tests {
         tape.take(6, RuleName::Legacy, ElementKind::EpisodeNumber, false);
         assert_eq!(tape.free_runs(false).collect::<Vec<_>>(), [4..6, 8..9]);
         assert_eq!(tape.free_runs(true).collect::<Vec<_>>(), vec![1..2]);
-    }
-
-    #[test]
-    fn split_cuts_a_word_at_a_byte() {
-        let mut tape = tape(vec![Token::new(
-            Shape::Word,
-            "OVA1".to_owned(),
-            Span { start: 10, end: 14 },
-            true,
-            None,
-        )]);
-        tape.split(0, 3);
-        assert_eq!(tape.tokens[0].text, "OVA");
-        assert_eq!(tape.tokens[0].span, Span { start: 10, end: 13 });
-        assert_eq!(tape.tokens[1].text, "1");
-        assert_eq!(tape.tokens[1].span, Span { start: 13, end: 14 });
-        assert!(tape.tokens[1].numeric && tape.tokens[1].enclosed);
     }
 }

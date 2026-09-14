@@ -26,13 +26,6 @@ pub(crate) enum Extent {
 }
 
 impl Extent {
-    pub(crate) fn prefix(self) -> ElementKind {
-        match self {
-            Extent::Episode => ElementKind::EpisodePrefix,
-            Extent::Volume => ElementKind::VolumePrefix,
-        }
-    }
-
     pub(crate) fn number(self) -> ElementKind {
         match self {
             Extent::Episode => ElementKind::EpisodeNumber,
@@ -103,7 +96,7 @@ impl Numbering {
         });
     }
 
-    fn shift(mut self, by: usize) -> Numbering {
+    pub(crate) fn shift(mut self, by: usize) -> Numbering {
         for piece in &mut self.pieces {
             piece.part.at = piece.part.at.start + by..piece.part.at.end + by;
         }
@@ -112,9 +105,30 @@ impl Numbering {
     }
 }
 
-/// The shapes, tried in order; the first that fits the word whole wins. A
-/// plain number is no shape at all.
+/// The shapes, tried in order; the first that fits the word whole wins.
 pub(crate) fn read(word: &str, extent: Extent) -> Option<Numbering> {
+    read_with(word, |trimmed| {
+        version_suffix(trimmed, extent)
+            .or_else(|| range(trimmed, extent))
+            .or_else(|| match extent {
+                Extent::Episode => season_and_episode(trimmed)
+                    .or_else(|| type_and_episode(trimmed))
+                    .or_else(|| fraction(trimmed))
+                    .or_else(|| partial(trimmed))
+                    .or_else(|| number_sign(trimmed))
+                    .or_else(|| counter(trimmed)),
+                Extent::Volume => None,
+            })
+    })
+}
+
+/// Runs one shape over the word trimmed of dashes and spaces, with the
+/// pieces shifted back to the word's own offsets. A plain number is no
+/// shape at all.
+pub(crate) fn read_with(
+    word: &str,
+    shape: impl FnOnce(&str) -> Option<Numbering>,
+) -> Option<Numbering> {
     if string::is_numeric(word) {
         return None;
     }
@@ -123,18 +137,14 @@ pub(crate) fn read(word: &str, extent: Extent) -> Option<Numbering> {
         return None;
     }
     let start = word.find(trimmed).unwrap_or(0);
-    let numbering = version_suffix(trimmed, extent)
-        .or_else(|| range(trimmed, extent))
-        .or_else(|| match extent {
-            Extent::Episode => season_and_episode(trimmed)
-                .or_else(|| type_and_episode(trimmed))
-                .or_else(|| fraction(trimmed))
-                .or_else(|| partial(trimmed))
-                .or_else(|| number_sign(trimmed))
-                .or_else(|| counter(trimmed)),
-            Extent::Volume => None,
-        })?;
-    Some(numbering.shift(start))
+    let mut numbering = shape(trimmed)?.shift(start);
+    // The dashes and spaces trimmed off are used up with the number, so a
+    // glued `S01E01-` leaves no dash behind for a title.
+    if numbering.used.start == start {
+        numbering.used.start = 0;
+    }
+    numbering.used.end = word.len();
+    Some(numbering)
 }
 
 /// `05v2`: a number and its release version.
@@ -321,7 +331,9 @@ pub(crate) fn number_sign(word: &str) -> Option<Numbering> {
     if let Some(part) = release_version {
         numbering.push(ElementKind::ReleaseVersion, part);
     }
-    Some(numbering.shift(1))
+    let mut numbering = numbering.shift(1);
+    numbering.used = 0..word.len();
+    Some(numbering)
 }
 
 /// `12話`: a digit run closed by the Japanese episode counter. The `第`
@@ -486,8 +498,8 @@ mod tests {
 
     #[test]
     fn a_trimmed_word_keeps_offsets_into_the_original() {
-        let numbering = read("-05v2", Extent::Episode).unwrap();
-        assert_eq!(numbering.used, 1..5);
+        let numbering = read("-05v2-", Extent::Episode).unwrap();
+        assert_eq!(numbering.used, 0..6);
         assert_eq!(numbering.pieces[0].part.at, 1..3);
         assert!(read("05", Extent::Episode).is_none());
         assert!(read("--", Extent::Episode).is_none());
