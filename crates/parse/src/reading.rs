@@ -70,12 +70,11 @@ pub struct Alternative {
 }
 
 impl Alternative {
-    /// Copy for a shell, from the two kinds: `5: episode 5, or a word of
-    /// the title`.
+    /// Copy for a shell, from the two kinds: `episode 5, or a word of the
+    /// title`.
     pub fn description(&self) -> String {
         format!(
-            "{}: {}, or {}",
-            self.text,
+            "{}, or {}",
             describe(self.taken.kind, &self.text),
             describe(self.passed.kind, &self.text)
         )
@@ -335,7 +334,7 @@ mod tests {
         };
         assert_eq!(
             alternative.description(),
-            "5: episode 5, or a word of the title"
+            "episode 5, or a word of the title"
         );
     }
 }

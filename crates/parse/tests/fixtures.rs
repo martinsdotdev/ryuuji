@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use ryuuji_parse::{ElementKind, Elements, Options, parse};
+use ryuuji_parse::{Certainty, ElementKind, Elements, Options, Reading, RuleName, parse};
 use serde::Deserialize;
 
 fn parsed_map(elements: &Elements) -> BTreeMap<String, Vec<String>> {
@@ -40,6 +40,83 @@ struct Case {
     #[serde(default)]
     options: Options,
     elements: BTreeMap<String, OneOrMany>,
+    /// The rule each listed kind's first value must have come from.
+    #[serde(default)]
+    by: BTreeMap<String, String>,
+    /// A doubt the reading must record.
+    #[serde(default)]
+    alternative: Vec<AlternativeCase>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AlternativeCase {
+    text: String,
+    /// A kind label, or `title_word` for text left where it stands.
+    taken: String,
+    passed: String,
+    /// The rule that recorded the doubt.
+    by: String,
+}
+
+fn sense(label: &str) -> Option<ElementKind> {
+    if label == "title_word" {
+        return None;
+    }
+    Some(ElementKind::from_label(label).unwrap_or_else(|| panic!("unknown sense {label:?}")))
+}
+
+fn rule(label: &str) -> RuleName {
+    RuleName::from_label(label).unwrap_or_else(|| panic!("unknown rule {label:?}"))
+}
+
+/// Every way the reading fails what the case pins beyond the element map.
+fn provenance_mismatches(case: &Case, reading: &Reading) -> Vec<String> {
+    let mut mismatches = Vec::new();
+    for (label, by) in &case.by {
+        let kind =
+            ElementKind::from_label(label).unwrap_or_else(|| panic!("unknown kind {label:?}"));
+        let found = reading.elements().fact(kind).map(|fact| fact.by);
+        if found != Some(rule(by)) {
+            mismatches.push(format!(
+                "{label} expected by {by:?}, read by {:?}",
+                found.map(RuleName::label)
+            ));
+        }
+    }
+    for expected in &case.alternative {
+        let (taken, passed, by) = (
+            sense(&expected.taken),
+            sense(&expected.passed),
+            rule(&expected.by),
+        );
+        let found = reading.alternatives().iter().any(|alternative| {
+            alternative.text == expected.text
+                && alternative.taken.kind == taken
+                && alternative.passed.kind == passed
+                && alternative.taken.rule == by
+        });
+        if !found {
+            mismatches.push(format!(
+                "alternative {:?} taken {:?} passed {:?} by {:?} not recorded; recorded: {:?}",
+                expected.text,
+                expected.taken,
+                expected.passed,
+                expected.by,
+                reading
+                    .alternatives()
+                    .iter()
+                    .map(|alternative| (
+                        alternative.text.as_str(),
+                        alternative.taken.kind.map(ElementKind::label),
+                        alternative.passed.kind.map(ElementKind::label),
+                        alternative.taken.rule.label(),
+                    ))
+                    .collect::<Vec<_>>()
+            ));
+        }
+    }
+    mismatches
 }
 
 fn default_true() -> bool {
@@ -80,7 +157,8 @@ fn ryuuji_fixtures_parse_exactly() {
             );
         }
         let expected = expected_map(&case.elements);
-        let mut parsed = parsed_map(parse(&case.input, &case.options).elements());
+        let reading = parse(&case.input, &case.options);
+        let mut parsed = parsed_map(reading.elements());
         if !case.strict {
             parsed.retain(|label, _| expected.contains_key(label));
         }
@@ -90,8 +168,54 @@ fn ryuuji_fixtures_parse_exactly() {
                 case.name, case.input
             ));
         }
+        for mismatch in provenance_mismatches(case, &reading) {
+            mismatches.push(format!("case {:?}\n  {mismatch}", case.name));
+        }
     }
     assert!(mismatches.is_empty(), "\n{}", mismatches.join("\n"));
+}
+
+/// A rule the corpus never names is a rule nobody can change safely.
+#[test]
+fn every_rule_is_named_by_some_case() {
+    let document: Document =
+        toml::from_str(include_str!("../fixtures/ryuuji.toml")).expect("ryuuji.toml parses");
+    let named: std::collections::BTreeSet<&str> = document
+        .case
+        .iter()
+        .flat_map(|case| {
+            case.by.values().map(String::as_str).chain(
+                case.alternative
+                    .iter()
+                    .map(|alternative| alternative.by.as_str()),
+            )
+        })
+        .collect();
+    let unnamed: Vec<&str> = RuleName::ALL
+        .iter()
+        .map(|rule| rule.label())
+        .filter(|label| !named.contains(label))
+        .collect();
+    assert!(unnamed.is_empty(), "rules no case names: {unnamed:?}");
+}
+
+/// A guessed episode is the only reading that carries a doubt, so every
+/// case whose episode is a guess pins the alternative, and no other does.
+#[test]
+fn a_guessed_episode_always_records_an_alternative() {
+    let document: Document =
+        toml::from_str(include_str!("../fixtures/ryuuji.toml")).expect("ryuuji.toml parses");
+    for case in &document.case {
+        let reading = parse(&case.input, &case.options);
+        let guessed = reading
+            .episodes()
+            .is_some_and(|episodes| episodes.certainty == Certainty::Guessed);
+        let doubted = reading
+            .alternatives()
+            .iter()
+            .any(|alternative| alternative.taken.kind == Some(ElementKind::EpisodeNumber));
+        assert_eq!(guessed, doubted, "case {:?}", case.name);
+    }
 }
 
 /// One anitomy case. Its option keys carry an `option_` prefix, its `id` is
