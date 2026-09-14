@@ -56,10 +56,12 @@ mod tests {
 
     #[test]
     fn a_bracketed_group_settles_the_kind_first() {
-        assert!(probe(
-            RuleName::ReleaseGroupTrailing,
-            "[Group] Show - 03 (BDrip)-ank.mkv"
-        )
-        .is_empty());
+        assert!(
+            probe(
+                RuleName::ReleaseGroupTrailing,
+                "[Group] Show - 03 (BDrip)-ank.mkv"
+            )
+            .is_empty()
+        );
     }
 }

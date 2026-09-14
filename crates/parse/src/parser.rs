@@ -1,5 +1,4 @@
 mod episode_title;
-mod group;
 mod validate;
 
 use crate::element::{ElementKind, Elements, Fact, Span};
@@ -32,19 +31,10 @@ impl<'a> Parser<'a> {
     }
 
     pub(crate) fn run(mut self) {
-        if self.options.parse_release_group {
-            self.search_release_group();
-        }
         if self.options.parse_episode_title {
             self.search_episode_title();
         }
         self.validate_elements();
-    }
-
-    /// Records a value read off the token at `index`.
-    fn record(&mut self, kind: ElementKind, value: impl Into<String>, index: usize) {
-        let span = self.tape.tokens[index].span;
-        self.record_span(kind, value, span);
     }
 
     fn record_span(&mut self, kind: ElementKind, value: impl Into<String>, span: Span) {
