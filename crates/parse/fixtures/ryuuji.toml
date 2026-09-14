@@ -914,6 +914,25 @@ anime_title = "Show"
 [case.by]
 episode_number = "episode_counter"
 
+[[case]]
+name = "two prefixed episodes in one name are a batch"
+input = "Show Ep 01 Ep 02.mkv"
+
+[case.elements]
+file_extension = "mkv"
+episode_number = ["01", "02"]
+anime_title = "Show"
+
+[[case]]
+name = "a versioned number equal to the prefixed episode keeps its version"
+input = "Show Episode 12 - 12v2.mkv"
+
+[case.elements]
+file_extension = "mkv"
+episode_number = "12"
+release_version = "2"
+anime_title = "Show"
+
 # Shapes the corpus and Ryuuji read differently, measured 2026-09-13.
 # anitomy itself passes 144 of its 182 cases; Ryuuji passes 156. Each case
 # below pins what Ryuuji reads today and, where the reading is a guess, the
