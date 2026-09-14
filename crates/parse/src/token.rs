@@ -262,10 +262,10 @@ mod tests {
     #[test]
     fn a_held_taking_leaves_the_word_free() {
         let mut word = token(Shape::Word, "Movie");
-        word.take(RuleName::Legacy, ElementKind::AnimeType, 0..5, true);
+        word.take(RuleName::Terms, ElementKind::AnimeType, 0..5, true);
         assert!(word.is_free());
         assert_eq!(word.free_text(), "Movie");
-        word.take(RuleName::Legacy, ElementKind::AnimeTitle, 0..5, false);
+        word.take(RuleName::Terms, ElementKind::AnimeTitle, 0..5, false);
         assert!(!word.is_free());
         assert!(word.is_taken());
         assert_eq!(word.free_text(), "");
@@ -274,10 +274,10 @@ mod tests {
     #[test]
     fn a_part_taking_leaves_the_rest_free() {
         let mut word = token(Shape::Word, "OVA1");
-        word.take(RuleName::Legacy, ElementKind::EpisodeNumber, 3..4, false);
+        word.take(RuleName::Terms, ElementKind::EpisodeNumber, 3..4, false);
         assert!(word.is_free());
         assert_eq!(word.free_text(), "OVA");
-        word.take(RuleName::Legacy, ElementKind::AnimeType, 0..3, false);
+        word.take(RuleName::Terms, ElementKind::AnimeType, 0..3, false);
         assert!(!word.is_free());
     }
 
@@ -297,7 +297,7 @@ mod tests {
     #[test]
     fn value_maps_delimiters_and_trims_the_ends() {
         let mut taken = token(Shape::Word, "720p");
-        taken.take(RuleName::Legacy, ElementKind::VideoResolution, 0..4, false);
+        taken.take(RuleName::Terms, ElementKind::VideoResolution, 0..4, false);
         let tape = tape(vec![
             token(Shape::Delimiter, " "),
             token(Shape::Word, "\u{2013}"),
@@ -344,7 +344,7 @@ mod tests {
         for token in &mut tape.tokens[..3] {
             token.enclosed = true;
         }
-        tape.take(6, RuleName::Legacy, ElementKind::EpisodeNumber, false);
+        tape.take(6, RuleName::Terms, ElementKind::EpisodeNumber, false);
         assert_eq!(tape.free_runs(false).collect::<Vec<_>>(), [4..6, 8..9]);
         assert_eq!(tape.free_runs(true).collect::<Vec<_>>(), vec![1..2]);
     }
