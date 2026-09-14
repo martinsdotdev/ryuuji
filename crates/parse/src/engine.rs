@@ -57,12 +57,13 @@ pub enum RuleName {
     Title,
     ReleaseGroup,
     ReleaseGroupTrailing,
+    EpisodeTitle,
     /// The passes not yet lifted into rules of their own.
     Legacy,
 }
 
 impl RuleName {
-    pub const ALL: [RuleName; 29] = [
+    pub const ALL: [RuleName; 30] = [
         RuleName::Prelude,
         RuleName::Preidentified,
         RuleName::Terms,
@@ -91,6 +92,7 @@ impl RuleName {
         RuleName::Title,
         RuleName::ReleaseGroup,
         RuleName::ReleaseGroupTrailing,
+        RuleName::EpisodeTitle,
         RuleName::Legacy,
     ];
 
@@ -124,6 +126,7 @@ impl RuleName {
             RuleName::Title => "title",
             RuleName::ReleaseGroup => "release_group",
             RuleName::ReleaseGroupTrailing => "release_group_trailing",
+            RuleName::EpisodeTitle => "episode_title",
             RuleName::Legacy => "legacy",
         }
     }
