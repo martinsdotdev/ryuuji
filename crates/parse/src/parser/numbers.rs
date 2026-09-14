@@ -1,7 +1,6 @@
 use super::Parser;
 use crate::element::ElementKind;
 use crate::numbering::{Extent, leading_value};
-use crate::string;
 use crate::token;
 
 impl Parser<'_> {
@@ -19,43 +18,10 @@ impl Parser<'_> {
             return;
         }
 
-        if self.search_separated_numbers(&numeric) {
-            return;
-        }
         if self.search_isolated_episode_numbers(&numeric) {
             return;
         }
         self.search_last_number(&numeric);
-    }
-
-    /// A number set off by a dash: `Title - 08`, or `08 - Episode Title` when
-    /// the number opens the name and nothing but the dash follows it.
-    fn search_separated_numbers(&mut self, numeric: &[usize]) -> bool {
-        for &index in numeric {
-            let dash = |neighbour: Option<usize>| {
-                neighbour.filter(|&neighbour| {
-                    self.tape.tokens[neighbour].is_free()
-                        && string::is_dash(&self.tape.tokens[neighbour].text)
-                })
-            };
-            let prev = self.tape.prev(index, token::is_not_delimiter);
-            let separator = match dash(prev) {
-                Some(prev) => prev,
-                None if prev.is_none() => {
-                    let Some(next) = dash(self.tape.next(index, token::is_not_delimiter)) else {
-                        continue;
-                    };
-                    next
-                }
-                None => continue,
-            };
-            let number = self.tape.tokens[index].text.clone();
-            if self.set_number(Extent::Episode, &number, index, true) {
-                self.retire(separator, ElementKind::EpisodeNumber);
-                return true;
-            }
-        }
-        false
     }
 
     fn search_isolated_episode_numbers(&mut self, numeric: &[usize]) -> bool {

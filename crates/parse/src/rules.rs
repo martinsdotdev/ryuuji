@@ -13,6 +13,7 @@ mod episode_pair;
 mod episode_partial;
 mod episode_prefix;
 mod episode_range;
+mod episode_separated;
 mod episode_sign;
 mod episode_type;
 mod episode_version;
@@ -102,5 +103,6 @@ pub(crate) const RULES: &[Step] = &[
         until: ElementKind::EpisodeNumber,
     },
     Step::Tape(episode_equivalent::RULE),
+    Step::Tape(episode_separated::RULE),
     legacy::STEP,
 ];
