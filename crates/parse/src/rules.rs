@@ -28,6 +28,7 @@ mod release_group_trailing;
 mod resolution;
 mod season_episode;
 mod season_word;
+mod term_in_anime_title;
 mod terms;
 mod title;
 mod volume_in_word;
@@ -157,5 +158,6 @@ pub(crate) const RULES: &[Step] = &[
     Step::Tape(release_group::RULE),
     Step::Tape(release_group_trailing::RULE),
     Step::Tape(episode_title::RULE),
+    Step::Tape(term_in_anime_title::RULE),
     legacy::STEP,
 ];
