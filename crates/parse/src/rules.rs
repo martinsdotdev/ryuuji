@@ -26,6 +26,7 @@ mod resolution;
 mod season_episode;
 mod season_word;
 mod terms;
+mod title;
 mod volume_in_word;
 mod volume_prefix;
 mod year;
@@ -33,6 +34,7 @@ mod year;
 use crate::element::ElementKind;
 use crate::engine::{Step, Verdict, WordRule};
 use crate::numbering::{self, Extent, Numbering};
+use crate::reading::Reading;
 use crate::string;
 use crate::token::Tape;
 
@@ -97,6 +99,22 @@ pub(super) fn enclosed_title_begin(tape: &Tape) -> Option<usize> {
     }
 }
 
+/// The token the first episode number was read from, so the title rule can
+/// tell a name that leads with its episode from one that leads with its
+/// title. The first number read may since have been retagged as the
+/// alternate scheme, so both kinds count.
+pub(super) fn episode_token(tape: &Tape, reading: &Reading) -> Option<usize> {
+    let fact = reading.elements().facts().iter().find(|fact| {
+        matches!(
+            fact.kind,
+            ElementKind::EpisodeNumber | ElementKind::EpisodeNumberAlt
+        )
+    })?;
+    tape.iter()
+        .find(|(_, token)| token.span.start <= fact.span.start && fact.span.start < token.span.end)
+        .map(|(at, _)| at)
+}
+
 /// The word shapes, tried on each free word in turn until one reads the
 /// episode. A volume read on the way applies and the walk goes on.
 const WORDS: &[WordRule] = &[
@@ -132,5 +150,6 @@ pub(crate) const RULES: &[Step] = &[
     Step::Tape(episode_separated::RULE),
     Step::Tape(episode_isolated::RULE),
     Step::Tape(episode_last::RULE),
+    Step::Tape(title::RULE),
     legacy::STEP,
 ];
