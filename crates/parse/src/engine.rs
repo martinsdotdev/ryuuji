@@ -51,12 +51,13 @@ pub enum RuleName {
     EpisodeSign,
     EpisodeCounter,
     EpisodeEquivalent,
+    EpisodeSeparated,
     /// The passes not yet lifted into rules of their own.
     Legacy,
 }
 
 impl RuleName {
-    pub const ALL: [RuleName; 23] = [
+    pub const ALL: [RuleName; 24] = [
         RuleName::Prelude,
         RuleName::Preidentified,
         RuleName::Terms,
@@ -79,6 +80,7 @@ impl RuleName {
         RuleName::EpisodeSign,
         RuleName::EpisodeCounter,
         RuleName::EpisodeEquivalent,
+        RuleName::EpisodeSeparated,
         RuleName::Legacy,
     ];
 
@@ -106,6 +108,7 @@ impl RuleName {
             RuleName::EpisodeSign => "episode_sign",
             RuleName::EpisodeCounter => "episode_counter",
             RuleName::EpisodeEquivalent => "episode_equivalent",
+            RuleName::EpisodeSeparated => "episode_separated",
             RuleName::Legacy => "legacy",
         }
     }
