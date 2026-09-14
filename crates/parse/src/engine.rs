@@ -6,9 +6,12 @@
 //! rule test compares verdicts, no rule can see a later rule's work, and
 //! no rule can half-apply a decision it then abandons.
 
-#![expect(
-    dead_code,
-    reason = "the table shapes and verdict ops arrive ahead of the rules that use them"
+#![cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the verdict ops arrive ahead of the rules that use them"
+    )
 )]
 
 use std::ops::Range;
@@ -36,12 +39,23 @@ pub enum RuleName {
     Resolution,
     Year,
     IsolatedResolution,
+    EpisodeInWord,
+    VolumeInWord,
+    EpisodePair,
+    EpisodeVersion,
+    EpisodeRange,
+    SeasonEpisode,
+    EpisodeType,
+    EpisodeFraction,
+    EpisodePartial,
+    EpisodeSign,
+    EpisodeCounter,
     /// The passes not yet lifted into rules of their own.
     Legacy,
 }
 
 impl RuleName {
-    pub const ALL: [RuleName; 11] = [
+    pub const ALL: [RuleName; 22] = [
         RuleName::Prelude,
         RuleName::Preidentified,
         RuleName::Terms,
@@ -52,6 +66,17 @@ impl RuleName {
         RuleName::Resolution,
         RuleName::Year,
         RuleName::IsolatedResolution,
+        RuleName::EpisodeInWord,
+        RuleName::VolumeInWord,
+        RuleName::EpisodePair,
+        RuleName::EpisodeVersion,
+        RuleName::EpisodeRange,
+        RuleName::SeasonEpisode,
+        RuleName::EpisodeType,
+        RuleName::EpisodeFraction,
+        RuleName::EpisodePartial,
+        RuleName::EpisodeSign,
+        RuleName::EpisodeCounter,
         RuleName::Legacy,
     ];
 
@@ -67,6 +92,17 @@ impl RuleName {
             RuleName::Resolution => "resolution",
             RuleName::Year => "year",
             RuleName::IsolatedResolution => "isolated_resolution",
+            RuleName::EpisodeInWord => "episode_in_word",
+            RuleName::VolumeInWord => "volume_in_word",
+            RuleName::EpisodePair => "episode_pair",
+            RuleName::EpisodeVersion => "episode_version",
+            RuleName::EpisodeRange => "episode_range",
+            RuleName::SeasonEpisode => "season_episode",
+            RuleName::EpisodeType => "episode_type",
+            RuleName::EpisodeFraction => "episode_fraction",
+            RuleName::EpisodePartial => "episode_partial",
+            RuleName::EpisodeSign => "episode_sign",
+            RuleName::EpisodeCounter => "episode_counter",
             RuleName::Legacy => "legacy",
         }
     }

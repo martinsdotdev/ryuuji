@@ -16,7 +16,6 @@ pub(crate) struct Parser<'a> {
     elements: &'a mut Elements,
     options: &'a Options,
     table: &'a KeywordTable,
-    found_episode_keyword: bool,
     /// The token the first episode number was read from, so the title
     /// search can tell a name that leads with its episode from one that
     /// leads with its title.
@@ -35,7 +34,6 @@ impl<'a> Parser<'a> {
             elements,
             options,
             table,
-            found_episode_keyword: false,
             episode_token: None,
         }
     }
@@ -91,11 +89,6 @@ impl<'a> Parser<'a> {
     /// Takes a whole token so later passes cannot claim it again.
     fn retire(&mut self, index: usize, kind: ElementKind) {
         self.tape.take(index, RuleName::Legacy, kind, false);
-    }
-
-    /// Reads a value off a token but leaves it free for a title.
-    fn hold(&mut self, index: usize, kind: ElementKind) {
-        self.tape.take(index, RuleName::Legacy, kind, true);
     }
 
     /// Builds an element from the span, then retires its free tokens so
