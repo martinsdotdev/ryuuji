@@ -1,5 +1,8 @@
 # Ryuuji's own conformance cases. Comparison ignores file_name; a case with
-# strict = false is only checked on the kinds it lists.
+# strict = false is only checked on the kinds it lists. [case.by] pins the
+# rule a kind's first value came from, and [[case.alternative]] pins a doubt
+# the reading records: the text, what it was taken as, what it could have
+# been (a kind, or title_word), and the rule that said so.
 
 [[case]]
 name = "extension resolution and checksum"
@@ -14,6 +17,15 @@ anime_title = "Fullmetal Alchemist"
 anime_year = "2009"
 episode_number = "04"
 
+[case.by]
+file_extension = "prelude"
+video_resolution = "preidentified"
+file_checksum = "checksum"
+anime_year = "year"
+episode_number = "episode_last"
+anime_title = "title"
+release_group = "release_group"
+
 [[case]]
 name = "thora with bluray audio and video terms"
 input = "Evangelion_1.11_You_Are_(Not)_Alone_(2009)_[1080p,BluRay,x264,DTS-ES]_-_THORA.mkv"
@@ -27,6 +39,9 @@ audio_term = "DTS-ES"
 release_group = "THORA"
 anime_title = "Evangelion 1.11 You Are (Not) Alone"
 anime_year = "2009"
+
+[case.by]
+source = "terms"
 
 [[case]]
 name = "dual audio preidentified alongside flac"
@@ -60,6 +75,9 @@ anime_type = "NCOP"
 source = "BD"
 video_resolution = "1440x1080"
 anime_title = "Suzumiya Haruhi no Yuuutsu NCOP"
+
+[case.by]
+video_resolution = "resolution"
 
 [[case]]
 name = "release version and batch"
@@ -145,6 +163,9 @@ release_group = "Foo"
 anime_title = "Bar"
 episode_number = "07"
 
+[case.by]
+episode_number = "episode_separated"
+
 [[case]]
 name = "ignored strings unlock a keyword"
 input = "[EnigmaBD 1080p].mkv"
@@ -205,6 +226,10 @@ video_term = "H.264"
 audio_term = "FLAC"
 file_checksum = "1234ABCD"
 
+[case.by]
+episode_number = "episode_version"
+episode_title = "episode_title"
+
 [[case]]
 name = "season x episode"
 input = "Anime 2x01.mkv"
@@ -214,6 +239,9 @@ file_extension = "mkv"
 anime_season = "2"
 episode_number = "01"
 anime_title = "Anime"
+
+[case.by]
+anime_season = "season_episode"
 
 [[case]]
 name = "season and episode with prefixes"
@@ -244,6 +272,9 @@ file_extension = "mkv"
 episode_number = "01"
 anime_title = "Anime"
 
+[case.by]
+episode_number = "episode_prefix"
+
 [[case]]
 name = "episode prefix range without extension"
 input = "Chrono Crusade ep. 1-5"
@@ -261,6 +292,9 @@ file_extension = "mkv"
 episode_number = "10"
 anime_title = "Yuru Yuri"
 
+[case.by]
+episode_number = "episode_in_word"
+
 [[case]]
 name = "number sign episode"
 input = "Anime #01.mkv"
@@ -269,6 +303,9 @@ input = "Anime #01.mkv"
 file_extension = "mkv"
 episode_number = "01"
 anime_title = "Anime"
+
+[case.by]
+episode_number = "episode_sign"
 
 [[case]]
 name = "number sign range with version"
@@ -289,6 +326,9 @@ file_extension = "mkv"
 episode_number = ["01", "02"]
 anime_title = "Anime"
 
+[case.by]
+episode_number = "episode_range"
+
 [[case]]
 name = "partial episode with letter suffix"
 input = "Anime 4a.mkv"
@@ -298,6 +338,9 @@ file_extension = "mkv"
 episode_number = "4a"
 anime_title = "Anime"
 
+[case.by]
+episode_number = "episode_partial"
+
 [[case]]
 name = "fractional episode"
 input = "Anime 07.5.mkv"
@@ -306,6 +349,9 @@ input = "Anime 07.5.mkv"
 file_extension = "mkv"
 episode_number = "07.5"
 anime_title = "Anime"
+
+[case.by]
+episode_number = "episode_fraction"
 
 [[case]]
 name = "anime type and episode split keeps the type word"
@@ -321,6 +367,9 @@ video_resolution = "704x480"
 source = "DVD"
 audio_term = "AAC"
 file_checksum = "3B65D1E6"
+
+[case.by]
+anime_type = "episode_type"
 
 [[case]]
 name = "ova title with separated episode"
@@ -376,6 +425,12 @@ file_extension = "mkv"
 episode_number = "07"
 anime_title = "Magical Girl Series"
 
+[[case.alternative]]
+text = "07"
+taken = "episode_number"
+passed = "title_word"
+by = "episode_last"
+
 [[case]]
 name = "leading number is not an episode"
 input = "05 Anime.mkv"
@@ -393,6 +448,9 @@ file_extension = "mkv"
 release_group = "Group"
 anime_title = "Anime"
 episode_number = "12"
+
+[case.by]
+episode_number = "episode_isolated"
 
 [[case]]
 name = "isolated year"
@@ -414,6 +472,9 @@ anime_title = "Anime"
 episode_number = "05"
 video_resolution = "720"
 
+[case.by]
+video_resolution = "isolated_resolution"
+
 [[case]]
 name = "ampersand episode pair"
 input = "Anime 8 & 10.mkv"
@@ -422,6 +483,9 @@ input = "Anime 8 & 10.mkv"
 file_extension = "mkv"
 episode_number = ["8", "10"]
 anime_title = "Anime"
+
+[case.by]
+episode_number = "episode_pair"
 
 [[case]]
 name = "number before total count"
@@ -442,6 +506,9 @@ volume_number = "1"
 episode_number = "05"
 anime_title = "Anime"
 
+[case.by]
+volume_number = "volume_in_word"
+
 [[case]]
 name = "volume prefix keyword with extent"
 input = "Anime Vol. 2.mkv"
@@ -450,6 +517,9 @@ input = "Anime Vol. 2.mkv"
 file_extension = "mkv"
 volume_number = "2"
 anime_title = "Anime"
+
+[case.by]
+volume_number = "volume_prefix"
 
 [[case]]
 name = "ordinal season prefix"
@@ -460,6 +530,9 @@ file_extension = "mkv"
 anime_season = "2"
 episode_number = "03"
 anime_title = "Anime"
+
+[case.by]
+anime_season = "season_word"
 
 [[case]]
 name = "season prefix with number and episode title"
@@ -663,6 +736,9 @@ anime_title = "Long Running Show"
 episode_number = "02"
 episode_number_alt = "100"
 
+[case.by]
+episode_number = "episode_equivalent"
+
 [[case]]
 name = "a preidentified term comes before terms the keyword pass finds"
 input = "[Nyaa] Show - 01 [10bit H.264 FLAC].mkv"
@@ -686,6 +762,12 @@ release_group = "Nyaa"
 anime_title = "Bokura ga Ita"
 episode_number = "07"
 
+[[case.alternative]]
+text = "Ita"
+taken = "title_word"
+passed = "language"
+by = "term_in_anime_title"
+
 [[case]]
 name = "an episode title that is only a release keyword is not a title"
 input = "[Nyaa] Show - 12 END [720p].mkv"
@@ -697,6 +779,12 @@ release_group = "Nyaa"
 anime_title = "Show"
 episode_number = "12"
 release_information = "END"
+
+[[case.alternative]]
+text = "END"
+taken = "title_word"
+passed = "episode_title"
+by = "term_is_episode_title"
 
 [[case]]
 name = "a bit depth written with a space is one video term"
@@ -811,42 +899,133 @@ audio_term = "FLAC"
 anime_title = "Show Title"
 release_group = "nyaa"
 
-# Known ambiguous shapes, measured 2026-09-13 against the anitomy corpus.
-# anitomy itself passes 144 of its 182 cases; Ryuuji passes 156. Each shape
-# below fails in both, and no rule that the corpus supports would fix it
-# without breaking a case the corpus also expects, so they are left visible
-# here instead of guessed at:
-#
-# - A number inside the title before a dash and a word ("Kiddy Grade 2 -
-#   Pilot", "Rozen Maiden 3 - PV", "Memories Off 3.5 - 04"): the number
-#   reads as the episode, and "Title 01 - Episode Title" is the same shape
-#   with the opposite meaning.
-# - A number inside the title with no separator at all ("Byousoku 5
-#   Centimeter", "The iDOLM@STER 765 Pro to Iu Monogatari"): the last-number
-#   fallback takes it.
-# - "Special" as a title word ("Special A", "Kotoura-san - Special Short
-#   Anime"): the corpus keeps "Movie" wherever it sits in a title but drops
-#   "Special" when a word follows, and only the word itself tells them apart.
-# - The release group in the last bracket when an earlier bracket holds two
-#   short words ("Code_Geass_R2_TV_[20_of_25]_[ru_jp]_[HDTV]_[Varies_&_...]"):
-#   the first qualifying bracket wins.
-# - A group in parentheses after a comma ("(Central Anime, 720p)"), a group
-#   in the first bracket beside a dotted title ("[Juuni.Kokki]-(Les.12.
-#   Royaumes)"), "encoded by SEED" as a group, and a lone unenclosed number
-#   between bracket groups ("[Keroro].148.[Xvid.mp3]").
-# - Scene-style dotted names ("The.Animatrix.08.A.Detective.Story.720p.
-#   BluRay.DTS.x264-ESiR", "Dragon.Ball.KAI.-.01.-.1080p.BluRay.x264.DHD"):
-#   the dot glues single letters onto numbers and the trailing word is a
-#   group only by convention.
-# - Nested parentheses inside brackets ("[BD 1920x1080 h264+AAC(5.1ch
-#   JP+EN) +Sub(JP-EN-SP-FR-CH) Chap]"), a dash glued to a prefix
-#   ("Gunbuster-ep1.BD"), a dash-glued tag ("[HQR.remux-DualAudio]"), and
-#   "EX01" as a prefix the table does not know.
-# - Corner brackets as part of a title ("「K」 Image Blu-ray ...") and a
-#   fullwidth-bracketed count ("【Golden Time】[24（END）]").
-# - "__BLUE DROP 10 (1)": the corpus wants 10 alone where the equivalent-
-#   numbers rule reads "10 (1)" as one episode under two schemes.
-# - A leading number before the group ("37 [Ruberia]_Death_Note_-_37v2").
-# - The three newest corpus entries (Nintama Rantarou S23E1821, Aharen-san
-#   S01E06v2, Somali S01E01) expect no file_extension for a .mkv name; the
-#   strict comparison cannot pass them.
+[case.by]
+release_group = "release_group_trailing"
+
+[[case]]
+name = "a digit run before the japanese counter is the episode"
+input = "Show 10話.mkv"
+
+[case.elements]
+file_extension = "mkv"
+episode_number = "10"
+anime_title = "Show"
+
+[case.by]
+episode_number = "episode_counter"
+
+# Shapes the corpus and Ryuuji read differently, measured 2026-09-13.
+# anitomy itself passes 144 of its 182 cases; Ryuuji passes 156. Each case
+# below pins what Ryuuji reads today and, where the reading is a guess, the
+# doubt it records, so a rule that changes one changes it on purpose.
+
+[[case]]
+name = "a number between title words with no separator is a guessed episode"
+input = "Byousoku 5 Centimeter [1080p].mkv"
+
+[case.elements]
+file_extension = "mkv"
+video_resolution = "1080p"
+episode_number = "5"
+anime_title = "Byousoku"
+episode_title = "Centimeter"
+
+[case.by]
+episode_number = "episode_last"
+
+[[case.alternative]]
+text = "5"
+taken = "episode_number"
+passed = "title_word"
+by = "episode_last"
+
+[[case]]
+name = "a number before a dash and a word is a guessed episode"
+input = "[Ayu]_Kiddy_Grade_2_-_Pilot_[H264_AC3][650B731B].mkv"
+
+[case.elements]
+file_extension = "mkv"
+video_term = "H264"
+audio_term = "AC3"
+file_checksum = "650B731B"
+episode_number = "2"
+anime_title = "Kiddy Grade"
+release_group = "Ayu"
+episode_title = "Pilot"
+
+[[case.alternative]]
+text = "2"
+taken = "episode_number"
+passed = "title_word"
+by = "episode_last"
+
+[[case]]
+name = "special before a word stays an anime type and a title word"
+input = "[BakaWolf-m.3.3.w] Special A 01 (H.264) [C83164B9].mkv"
+
+[case.elements]
+file_extension = "mkv"
+video_term = "H.264"
+anime_type = "Special"
+file_checksum = "C83164B9"
+episode_number = "01"
+anime_title = "Special A"
+release_group = "BakaWolf-m.3.3.w"
+
+[case.by]
+anime_type = "terms"
+
+[[case]]
+name = "a large number between title words is still a guessed episode"
+input = "The iDOLM@STER 765 Pro to Iu Monogatari.mkv"
+
+[case.elements]
+file_extension = "mkv"
+episode_number = "765"
+anime_title = "The iDOLM@STER"
+episode_title = "Pro to Iu Monogatari"
+
+[[case.alternative]]
+text = "765"
+taken = "episode_number"
+passed = "title_word"
+by = "episode_last"
+
+[[case]]
+name = "a count in parentheses after a number reads as a second scheme"
+input = "__BLUE DROP 10 (1).avi"
+
+[case.elements]
+file_extension = "avi"
+episode_number = "1"
+episode_number_alt = "10"
+anime_title = "BLUE DROP"
+
+[case.by]
+episode_number = "episode_equivalent"
+
+[[case]]
+name = "a leading number before the group joins the title"
+input = "37 [Ruberia]_Death_Note_-_37v2.avi"
+
+[case.elements]
+file_extension = "avi"
+episode_number = "37"
+release_version = "2"
+anime_title = "37 [Ruberia] Death Note"
+
+[case.by]
+episode_number = "episode_version"
+
+# Shapes no rule reads, left as they are: the release group in the last
+# bracket when an earlier bracket holds two short words
+# ("Code_Geass_R2_TV_[20_of_25]_[ru_jp]_[HDTV]_[Varies_&_...]"), a group in
+# parentheses after a comma ("(Central Anime, 720p)"), a group in the first
+# bracket beside a dotted title ("[Juuni.Kokki]-(Les.12.Royaumes)"),
+# "encoded by SEED" as a group, a lone unenclosed number between bracket
+# groups ("[Keroro].148.[Xvid.mp3]"), scene-style dotted names
+# ("The.Animatrix.08.A.Detective.Story.720p.BluRay.DTS.x264-ESiR"), nested
+# parentheses inside brackets, a dash glued to a prefix ("Gunbuster-ep1.BD"),
+# corner brackets as part of a title ("「K」 Image Blu-ray ..."), a
+# fullwidth-bracketed count ("【Golden Time】[24（END）]"), and the three
+# newest corpus entries that expect no file_extension for a .mkv name.
