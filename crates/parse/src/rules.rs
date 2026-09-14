@@ -6,6 +6,7 @@
 
 mod checksum;
 mod episode_counter;
+mod episode_equivalent;
 mod episode_fraction;
 mod episode_in_word;
 mod episode_pair;
@@ -100,5 +101,6 @@ pub(crate) const RULES: &[Step] = &[
         rules: WORDS,
         until: ElementKind::EpisodeNumber,
     },
+    Step::Tape(episode_equivalent::RULE),
     legacy::STEP,
 ];

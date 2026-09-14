@@ -1,6 +1,6 @@
 use super::Parser;
 use crate::element::ElementKind;
-use crate::numbering::{EPISODE_NUMBER_MAX, Extent, leading_value};
+use crate::numbering::{Extent, leading_value};
 use crate::string;
 use crate::token;
 
@@ -19,9 +19,6 @@ impl Parser<'_> {
             return;
         }
 
-        if self.search_equivalent_numbers(&numeric) {
-            return;
-        }
         if self.search_separated_numbers(&numeric) {
             return;
         }
@@ -29,51 +26,6 @@ impl Parser<'_> {
             return;
         }
         self.search_last_number(&numeric);
-    }
-
-    /// `02 (100)`: a plain number followed by an isolated one in brackets is
-    /// one episode under two numbering schemes. The smaller is the episode
-    /// and the larger the alternative, whichever comes first.
-    fn search_equivalent_numbers(&mut self, numeric: &[usize]) -> bool {
-        let within_bound =
-            |index: usize| leading_value(&self.tape.tokens[index].text) <= EPISODE_NUMBER_MAX;
-        for &index in numeric {
-            if self.tape.isolated(index) || !within_bound(index) {
-                continue;
-            }
-            let Some(bracket) = self.tape.next(index, token::is_not_delimiter) else {
-                continue;
-            };
-            if !self.tape.tokens[bracket].is_bracket() {
-                continue;
-            }
-            let Some(other) = self.tape.next(bracket, |token| {
-                token.enclosed && token::is_not_delimiter(token)
-            }) else {
-                continue;
-            };
-            if !self.tape.tokens[other].is_free()
-                || !self.tape.tokens[other].numeric
-                || !self.tape.isolated(other)
-                || !within_bound(other)
-            {
-                continue;
-            }
-            let (episode, alt) = if leading_value(&self.tape.tokens[other].text)
-                < leading_value(&self.tape.tokens[index].text)
-            {
-                (other, index)
-            } else {
-                (index, other)
-            };
-            let number = self.tape.tokens[episode].text.clone();
-            self.set_number(Extent::Episode, &number, episode, false);
-            let number = self.tape.tokens[alt].text.clone();
-            self.record(ElementKind::EpisodeNumberAlt, number, alt);
-            self.retire(alt, ElementKind::EpisodeNumberAlt);
-            return true;
-        }
-        false
     }
 
     /// A number set off by a dash: `Title - 08`, or `08 - Episode Title` when
