@@ -51,8 +51,7 @@ pub enum RuleName {
     ReleaseGroupTrailing,
     EpisodeTitle,
     TermInAnimeTitle,
-    /// The passes not yet lifted into rules of their own.
-    Legacy,
+    TermIsEpisodeTitle,
 }
 
 impl RuleName {
@@ -87,7 +86,7 @@ impl RuleName {
         RuleName::ReleaseGroupTrailing,
         RuleName::EpisodeTitle,
         RuleName::TermInAnimeTitle,
-        RuleName::Legacy,
+        RuleName::TermIsEpisodeTitle,
     ];
 
     pub fn label(self) -> &'static str {
@@ -122,7 +121,7 @@ impl RuleName {
             RuleName::ReleaseGroupTrailing => "release_group_trailing",
             RuleName::EpisodeTitle => "episode_title",
             RuleName::TermInAnimeTitle => "term_in_anime_title",
-            RuleName::Legacy => "legacy",
+            RuleName::TermIsEpisodeTitle => "term_is_episode_title",
         }
     }
 
@@ -162,9 +161,6 @@ pub(crate) enum Step {
         rules: &'static [WordRule],
         until: ElementKind,
     },
-    /// Scaffolding: the passes not yet lifted, run in place with write
-    /// access. Deleted when the last rule leaves it.
-    Legacy(fn(&mut Tape, &mut Reading, &Options)),
 }
 
 impl Step {
@@ -172,7 +168,6 @@ impl Step {
         match self {
             Step::Tape(rule) => vec![rule.name],
             Step::Words { rules, .. } => rules.iter().map(|rule| rule.name).collect(),
-            Step::Legacy(_) => vec![RuleName::Legacy],
         }
     }
 }
@@ -589,7 +584,6 @@ pub(crate) fn run(
                     run_words(rules, *until, &mut tape, &mut reading);
                 }
             }
-            Step::Legacy(pass) => pass(&mut tape, &mut reading, options),
         }
         if until.is_some_and(|until| step.names().contains(&until)) {
             break;
@@ -684,7 +678,7 @@ mod tests {
             .take_part(ElementKind::EpisodeNumber, 2, 0..2, "05")
             .take_part(ElementKind::ReleaseVersion, 2, 2..4, "2");
         apply(
-            RuleName::Legacy,
+            RuleName::Terms,
             Certainty::Stated,
             verdict,
             &mut tape,
@@ -709,7 +703,7 @@ mod tests {
         let verdict =
             Verdict::nothing().take_run(ElementKind::AnimeTitle, 0..3, Delimiters::Folded);
         apply(
-            RuleName::Legacy,
+            RuleName::Terms,
             Certainty::Shaped,
             verdict,
             &mut tape,
@@ -731,7 +725,7 @@ mod tests {
         let mut tape = tape();
         let mut reading = reading();
         apply(
-            RuleName::Legacy,
+            RuleName::Terms,
             Certainty::Stated,
             Verdict::nothing().hold(ElementKind::AnimeType, 0),
             &mut tape,
@@ -746,7 +740,7 @@ mod tests {
         let mut tape = tape();
         let mut reading = reading();
         apply(
-            RuleName::Legacy,
+            RuleName::Terms,
             Certainty::Stated,
             Verdict::nothing().spend(ElementKind::EpisodePrefix, 0),
             &mut tape,
@@ -766,7 +760,7 @@ mod tests {
             .take_part(ElementKind::EpisodeNumber, 2, 0..2, "05")
             .take_part(ElementKind::ReleaseVersion, 2, 2..4, "2");
         apply(
-            RuleName::Legacy,
+            RuleName::Terms,
             Certainty::Stated,
             verdict,
             &mut tape,
@@ -785,7 +779,7 @@ mod tests {
             word("12", 9),
         ]);
         let mut reading = reading();
-        let by = RuleName::Legacy;
+        let by = RuleName::Terms;
         apply(
             by,
             Certainty::Stated,
@@ -853,7 +847,7 @@ mod tests {
         assert_eq!(alternative.text, "Show");
         assert_eq!(alternative.taken.kind, None);
         assert_eq!(alternative.passed.kind, Some(ElementKind::Other));
-        assert_eq!(alternative.passed.rule, RuleName::Legacy);
+        assert_eq!(alternative.passed.rule, RuleName::Terms);
     }
 
     #[test]
@@ -862,10 +856,10 @@ mod tests {
         let mut reading = reading();
         let passed = Sense {
             kind: None,
-            rule: RuleName::Legacy,
+            rule: RuleName::Terms,
         };
         apply(
-            RuleName::Legacy,
+            RuleName::Terms,
             Certainty::Guessed,
             Verdict::nothing()
                 .take(ElementKind::EpisodeNumber, 2)

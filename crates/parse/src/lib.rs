@@ -8,7 +8,6 @@ mod engine;
 mod keyword;
 mod numbering;
 mod options;
-mod parser;
 mod reading;
 mod rules;
 mod string;

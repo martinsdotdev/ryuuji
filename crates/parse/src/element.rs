@@ -223,7 +223,7 @@ pub(crate) fn fact(kind: ElementKind, value: &str) -> Fact {
         kind,
         value: value.to_owned(),
         span: Span { start: 0, end: 0 },
-        by: RuleName::Legacy,
+        by: RuleName::Terms,
         certainty: Certainty::Shaped,
     }
 }

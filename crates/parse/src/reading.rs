@@ -326,11 +326,11 @@ mod tests {
             text: "5".to_owned(),
             taken: Sense {
                 kind: Some(ElementKind::EpisodeNumber),
-                rule: RuleName::Legacy,
+                rule: RuleName::Terms,
             },
             passed: Sense {
                 kind: None,
-                rule: RuleName::Legacy,
+                rule: RuleName::Terms,
             },
         };
         assert_eq!(

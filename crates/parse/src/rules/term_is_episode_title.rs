@@ -39,13 +39,19 @@ mod tests {
     fn an_episode_title_that_is_only_a_term_is_taken_back() {
         let reading = crate::parse("[Group] Show - 03 - END.mkv", &Options::default());
         assert_eq!(reading.elements().get(ElementKind::EpisodeTitle), None);
-        assert_eq!(reading.elements().get(ElementKind::Other), Some("END"));
+        assert_eq!(
+            reading.elements().get(ElementKind::ReleaseInformation),
+            Some("END")
+        );
     }
 
     #[test]
     fn a_term_inside_the_episode_title_is_a_word_of_it() {
         let reading = crate::parse("[Group] Show - 03 - The END of It.mkv", &Options::default());
-        assert_eq!(reading.elements().get(ElementKind::Other), None);
+        assert_eq!(
+            reading.elements().get(ElementKind::ReleaseInformation),
+            None
+        );
         assert_eq!(
             reading.elements().get(ElementKind::EpisodeTitle),
             Some("The END of It")
