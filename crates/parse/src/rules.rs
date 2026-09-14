@@ -10,6 +10,7 @@ mod episode_equivalent;
 mod episode_fraction;
 mod episode_in_word;
 mod episode_isolated;
+mod episode_last;
 mod episode_pair;
 mod episode_partial;
 mod episode_prefix;
@@ -32,6 +33,8 @@ mod year;
 use crate::element::ElementKind;
 use crate::engine::{Step, Verdict, WordRule};
 use crate::numbering::{self, Extent, Numbering};
+use crate::string;
+use crate::token::Tape;
 
 /// Reads the number at `at` through the word shapes, or takes it whole.
 pub(super) fn take_number(verdict: Verdict, at: usize, word: &str, extent: Extent) -> Verdict {
@@ -72,6 +75,28 @@ pub(super) fn take_pieces(
     verdict.spend_part(extent.number(), at, numbering.used)
 }
 
+/// Where a title that lives inside brackets starts: the first free token of
+/// the second bracket group, on the assumption that the first group is the
+/// release group. A group that opens with a mostly non-Latin token is
+/// skipped as well, so a CJK group name followed by a CJK title still leads
+/// to the Latin title behind them.
+pub(super) fn enclosed_title_begin(tape: &Tape) -> Option<usize> {
+    let len = tape.len();
+    let free_from = |from: usize| {
+        (from..len).find(|&index| tape.tokens[index].enclosed && tape.tokens[index].is_free())
+    };
+    let mut begin = free_from(0)?;
+    let mut skipped_a_group = false;
+    loop {
+        if skipped_a_group && string::is_mostly_latin(&tape.tokens[begin].text) {
+            return Some(begin);
+        }
+        let bracket = (begin..len).find(|&index| tape.tokens[index].is_bracket())?;
+        begin = free_from(bracket)?;
+        skipped_a_group = true;
+    }
+}
+
 /// The word shapes, tried on each free word in turn until one reads the
 /// episode. A volume read on the way applies and the walk goes on.
 const WORDS: &[WordRule] = &[
@@ -106,5 +131,6 @@ pub(crate) const RULES: &[Step] = &[
     Step::Tape(episode_equivalent::RULE),
     Step::Tape(episode_separated::RULE),
     Step::Tape(episode_isolated::RULE),
+    Step::Tape(episode_last::RULE),
     legacy::STEP,
 ];

@@ -1,5 +1,6 @@
 use super::Parser;
 use crate::element::ElementKind;
+use crate::rules::enclosed_title_begin;
 use crate::string;
 use crate::token::{self, Token};
 
@@ -12,7 +13,7 @@ impl Parser<'_> {
             .map(|(index, _)| index);
         let (begin, enclosed) = match unenclosed {
             Some(begin) => (begin, false),
-            None => match self.enclosed_title_begin() {
+            None => match enclosed_title_begin(self.tape) {
                 Some(begin) => (begin, true),
                 None => return,
             },
@@ -73,29 +74,5 @@ impl Parser<'_> {
                     .tape
                     .prev(begin, token::is_not_delimiter)
                     .is_some_and(is_dash))
-    }
-
-    /// Where a title that lives inside brackets starts: the first free
-    /// token of the second bracket group, on the assumption that the first
-    /// group is the release group. A group that opens with a mostly non-Latin
-    /// token is skipped as well, so a CJK group name followed by a CJK title
-    /// still leads to the Latin title behind them.
-    pub(in crate::parser) fn enclosed_title_begin(&self) -> Option<usize> {
-        let len = self.tape.len();
-        let free_from = |from: usize| {
-            (from..len).find(|&index| {
-                self.tape.tokens[index].enclosed && self.tape.tokens[index].is_free()
-            })
-        };
-        let mut begin = free_from(0)?;
-        let mut skipped_a_group = false;
-        loop {
-            if skipped_a_group && string::is_mostly_latin(&self.tape.tokens[begin].text) {
-                return Some(begin);
-            }
-            let bracket = (begin..len).find(|&index| self.tape.tokens[index].is_bracket())?;
-            begin = free_from(bracket)?;
-            skipped_a_group = true;
-        }
     }
 }

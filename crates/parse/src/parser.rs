@@ -1,6 +1,5 @@
 mod episode_title;
 mod group;
-mod numbers;
 mod title;
 mod validate;
 
@@ -57,9 +56,6 @@ impl<'a> Parser<'a> {
                     })
                     .map(|(index, _)| index)
             });
-        if self.options.parse_episode_number {
-            self.search_episode_number();
-        }
         self.search_anime_title();
         if self.options.parse_release_group {
             self.search_release_group();
