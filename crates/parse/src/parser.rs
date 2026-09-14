@@ -1,6 +1,5 @@
 mod episode_title;
 mod group;
-mod title;
 mod validate;
 
 use crate::element::{ElementKind, Elements, Fact, Span};
@@ -15,10 +14,6 @@ pub(crate) struct Parser<'a> {
     elements: &'a mut Elements,
     options: &'a Options,
     table: &'a KeywordTable,
-    /// The token the first episode number was read from, so the title
-    /// search can tell a name that leads with its episode from one that
-    /// leads with its title.
-    episode_token: Option<usize>,
 }
 
 impl<'a> Parser<'a> {
@@ -33,30 +28,10 @@ impl<'a> Parser<'a> {
             elements,
             options,
             table,
-            episode_token: None,
         }
     }
 
     pub(crate) fn run(mut self) {
-        self.episode_token = self
-            .elements
-            .facts()
-            .iter()
-            .find(|fact| {
-                matches!(
-                    fact.kind,
-                    ElementKind::EpisodeNumber | ElementKind::EpisodeNumberAlt
-                )
-            })
-            .and_then(|fact| {
-                self.tape
-                    .iter()
-                    .find(|(_, token)| {
-                        token.span.start <= fact.span.start && fact.span.start < token.span.end
-                    })
-                    .map(|(index, _)| index)
-            });
-        self.search_anime_title();
         if self.options.parse_release_group {
             self.search_release_group();
         }
