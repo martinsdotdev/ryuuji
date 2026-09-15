@@ -2,35 +2,28 @@
 //! scanlines. The first one wins.
 
 use crate::element::ElementKind;
-use crate::engine::{Rule, RuleName, Verdict};
-use crate::keyword::KeywordTable;
+use crate::engine::{RuleName, Verdict, WordRule};
 use crate::reading::{Certainty, Reading};
+use crate::rules::keyword_at;
 use crate::string;
 use crate::token::Tape;
 
-pub(crate) const RULE: Rule = Rule {
+pub(crate) const RULE: WordRule = WordRule {
     name: RuleName::Resolution,
-    settles: Some(ElementKind::VideoResolution),
-    gate: |_| true,
     certainty: Certainty::Shaped,
     read,
 };
 
-fn read(tape: &Tape, _reading: &Reading) -> Verdict {
-    let table = KeywordTable::builtin();
-    for (at, token) in tape.free() {
-        let word = string::trim_dashes_and_spaces(&token.text);
-        if !is_resolution(word) || table.find_searchable(&word.to_uppercase()).is_some() {
-            continue;
-        }
-        return Verdict::nothing().take_part(
-            ElementKind::VideoResolution,
-            at,
-            0..token.text.len(),
-            word,
-        );
+fn read(tape: &Tape, reading: &Reading, at: usize) -> Verdict {
+    if reading.elements().contains(ElementKind::VideoResolution) {
+        return Verdict::nothing();
     }
-    Verdict::nothing()
+    let text = &tape.tokens[at].text;
+    let word = string::trim_dashes_and_spaces(text);
+    if !is_resolution(word) || keyword_at(tape, at).is_some() {
+        return Verdict::nothing();
+    }
+    Verdict::nothing().take_part(ElementKind::VideoResolution, at, 0..text.len(), word)
 }
 
 fn is_resolution(word: &str) -> bool {

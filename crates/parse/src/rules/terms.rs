@@ -8,59 +8,41 @@
 //! other rules' business and are skipped here.
 
 use crate::element::ElementKind;
-use crate::engine::{Rule, RuleName, Verdict};
-use crate::keyword::KeywordTable;
+use crate::engine::{RuleName, Verdict, WordRule};
 use crate::reading::{Certainty, Reading};
-use crate::string;
+use crate::rules::keyword_at;
 use crate::token::Tape;
 
-pub(crate) const RULE: Rule = Rule {
+pub(crate) const RULE: WordRule = WordRule {
     name: RuleName::Terms,
-    settles: None,
-    gate: |_| true,
     certainty: Certainty::Stated,
     read,
 };
 
-fn read(tape: &Tape, reading: &Reading) -> Verdict {
-    let table = KeywordTable::builtin();
-    let mut verdict = Verdict::nothing();
-    let mut read: Vec<ElementKind> = Vec::new();
-    for (at, token) in tape.free() {
-        let mut word = string::trim_dashes_and_spaces(&token.text).to_owned();
-        if word.is_empty() || string::is_numeric(&word) {
-            continue;
-        }
-        let Some(keyword) = table.find_searchable(&word.to_uppercase()) else {
-            continue;
-        };
-        if matches!(
-            keyword.kind,
-            ElementKind::AnimeSeasonPrefix | ElementKind::EpisodePrefix | ElementKind::VolumePrefix
-        ) {
-            continue;
-        }
-        if keyword.kind.is_singular()
-            && (reading.elements().contains(keyword.kind) || read.contains(&keyword.kind))
-        {
-            continue;
-        }
-        if keyword.kind == ElementKind::ReleaseGroup && !reading.options().parse_release_group {
-            continue;
-        }
-        if keyword.kind == ElementKind::ReleaseVersion {
-            word.remove(0);
-        }
-        read.push(keyword.kind);
-        let whole = 0..token.text.len();
-        verdict = match (keyword.identifiable, word == token.text) {
-            (true, true) => verdict.take(keyword.kind, at),
-            (true, false) => verdict.take_part(keyword.kind, at, whole, word),
-            (false, true) => verdict.hold(keyword.kind, at),
-            (false, false) => verdict.hold_part(keyword.kind, at, whole, word),
-        };
+fn read(tape: &Tape, reading: &Reading, at: usize) -> Verdict {
+    let Some((mut word, keyword)) = keyword_at(tape, at) else {
+        return Verdict::nothing();
+    };
+    if matches!(
+        keyword.kind,
+        ElementKind::AnimeSeasonPrefix | ElementKind::EpisodePrefix | ElementKind::VolumePrefix
+    ) || (keyword.kind.is_singular() && reading.elements().contains(keyword.kind))
+        || (keyword.kind == ElementKind::ReleaseGroup && !reading.options().parse_release_group)
+    {
+        return Verdict::nothing();
     }
-    verdict
+    if keyword.kind == ElementKind::ReleaseVersion {
+        word.remove(0);
+    }
+    let text = &tape.tokens[at].text;
+    let whole = 0..text.len();
+    let verdict = Verdict::nothing();
+    match (keyword.identifiable, word == *text) {
+        (true, true) => verdict.take(keyword.kind, at),
+        (true, false) => verdict.take_part(keyword.kind, at, whole, word),
+        (false, true) => verdict.hold(keyword.kind, at),
+        (false, false) => verdict.hold_part(keyword.kind, at, whole, word),
+    }
 }
 
 #[cfg(test)]
@@ -121,5 +103,15 @@ mod tests {
     #[test]
     fn prefixes_are_left_to_their_rules() {
         assert!(terms("Show Season 2 Episode 3 Vol 1.mkv").is_empty());
+    }
+
+    #[test]
+    fn a_term_after_an_episode_prefix_is_the_prefix_number() {
+        let reading = crate::parse("Episode 5.1 Show.mkv", &Options::default());
+        assert_eq!(reading.elements().get(ElementKind::AudioTerm), None);
+        assert_eq!(
+            reading.elements().get(ElementKind::EpisodeNumber),
+            Some("5.1")
+        );
     }
 }
