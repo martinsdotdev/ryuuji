@@ -151,15 +151,15 @@ pub(crate) struct WordRule {
 }
 
 /// The scan orders the parser has. A tape rule reads the whole tape once.
-/// A word group is tried on each free word in turn, first rule to last,
-/// and stops the moment a verdict takes `until`; a verdict that takes
-/// something else applies and the walk goes on.
+/// A word group walks the free words in tape order and tries its rules on
+/// each, first to last. The first rule that answers settles that word and
+/// the walk moves on; it stops altogether once an answer takes `until`.
 pub(crate) enum Step {
     Tape(Rule),
     Words {
         gate: fn(&Options) -> bool,
         rules: &'static [WordRule],
-        until: ElementKind,
+        until: Option<ElementKind>,
     },
 }
 
@@ -351,7 +351,8 @@ impl Verdict {
     }
 
     /// Marks the episode read here as one of possibly two numbering
-    /// schemes; see [`settle_scheme`].
+    /// schemes: an episode a later step reads settles against it; see
+    /// [`settle_scheme`].
     pub(crate) fn provisional(mut self) -> Verdict {
         self.provisional = true;
         self
@@ -387,16 +388,16 @@ fn settle_scheme(elements: &mut Elements, new: &str) -> Option<ElementKind> {
     }
 }
 
-/// Applies one verdict, op by op. A second value of a kind lands beside the
-/// first: `[v2]` and `05v2` in one name are two release versions, and
-/// `Vol.1 & Vol.2` two volumes.
+/// Applies one verdict, op by op, and says whether it was provisional. A
+/// second value of a kind lands beside the first: `[v2]` and `05v2` in one
+/// name are two release versions, and `Vol.1 & Vol.2` two volumes.
 fn apply(
     name: RuleName,
     certainty: Certainty,
     verdict: Verdict,
     tape: &mut Tape,
     reading: &mut Reading,
-) {
+) -> bool {
     for op in verdict.ops {
         match op {
             Op::Take {
@@ -493,46 +494,49 @@ fn apply(
             }
         }
     }
-    // Only a later verdict's episode settles against this one's, so a
-    // batch read off one prefix keeps both ends.
-    if verdict.provisional {
-        reading.set_provisional_episode();
-    }
+    verdict.provisional
 }
 
-fn run_rule(rule: &Rule, tape: &mut Tape, reading: &mut Reading, options: &Options) {
-    if !(rule.gate)(options) {
-        return;
-    }
-    if rule
-        .settles
-        .is_some_and(|kind| reading.elements().contains(kind))
+/// Runs one tape rule, and says whether its verdict was provisional.
+fn run_rule(rule: &Rule, tape: &mut Tape, reading: &mut Reading, options: &Options) -> bool {
+    if !(rule.gate)(options)
+        || rule
+            .settles
+            .is_some_and(|kind| reading.elements().contains(kind))
     {
-        return;
+        return false;
     }
     let verdict = (rule.read)(tape, reading);
-    apply(rule.name, rule.certainty, verdict, tape, reading);
+    apply(rule.name, rule.certainty, verdict, tape, reading)
 }
 
-fn run_words(rules: &[WordRule], until: ElementKind, tape: &mut Tape, reading: &mut Reading) {
-    let mut at = 0;
-    while at < tape.len() {
-        for rule in rules {
-            if !tape.tokens[at].is_free() {
-                break;
-            }
-            let verdict = (rule.read)(tape, reading, at);
-            if verdict.is_nothing() {
-                continue;
-            }
-            let done = verdict.takes(until);
-            apply(rule.name, rule.certainty, verdict, tape, reading);
-            if done {
-                return;
-            }
+/// Walks a word group over the tape, and says whether any verdict was
+/// provisional.
+fn run_words(
+    rules: &[WordRule],
+    until: Option<ElementKind>,
+    tape: &mut Tape,
+    reading: &mut Reading,
+) -> bool {
+    let mut provisional = false;
+    for at in 0..tape.len() {
+        if !tape.tokens[at].is_free() {
+            continue;
         }
-        at += 1;
+        let Some((rule, verdict)) = rules
+            .iter()
+            .map(|rule| (rule, (rule.read)(tape, reading, at)))
+            .find(|(_, verdict)| !verdict.is_nothing())
+        else {
+            continue;
+        };
+        let done = until.is_some_and(|kind| verdict.takes(kind));
+        provisional |= apply(rule.name, rule.certainty, verdict, tape, reading);
+        if done {
+            break;
+        }
     }
+    provisional
 }
 
 /// Runs every step of [`RULES`] in order, or up to and including the one
@@ -545,13 +549,16 @@ pub(crate) fn run(
 ) -> Reading {
     let mut reading = Reading::new(elements, options);
     for step in RULES {
-        match step {
+        let provisional = match step {
             Step::Tape(rule) => run_rule(rule, &mut tape, &mut reading, options),
             Step::Words { gate, rules, until } => {
-                if gate(options) {
-                    run_words(rules, *until, &mut tape, &mut reading);
-                }
+                gate(options) && run_words(rules, *until, &mut tape, &mut reading)
             }
+        };
+        // Episodes read within one step are a batch; only a later step's
+        // settle against them as a second scheme.
+        if provisional {
+            reading.set_provisional_episode();
         }
         if until.is_some_and(|until| step.names().contains(&until)) {
             break;
@@ -755,7 +762,7 @@ mod tests {
         ]);
         let mut reading = reading();
         let by = RuleName::Terms;
-        apply(
+        let provisional = apply(
             by,
             Certainty::Stated,
             Verdict::nothing()
@@ -764,6 +771,8 @@ mod tests {
             &mut tape,
             &mut reading,
         );
+        assert!(provisional);
+        reading.set_provisional_episode();
         apply(
             by,
             Certainty::Stated,

@@ -969,6 +969,43 @@ release_group = "Group"
 [case.by]
 volume_number = "volume_in_word"
 
+[[case]]
+name = "a number after an episode prefix is the episode even when it is also a term"
+input = "Episode 5.1 Show.mkv"
+
+[case.elements]
+file_extension = "mkv"
+episode_number = "5.1"
+anime_title = "Show"
+
+[case.by]
+episode_number = "episode_prefix"
+
+[[case]]
+name = "an ordinal after an episode prefix is the episode and still counts the season"
+input = "Show Ep 2nd Season.mkv"
+
+[case.elements]
+file_extension = "mkv"
+episode_number = "2nd"
+anime_season = "2"
+anime_title = "Show"
+
+[case.by]
+anime_season = "season_word"
+
+[[case]]
+name = "a second version tag after the first stays free for the group"
+input = "Byousoku 5 Centimeter Ep 01v2 - The Beginning [v2].mkv"
+
+[case.elements]
+file_extension = "mkv"
+episode_number = "01"
+release_version = "2"
+anime_title = "Byousoku 5 Centimeter"
+release_group = "v2"
+episode_title = "The Beginning"
+
 # Shapes the corpus and Ryuuji read differently, measured 2026-09-13.
 # anitomy itself passes 144 of its 182 cases; Ryuuji passes 156. Each case
 # below pins what Ryuuji reads today and, where the reading is a guess, the

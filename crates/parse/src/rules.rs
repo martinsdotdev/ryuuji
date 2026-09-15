@@ -37,10 +37,22 @@ mod year;
 
 use crate::element::ElementKind;
 use crate::engine::{Step, Verdict, WordRule};
+use crate::keyword::{Keyword, KeywordTable};
 use crate::numbering::{self, Extent, Numbering};
 use crate::reading::Reading;
 use crate::string;
 use crate::token::Tape;
+
+/// The table keyword the word at `at` spells once trimmed of dashes and
+/// spaces, with that trimmed word. A plain number is never a keyword.
+pub(super) fn keyword_at(tape: &Tape, at: usize) -> Option<(String, Keyword)> {
+    let word = string::trim_dashes_and_spaces(&tape.tokens[at].text);
+    if word.is_empty() || string::is_numeric(word) {
+        return None;
+    }
+    let keyword = KeywordTable::builtin().find_searchable(&word.to_uppercase())?;
+    Some((word.to_owned(), keyword))
+}
 
 /// Reads the number at `at` through the word shapes, or takes it whole.
 pub(super) fn take_number(verdict: Verdict, at: usize, word: &str, extent: Extent) -> Verdict {
@@ -119,6 +131,17 @@ pub(super) fn episode_token(tape: &Tape, reading: &Reading) -> Option<usize> {
         .map(|(at, _)| at)
 }
 
+/// The keyword pass, walked in tape order so a prefix claims its number
+/// before any other rule reads that number as a term.
+const KEYWORDS: &[WordRule] = &[
+    terms::RULE,
+    season_word::RULE,
+    episode_prefix::RULE,
+    volume_prefix::RULE,
+    checksum::RULE,
+    resolution::RULE,
+];
+
 /// The word shapes, tried on each free word in turn until one reads the
 /// episode. A volume read on the way applies and the walk goes on.
 const WORDS: &[WordRule] = &[
@@ -137,18 +160,17 @@ const WORDS: &[WordRule] = &[
 
 pub(crate) const RULES: &[Step] = &[
     Step::Tape(preidentified::RULE),
-    Step::Tape(terms::RULE),
-    Step::Tape(season_word::RULE),
-    Step::Tape(episode_prefix::RULE),
-    Step::Tape(volume_prefix::RULE),
-    Step::Tape(checksum::RULE),
-    Step::Tape(resolution::RULE),
+    Step::Words {
+        gate: |_| true,
+        rules: KEYWORDS,
+        until: None,
+    },
     Step::Tape(year::RULE),
     Step::Tape(isolated_resolution::RULE),
     Step::Words {
         gate: |options| options.parse_episode_number,
         rules: WORDS,
-        until: ElementKind::EpisodeNumber,
+        until: Some(ElementKind::EpisodeNumber),
     },
     Step::Tape(episode_equivalent::RULE),
     Step::Tape(episode_separated::RULE),

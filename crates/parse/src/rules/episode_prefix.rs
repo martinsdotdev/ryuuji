@@ -1,67 +1,49 @@
 //! `Ep. 08`, `Episode 12`, `Folge 3`: an episode word followed by a number.
 //! The word is used up and the number is read through the word shapes, so
 //! `Ep. 01v2` reads a version too. An episode read this way is provisional:
-//! a later, different number is the same episode under another scheme, and
-//! the engine settles which is which.
+//! a different number read by a later step is the same episode under
+//! another scheme, and the engine settles which is which.
 
 use crate::element::ElementKind;
-use crate::engine::{Rule, RuleName, Verdict};
-use crate::keyword::KeywordTable;
+use crate::engine::{RuleName, Verdict, WordRule};
 use crate::numbering::Extent;
 use crate::reading::{Certainty, Reading};
-use crate::rules::take_number;
-use crate::string;
+use crate::rules::{keyword_at, take_number};
 use crate::token::{self, Tape};
 
-pub(crate) const RULE: Rule = Rule {
+pub(crate) const RULE: WordRule = WordRule {
     name: RuleName::EpisodePrefix,
-    settles: None,
-    gate: |_| true,
     certainty: Certainty::Stated,
     read,
 };
 
-fn read(tape: &Tape, _reading: &Reading) -> Verdict {
-    let table = KeywordTable::builtin();
-    let mut verdict = Verdict::nothing();
-    let mut read_one = false;
-    for (at, token) in tape.free() {
-        let word = string::trim_dashes_and_spaces(&token.text);
-        if word.is_empty() || string::is_numeric(word) {
-            continue;
-        }
-        if table
-            .find_searchable(&word.to_uppercase())
-            .is_none_or(|keyword| keyword.kind != ElementKind::EpisodePrefix || !keyword.valid)
-        {
-            continue;
-        }
-        let Some(next) = tape.next(at, token::is_not_delimiter) else {
-            continue;
-        };
-        let number = &tape.tokens[next];
-        if !number.is_free() || !number.text.starts_with(|c: char| c.is_ascii_digit()) {
-            continue;
-        }
-        verdict = take_number(
-            verdict.spend(ElementKind::EpisodePrefix, at),
-            next,
-            &number.text,
-            Extent::Episode,
-        );
-        read_one = true;
+fn read(tape: &Tape, _reading: &Reading, at: usize) -> Verdict {
+    if keyword_at(tape, at)
+        .is_none_or(|(_, keyword)| keyword.kind != ElementKind::EpisodePrefix || !keyword.valid)
+    {
+        return Verdict::nothing();
     }
-    if read_one {
-        verdict.provisional()
-    } else {
-        verdict
+    let Some(next) = tape.next(at, token::is_not_delimiter) else {
+        return Verdict::nothing();
+    };
+    let number = &tape.tokens[next];
+    if !number.is_free() || !number.text.starts_with(|c: char| c.is_ascii_digit()) {
+        return Verdict::nothing();
     }
+    take_number(
+        Verdict::nothing().spend(ElementKind::EpisodePrefix, at),
+        next,
+        &number.text,
+        Extent::Episode,
+    )
+    .provisional()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::engine::probe;
+    use crate::options::Options;
 
     #[test]
     fn the_number_after_the_word_is_the_episode() {
@@ -89,7 +71,7 @@ mod tests {
 
     #[test]
     fn a_second_number_settles_as_another_scheme() {
-        let reading = crate::parse("Show Ep. 08 - 05v2.mkv", &crate::Options::default());
+        let reading = crate::parse("Show Ep. 08 - 05v2.mkv", &Options::default());
         assert_eq!(
             reading.elements().get(ElementKind::EpisodeNumber),
             Some("05")
@@ -97,6 +79,15 @@ mod tests {
         assert_eq!(
             reading.elements().get(ElementKind::EpisodeNumberAlt),
             Some("08")
+        );
+    }
+
+    #[test]
+    fn two_prefixed_episodes_are_a_batch() {
+        let reading = crate::parse("Show Ep 01 Ep 02.mkv", &Options::default());
+        assert_eq!(
+            reading.elements().get_all(ElementKind::EpisodeNumber),
+            ["01", "02"]
         );
     }
 }
