@@ -9,7 +9,8 @@
 use std::time::{Duration, SystemTime};
 
 use crate::{
-    Decline, HistoryId, PlaybackEvent, PlaybackStatus, ProposedMatch, Watch, WatchOutcome,
+    Decline, HistoryId, PlaybackEvent, PlaybackStatus, ProposedMatch, RecordOutcome, Watch,
+    WatchOutcome,
 };
 
 /// The most one event can credit when the player never says how long the
@@ -21,29 +22,44 @@ const MAX_STEP: Duration = Duration::from_secs(15);
 /// known duration the threshold is half the episode instead.
 const FALLBACK_THRESHOLD: Duration = Duration::from_secs(120);
 
-/// Across-events memory of what is being watched. The key is the viewing's
-/// identity. The cursor is where the player last was, and it advances on
-/// every event, Stopped and untitled ones included, because a position is
-/// only a delta against the one before it. The accrual and the recorded
-/// flag reset only when the key changes: a Stopped in the middle of a
-/// viewing keeps both, which is what guards a spurious Stopped-then-Playing
-/// pair from detection.
+/// Across-events memory of what is being watched. The viewing is what one
+/// player and title have come to. The cursor is where the player last was,
+/// and it advances on every event, Stopped and untitled ones included,
+/// because a position is only a delta against the one before it. The viewing
+/// changes only when a titled event names another player or title: a Stopped
+/// in the middle of a viewing keeps it, which is what guards a spurious
+/// Stopped-then-Playing pair from detection.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct WatchSession {
-    key: Option<(String, String)>,
-    last_position: Duration,
-    last_seen: Option<SystemTime>,
+    viewing: Option<Viewing>,
+    cursor: Cursor,
+}
+
+/// One player and title being watched, and what watching it has come to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Viewing {
+    /// The player and the raw title.
+    key: (String, String),
     /// The last non-zero duration reported for this viewing; an event that
     /// does not know it does not forget it.
     duration: Duration,
     accrued: Duration,
-    recorded: bool,
+    /// What the viewing's recording became once it wrote one: `Recorded`,
+    /// or `Undone` after an undo. Nothing records again while it is set.
+    recorded: Option<RecordOutcome>,
     /// The history row this viewing has written, once it has one.
     row: Option<HistoryId>,
     /// What the viewing last put in its row, or tried to. A failed write is
     /// remembered too, so a broken table costs one notice per change of
     /// reason rather than one per event.
     logged: Option<Logged>,
+}
+
+/// Where the player last was, and when.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Cursor {
+    position: Duration,
+    seen: Option<SystemTime>,
 }
 
 /// What a viewing's history row says, as far as the next write cares.
@@ -82,8 +98,9 @@ pub(crate) struct Accrual {
     pub accrued: Duration,
     /// Half the episode when its duration is known, else a flat two minutes.
     pub threshold: Duration,
-    /// The episode has already been written for this viewing.
-    pub recorded: bool,
+    /// What the viewing's recording became, once it has written its
+    /// episode: the app shows it instead of running the gates again.
+    pub recorded: Option<RecordOutcome>,
 }
 
 impl WatchSession {
@@ -95,16 +112,18 @@ impl WatchSession {
         last_match: Option<&ProposedMatch>,
         newest: Option<&Watch>,
     ) -> WatchSession {
-        let key = last_match.map(|m| (m.player.clone(), m.raw_title.clone()));
-        let newest = newest.filter(|watch| {
-            key.as_ref()
-                .is_some_and(|(player, title)| watch.player == *player && watch.raw_title == *title)
+        let viewing = last_match.map(|m| {
+            let key = (m.player.clone(), m.raw_title.clone());
+            let newest = newest.filter(|watch| watch.player == key.0 && watch.raw_title == key.1);
+            Viewing {
+                row: newest.map(|watch| watch.id),
+                logged: newest.map(|watch| Logged::of(watch.outcome)),
+                ..Viewing::new(key)
+            }
         });
         WatchSession {
-            key,
-            row: newest.map(|watch| watch.id),
-            logged: newest.map(|watch| Logged::of(watch.outcome)),
-            ..WatchSession::default()
+            viewing,
+            cursor: Cursor::default(),
         }
     }
 
@@ -115,19 +134,22 @@ impl WatchSession {
         ) && !event.title.trim().is_empty();
         let new_viewing = titled && !self.is_watching(event);
         if new_viewing {
-            *self = WatchSession {
-                key: Some((event.player.clone(), event.title.clone())),
-                ..WatchSession::default()
-            };
+            self.viewing = Some(Viewing::new((event.player.clone(), event.title.clone())));
         }
-        if titled {
+        if titled && let Some(viewing) = self.viewing.as_mut() {
             if !event.duration.is_zero() {
-                self.duration = event.duration;
+                viewing.duration = event.duration;
             }
-            self.accrued += self.credit(event);
+            // The cursor belongs to what was watched before, so the event
+            // that starts a viewing credits nothing.
+            if !new_viewing {
+                viewing.accrued += self.cursor.credit(event, viewing.duration);
+            }
         }
-        self.last_position = event.position;
-        self.last_seen = Some(event.observed_at);
+        self.cursor = Cursor {
+            position: event.position,
+            seen: Some(event.observed_at),
+        };
         Observed {
             new_viewing,
             progress: self.progress(),
@@ -137,72 +159,108 @@ impl WatchSession {
     /// The episode has been written into `row`; nothing more records until
     /// the key changes.
     pub(crate) fn mark_recorded(&mut self, row: HistoryId) {
-        self.recorded = true;
         self.wrote(row, Logged::Recorded);
+        if let Some(viewing) = self.viewing.as_mut() {
+            viewing.recorded = Some(RecordOutcome::Recorded(row));
+        }
+    }
+
+    /// The recording in `row` was undone. The viewing that wrote it still
+    /// writes nothing more, and now says its recording was undone.
+    pub(crate) fn undid(&mut self, row: HistoryId) {
+        if let Some(viewing) = self.viewing.as_mut()
+            && viewing.recorded == Some(RecordOutcome::Recorded(row))
+        {
+            viewing.recorded = Some(RecordOutcome::Undone);
+        }
     }
 
     /// The row the next write for this viewing goes into: its own, unless
     /// that row already holds a recording, which nothing overwrites.
     pub(crate) fn open_row(&self) -> Option<HistoryId> {
-        self.row.filter(|_| self.logged != Some(Logged::Recorded))
+        let viewing = self.viewing.as_ref()?;
+        viewing
+            .row
+            .filter(|_| viewing.logged != Some(Logged::Recorded))
     }
 
     pub(crate) fn logged(&self) -> Option<Logged> {
-        self.logged
+        self.viewing.as_ref()?.logged
     }
 
     /// `row` now says `logged`.
     pub(crate) fn wrote(&mut self, row: HistoryId, logged: Logged) {
-        self.row = Some(row);
-        self.logged = Some(logged);
+        if let Some(viewing) = self.viewing.as_mut() {
+            viewing.row = Some(row);
+            viewing.logged = Some(logged);
+        }
     }
 
     /// A write of `logged` failed; the row, if any, still says what it did.
     pub(crate) fn tried(&mut self, logged: Logged) {
-        self.logged = Some(logged);
+        if let Some(viewing) = self.viewing.as_mut() {
+            viewing.logged = Some(logged);
+        }
     }
 
     fn is_watching(&self, event: &PlaybackEvent) -> bool {
-        self.key
+        self.viewing
             .as_ref()
-            .is_some_and(|(player, title)| *player == event.player && *title == event.title)
+            .is_some_and(|viewing| viewing.is(event))
     }
 
-    /// Time this event proves was watched since the cursor. Nobody watches
-    /// more file time than wall time has passed, so the position delta is
-    /// capped by the wall gap: a seek credits only the seconds it took, a
-    /// stalled player credits nothing, and a rewind saturates to nothing.
-    fn credit(&self, event: &PlaybackEvent) -> Duration {
+    fn progress(&self) -> Option<Accrual> {
+        let viewing = self.viewing.as_ref()?;
+        let threshold = if viewing.duration.is_zero() {
+            FALLBACK_THRESHOLD
+        } else {
+            viewing.duration / 2
+        };
+        Some(Accrual {
+            accrued: viewing.accrued,
+            threshold,
+            recorded: viewing.recorded,
+        })
+    }
+}
+
+impl Viewing {
+    fn new(key: (String, String)) -> Viewing {
+        Viewing {
+            key,
+            duration: Duration::ZERO,
+            accrued: Duration::ZERO,
+            recorded: None,
+            row: None,
+            logged: None,
+        }
+    }
+
+    fn is(&self, event: &PlaybackEvent) -> bool {
+        self.key.0 == event.player && self.key.1 == event.title
+    }
+}
+
+impl Cursor {
+    /// Time `event` proves was watched since the cursor, in a file
+    /// `duration` long. Nobody watches more file time than wall time has
+    /// passed, so the position delta is capped by the wall gap: a seek
+    /// credits only the seconds it took, a stalled player credits nothing,
+    /// and a rewind saturates to nothing.
+    fn credit(self, event: &PlaybackEvent, duration: Duration) -> Duration {
         if event.status != PlaybackStatus::Playing || event.foreground == Some(false) {
             return Duration::ZERO;
         }
-        let Some(seen) = self.last_seen else {
+        let Some(seen) = self.seen else {
             return Duration::ZERO;
         };
         // `observed_at` is wall-clock time and can step backwards.
         let wall_gap = event.observed_at.duration_since(seen).unwrap_or_default();
-        if self.duration.is_zero() {
+        if duration.is_zero() {
             wall_gap.min(MAX_STEP)
         } else {
-            event
-                .position
-                .saturating_sub(self.last_position)
-                .min(wall_gap)
+            event.position.saturating_sub(self.position).min(wall_gap)
         }
-    }
-
-    fn progress(&self) -> Option<Accrual> {
-        self.key.as_ref()?;
-        let threshold = if self.duration.is_zero() {
-            FALLBACK_THRESHOLD
-        } else {
-            self.duration / 2
-        };
-        Some(Accrual {
-            accrued: self.accrued,
-            threshold,
-            recorded: self.recorded,
-        })
     }
 }
 
@@ -217,6 +275,12 @@ mod tests {
 
     fn secs(value: u64) -> Duration {
         Duration::from_secs(value)
+    }
+
+    fn accrued(session: &WatchSession) -> Duration {
+        session
+            .progress()
+            .map_or(Duration::ZERO, |progress| progress.accrued)
     }
 
     fn event(title: &str, status: PlaybackStatus, position: u64, seen: u64) -> PlaybackEvent {
@@ -264,7 +328,7 @@ mod tests {
                 progress: Some(Accrual {
                     accrued: Duration::ZERO,
                     threshold: secs(710),
-                    recorded: false,
+                    recorded: None,
                 }),
             }
         );
@@ -314,7 +378,7 @@ mod tests {
             }
         );
         assert!(!session.observe(&playing("  \t")).new_viewing);
-        assert_eq!(session.key, None);
+        assert_eq!(session.viewing, None);
 
         session.observe(&playing("Show - 03.mkv"));
         let observed = session.observe(&playing(""));
@@ -329,8 +393,8 @@ mod tests {
         session.observe(&playing("Show - 03.mkv"));
         let stopped = event("Show - 03.mkv", PlaybackStatus::Stopped, 1_400, 2_100);
         assert!(!session.observe(&stopped).new_viewing);
-        assert_eq!(session.last_position, Duration::from_secs(1_400));
-        assert_eq!(session.last_seen, Some(at(2_100)));
+        assert_eq!(session.cursor.position, Duration::from_secs(1_400));
+        assert_eq!(session.cursor.seen, Some(at(2_100)));
         // Stopped does not end the viewing either: the same title coming
         // back is the same viewing.
         assert!(!session.observe(&playing("Show - 03.mkv")).new_viewing);
@@ -339,20 +403,20 @@ mod tests {
     #[test]
     fn cursor_follows_the_last_position_and_time() {
         let mut session = WatchSession::default();
-        assert_eq!(session.last_position, Duration::ZERO);
-        assert_eq!(session.last_seen, None);
+        assert_eq!(session.cursor.position, Duration::ZERO);
+        assert_eq!(session.cursor.seen, None);
 
         session.observe(&event("Show - 03.mkv", PlaybackStatus::Playing, 305, 1_000));
-        assert_eq!(session.last_position, Duration::from_secs(305));
-        assert_eq!(session.last_seen, Some(at(1_000)));
+        assert_eq!(session.cursor.position, Duration::from_secs(305));
+        assert_eq!(session.cursor.seen, Some(at(1_000)));
 
         session.observe(&event("Show - 03.mkv", PlaybackStatus::Paused, 610, 1_305));
-        assert_eq!(session.last_position, Duration::from_secs(610));
-        assert_eq!(session.last_seen, Some(at(1_305)));
+        assert_eq!(session.cursor.position, Duration::from_secs(610));
+        assert_eq!(session.cursor.seen, Some(at(1_305)));
 
         session.observe(&event("", PlaybackStatus::Playing, 7, 1_400));
-        assert_eq!(session.last_position, Duration::from_secs(7));
-        assert_eq!(session.last_seen, Some(at(1_400)));
+        assert_eq!(session.cursor.position, Duration::from_secs(7));
+        assert_eq!(session.cursor.seen, Some(at(1_400)));
     }
 
     #[test]
@@ -445,7 +509,7 @@ mod tests {
         session.observe(&playing_at(100, 1_000));
         session.observe(&playing_at(101, 1_001));
         session.observe(&playing_at(160, 1_060));
-        assert_eq!(session.accrued, secs(60));
+        assert_eq!(accrued(&session), secs(60));
     }
 
     #[test]
@@ -453,10 +517,10 @@ mod tests {
         let mut session = WatchSession::default();
         session.observe(&playing_at(600, 1_000));
         session.observe(&playing_at(100, 1_001));
-        assert_eq!(session.accrued, Duration::ZERO);
+        assert_eq!(accrued(&session), Duration::ZERO);
         // And the cursor moved, so playback from the new spot counts.
         session.observe(&playing_at(110, 1_011));
-        assert_eq!(session.accrued, secs(10));
+        assert_eq!(accrued(&session), secs(10));
     }
 
     #[test]
@@ -464,7 +528,7 @@ mod tests {
         let mut session = WatchSession::default();
         session.observe(&playing_at(100, 1_000));
         session.observe(&playing_at(400, 1_001));
-        assert_eq!(session.accrued, secs(1));
+        assert_eq!(accrued(&session), secs(1));
     }
 
     #[test]
@@ -472,7 +536,7 @@ mod tests {
         let mut session = WatchSession::default();
         session.observe(&playing_at(100, 1_000));
         session.observe(&playing_at(100, 1_005));
-        assert_eq!(session.accrued, Duration::ZERO);
+        assert_eq!(accrued(&session), Duration::ZERO);
     }
 
     #[test]
@@ -483,9 +547,9 @@ mod tests {
         session.observe(&event("Show - 03.mkv", PlaybackStatus::Paused, 110, 1_011));
         session.observe(&event("Show - 03.mkv", PlaybackStatus::Paused, 110, 1_600));
         session.observe(&playing_at(110, 1_601));
-        assert_eq!(session.accrued, secs(10));
+        assert_eq!(accrued(&session), secs(10));
         session.observe(&playing_at(170, 1_661));
-        assert_eq!(session.accrued, secs(70));
+        assert_eq!(accrued(&session), secs(70));
     }
 
     #[test]
@@ -496,17 +560,17 @@ mod tests {
             foreground: Some(false),
             ..playing_at(160, 1_060)
         });
-        assert_eq!(session.accrued, Duration::ZERO);
+        assert_eq!(accrued(&session), Duration::ZERO);
         session.observe(&PlaybackEvent {
             foreground: Some(true),
             ..playing_at(170, 1_070)
         });
-        assert_eq!(session.accrued, secs(10));
+        assert_eq!(accrued(&session), secs(10));
         session.observe(&PlaybackEvent {
             foreground: None,
             ..playing_at(180, 1_080)
         });
-        assert_eq!(session.accrued, secs(20));
+        assert_eq!(accrued(&session), secs(20));
     }
 
     #[test]
@@ -514,13 +578,13 @@ mod tests {
         let mut session = WatchSession::default();
         session.observe(&playing_at(100, 1_000));
         session.observe(&playing_at(400, 1_300));
-        session.recorded = true;
+        session.mark_recorded(HistoryId(1));
         session.observe(&event("Show - 03.mkv", PlaybackStatus::Stopped, 400, 1_301));
-        assert_eq!(session.accrued, secs(300));
-        assert!(session.recorded);
+        assert_eq!(accrued(&session), secs(300));
+        assert!(session.progress().unwrap().recorded.is_some());
         session.observe(&playing_at(401, 1_302));
-        assert_eq!(session.accrued, secs(301));
-        assert!(session.recorded);
+        assert_eq!(accrued(&session), secs(301));
+        assert!(session.progress().unwrap().recorded.is_some());
     }
 
     #[test]
@@ -532,9 +596,9 @@ mod tests {
         let mut session = WatchSession::default();
         session.observe(&unknown(0, 1_000));
         session.observe(&unknown(60, 1_060));
-        assert_eq!(session.accrued, MAX_STEP);
+        assert_eq!(accrued(&session), MAX_STEP);
         session.observe(&unknown(65, 1_065));
-        assert_eq!(session.accrued, secs(20));
+        assert_eq!(accrued(&session), secs(20));
     }
 
     #[test]
@@ -545,7 +609,7 @@ mod tests {
             duration: Duration::ZERO,
             ..playing_at(60, 1_060)
         });
-        assert_eq!(session.accrued, secs(60));
+        assert_eq!(accrued(&session), secs(60));
         assert_eq!(session.progress().unwrap().threshold, secs(710));
     }
 
@@ -554,7 +618,7 @@ mod tests {
         let mut session = WatchSession::default();
         session.observe(&playing_at(100, 1_000));
         session.observe(&playing_at(130, 1_030));
-        assert_eq!(session.accrued, secs(30));
+        assert_eq!(accrued(&session), secs(30));
     }
 
     #[test]
@@ -579,7 +643,7 @@ mod tests {
         let mut session = WatchSession::default();
         session.observe(&playing_at(100, 1_000));
         session.observe(&playing_at(400, 1_300));
-        session.recorded = true;
+        session.mark_recorded(HistoryId(1));
 
         let observed = session.observe(&event("Show - 04.mkv", PlaybackStatus::Playing, 5, 1_305));
         assert!(observed.new_viewing);
@@ -588,11 +652,11 @@ mod tests {
             Some(Accrual {
                 accrued: Duration::ZERO,
                 threshold: secs(710),
-                recorded: false,
+                recorded: None,
             })
         );
         // Nothing from the old title's cursor leaks into the first credit.
-        assert_eq!(session.accrued, Duration::ZERO);
+        assert_eq!(accrued(&session), Duration::ZERO);
     }
 
     #[test]
@@ -606,6 +670,7 @@ mod tests {
                 .progress
                 .unwrap()
                 .recorded
+                .is_some()
         );
         assert!(
             session
@@ -613,6 +678,7 @@ mod tests {
                 .progress
                 .unwrap()
                 .recorded
+                .is_some()
         );
         assert!(
             session
@@ -620,6 +686,7 @@ mod tests {
                 .progress
                 .unwrap()
                 .recorded
+                .is_some()
         );
         assert!(
             session
@@ -627,6 +694,7 @@ mod tests {
                 .progress
                 .unwrap()
                 .recorded
+                .is_some()
         );
     }
 
@@ -635,7 +703,7 @@ mod tests {
         let mut session = WatchSession::default();
         session.observe(&playing_at(100, 1_000));
         session.observe(&playing_at(160, 940));
-        assert_eq!(session.accrued, Duration::ZERO);
-        assert_eq!(session.last_seen, Some(at(940)));
+        assert_eq!(accrued(&session), Duration::ZERO);
+        assert_eq!(session.cursor.seen, Some(at(940)));
     }
 }

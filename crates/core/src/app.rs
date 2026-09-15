@@ -132,32 +132,22 @@ impl Ryuuji {
             let proposal = matching::propose(&event, &self.state.library);
             self.record_match(proposal);
         }
-        let previous = self.state.watch_progress.map(|progress| progress.outcome);
         self.state.watch_progress = observed.progress.map(|accrual| WatchProgress {
             accrued: accrual.accrued,
             threshold: accrual.threshold,
-            outcome: self.record_outcome(accrual, previous),
+            outcome: self.record_outcome(accrual),
         });
         self.state.now_playing = NowPlaying::of(&event);
     }
 
     /// Writes the episode the standing viewing has earned, once per viewing,
-    /// and says what came of it. Once the session is recorded the standing
-    /// outcome carries forward instead of the gates running again, since
-    /// the id they minted lives nowhere else. A failed write leaves the
-    /// session unrecorded, so the next event past the threshold tries again
-    /// and the notice says why.
-    fn record_outcome(
-        &mut self,
-        accrual: Accrual,
-        previous: Option<RecordOutcome>,
-    ) -> RecordOutcome {
-        if accrual.recorded {
-            return previous
-                .filter(|outcome| {
-                    matches!(outcome, RecordOutcome::Recorded(_) | RecordOutcome::Undone)
-                })
-                .unwrap_or(RecordOutcome::Counting);
+    /// and says what came of it. Once the viewing has recorded, the session
+    /// says what that recording became instead of the gates running again.
+    /// A failed write leaves the viewing unrecorded, so the next event past
+    /// the threshold tries again and the notice says why.
+    fn record_outcome(&mut self, accrual: Accrual) -> RecordOutcome {
+        if let Some(recorded) = accrual.recorded {
+            return recorded;
         }
         if accrual.accrued < accrual.threshold {
             return RecordOutcome::Counting;
@@ -280,6 +270,7 @@ impl Ryuuji {
             "recording undone"
         );
         upsert(&mut self.state.library, entry);
+        self.session.undid(id);
         if let Some(progress) = self.state.watch_progress.as_mut()
             && progress.outcome == RecordOutcome::Recorded(id)
         {
