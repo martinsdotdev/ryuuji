@@ -933,6 +933,42 @@ episode_number = "12"
 release_version = "2"
 anime_title = "Show"
 
+[[case]]
+name = "a version tag elsewhere does not cost the episode its version"
+input = "[Group] Show - 05v2 [v2].mkv"
+
+[case.elements]
+file_extension = "mkv"
+release_version = ["2", "2"]
+episode_number = "05"
+anime_title = "Show"
+release_group = "Group"
+
+[[case]]
+name = "a version tag before a versioned episode leaves the rest of the name alone"
+input = "Show v2 01v2 EP05.mkv"
+
+[case.elements]
+file_extension = "mkv"
+release_version = ["2", "2"]
+episode_number = "01"
+anime_title = "Show"
+episode_title = "EP05"
+
+[[case]]
+name = "two glued volumes are both volumes"
+input = "[Group] Show Vol.1 & Vol.2 [BD].mkv"
+
+[case.elements]
+file_extension = "mkv"
+source = "BD"
+volume_number = ["1", "2"]
+anime_title = "Show"
+release_group = "Group"
+
+[case.by]
+volume_number = "volume_in_word"
+
 # Shapes the corpus and Ryuuji read differently, measured 2026-09-13.
 # anitomy itself passes 144 of its 182 cases; Ryuuji passes 156. Each case
 # below pins what Ryuuji reads today and, where the reading is a guess, the
