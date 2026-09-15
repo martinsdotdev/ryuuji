@@ -27,7 +27,7 @@ pub use diagnostics::{ByteSize, Diagnostics, FileFacts, FileStat, ProbeFailed};
 pub use matching::{Confidence, Link, ProposedMatch, normalize_title, propose, similarity};
 pub use playback::{PlaybackEvent, PlaybackSource, PlaybackStatus};
 // Shells depend on this crate alone, so the parser reaches them through here.
-pub use ryuuji_parse::{Alternative, Certainty, ElementKind, Options, Reading, parse};
+pub use ryuuji_parse::{Certainty, ElementKind, Options, parse};
 pub use store::{DbError, Opened, Recording, Recovered, SchemaVersion, Store, StoreError};
 use tagged::tagged_enum;
 
