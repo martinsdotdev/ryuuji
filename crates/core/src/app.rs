@@ -1230,6 +1230,40 @@ mod tests {
     }
 
     #[test]
+    fn undo_after_the_progress_moved_on_notices_and_changes_nothing() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        let event = record_first_episode(&mut app, &dir);
+        let id = app.state().library[0].id;
+        app.dispatch(Command::SetProgress { id, progress: 5 });
+
+        app.dispatch(Command::UndoRecording(event));
+        assert!(matches!(
+            app.state().notices.as_slice(),
+            [Notice::SaveFailed { detail }] if detail.contains("moved on")
+        ));
+        assert_eq!(app.state().library[0].progress, 5);
+        assert_eq!(stored_progress(&dir, id), 5);
+        assert_eq!(outcome(&app), RecordOutcome::Recorded(event));
+        assert_eq!(stored_events(&dir)[0].undone_at, None);
+    }
+
+    #[test]
+    fn a_later_recording_blocks_undoing_the_earlier_one() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        let first = record_first_episode(&mut app, &dir);
+        app.dispatch(Command::Playback(later("Show - 02.mkv", 3_000)));
+        app.dispatch(Command::Playback(later("Show - 02.mkv", 3_720)));
+        assert_eq!(app.state().library[0].progress, 2);
+
+        app.dispatch(Command::UndoRecording(first));
+        assert_eq!(app.state().library[0].progress, 2);
+        assert_eq!(app.state().notices.len(), 1);
+        assert_eq!(stored_writes(&dir), vec![(1..=1, 0, 1), (2..=2, 1, 2)]);
+    }
+
+    #[test]
     fn watching_on_after_undo_does_not_record_again() {
         let (_tmp, dir) = open_tmp();
         let mut app = Ryuuji::open(&dir).unwrap();
