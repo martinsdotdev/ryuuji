@@ -474,7 +474,7 @@ fn placeholder(heading: impl Into<String>, body: impl Into<String>) -> Element {
 
 #[cfg(test)]
 mod tests {
-    use ryuuji_core::{Decline, Link, NewEntry, NewWatchEvent, Opened, Store, WatchStatus};
+    use ryuuji_core::{Decline, Link, NewEntry, NewRecording, Opened, Store, WatchStatus};
 
     use super::*;
 
@@ -569,9 +569,9 @@ mod tests {
         assert_eq!(match_caption(&proposal(), false, now), "No library entry");
     }
 
-    /// Only the store mints a [`WatchEventId`], so the Recorded arm needs one
+    /// Only the store mints a `HistoryId`, so the Recorded arm needs one
     /// recorded for real.
-    fn recorded_event_id() -> ryuuji_core::WatchEventId {
+    fn recorded_watch_id() -> ryuuji_core::HistoryId {
         let tmp = tempfile::tempdir().unwrap();
         let dir = DataDir::at(tmp.path()).unwrap();
         let Opened { mut store, .. } = Store::open(&dir).unwrap();
@@ -585,14 +585,15 @@ mod tests {
             })
             .unwrap();
         store
-            .record(NewWatchEvent {
+            .record(NewRecording {
                 entry: entry.id,
                 episode: 1..=1,
                 raw_title: "Show - 01.mkv".to_owned(),
+                parsed_title: "Show".to_owned(),
                 player: "mpv".to_owned(),
             })
             .unwrap()
-            .event
+            .watch
             .id
     }
 
@@ -615,7 +616,7 @@ mod tests {
         assert_eq!(progress_text(&overshot, None), "Recording in 0:00");
 
         let recorded = WatchProgress {
-            outcome: RecordOutcome::Recorded(recorded_event_id()),
+            outcome: RecordOutcome::Recorded(recorded_watch_id()),
             ..counting
         };
         assert_eq!(

@@ -1,10 +1,10 @@
 use crate::settings::{self, SettingsError};
 use crate::watch::{Accrual, WatchSession};
 use crate::{
-    AppState, Command, DataDir, Decline, Diagnostics, LibraryEntry, Link, NewEntry, NewWatchEvent,
-    Notice, NowPlaying, Opened, PlaybackEvent, ProposedMatch, RecordOutcome, Recording, Settings,
-    Store, StoreError, ThemePreference, WatchEventId, WatchProgress, WatchStatus, error_chain,
-    matching,
+    AppState, Command, DataDir, Decline, Diagnostics, HistoryId, LibraryEntry, Link, NewEntry,
+    NewRecording, Notice, NowPlaying, Opened, PlaybackEvent, ProposedMatch, RecordOutcome,
+    Recording, Settings, Store, StoreError, ThemePreference, WatchProgress, WatchStatus,
+    error_chain, matching,
 };
 
 /// The running application: the store plus the state derived from it.
@@ -146,25 +146,25 @@ impl Ryuuji {
             Err(decline) => return RecordOutcome::Declined(decline),
         };
         let outcome = self.store.record(write);
-        let Some(Recording { entry, event }) = commit(&mut self.state.notices, "progress", outcome)
+        let Some(Recording { entry, watch }) = commit(&mut self.state.notices, "progress", outcome)
         else {
             return RecordOutcome::Counting;
         };
-        upsert(&mut self.state.library, entry);
-        self.session.mark_recorded();
         tracing::info!(
-            entry = event.entry.as_i64(),
-            event = event.id.as_i64(),
-            progress = event.progress,
+            entry = entry.id.as_i64(),
+            watch = watch.id.as_i64(),
+            progress = entry.progress,
             "episode recorded"
         );
-        RecordOutcome::Recorded(event.id)
+        upsert(&mut self.state.library, entry);
+        self.session.mark_recorded();
+        RecordOutcome::Recorded(watch.id)
     }
 
     /// The write the standing viewing has earned, or the first gate that
     /// refuses it. The gates run in the order a decline would be explained
     /// in: the match, then the entry.
-    fn earned(&self) -> Result<NewWatchEvent, Decline> {
+    fn earned(&self) -> Result<NewRecording, Decline> {
         let last = self.state.last_match.as_ref().ok_or(Decline::NotExact)?;
         let Link::Exact(id) = last.link else {
             return Err(Decline::NotExact);
@@ -190,10 +190,11 @@ impl Ryuuji {
         if entry.total.is_some_and(|total| *range.end() > total) {
             return Err(Decline::PastTotal);
         }
-        Ok(NewWatchEvent {
+        Ok(NewRecording {
             entry: id,
             episode: range.clone(),
             raw_title: last.raw_title.clone(),
+            parsed_title: last.parsed_title.clone(),
             player: last.player.clone(),
         })
     }
@@ -203,24 +204,23 @@ impl Ryuuji {
     /// write again; a relaunch and rewatch does, because the range gate
     /// permits `progress + 1` once more, which is the right answer to "I
     /// undid it and watched it again".
-    fn undo_recording(&mut self, id: WatchEventId) {
+    fn undo_recording(&mut self, id: HistoryId) {
         let outcome = self.store.undo(id);
-        let Some(Recording { entry, event }) = commit(&mut self.state.notices, "undo", outcome)
-        else {
+        let Some(Recording { entry, .. }) = commit(&mut self.state.notices, "undo", outcome) else {
             return;
         };
+        tracing::info!(
+            entry = entry.id.as_i64(),
+            watch = id.as_i64(),
+            progress = entry.progress,
+            "recording undone"
+        );
         upsert(&mut self.state.library, entry);
         if let Some(progress) = self.state.watch_progress.as_mut()
             && progress.outcome == RecordOutcome::Recorded(id)
         {
             progress.outcome = RecordOutcome::Undone;
         }
-        tracing::info!(
-            entry = event.entry.as_i64(),
-            event = id.as_i64(),
-            progress = event.progress_before,
-            "recording undone"
-        );
     }
 
     fn set_theme(&mut self, theme: ThemePreference) {
@@ -343,7 +343,9 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     use super::*;
-    use crate::{Detail, EntryId, Page, PlaybackSource, PlaybackStatus, WatchEvent};
+    use crate::{
+        Detail, EntryId, Page, PlaybackSource, PlaybackStatus, Recorded, Watch, WatchOutcome,
+    };
 
     fn open_tmp() -> (tempfile::TempDir, DataDir) {
         let tmp = tempfile::tempdir().unwrap();
@@ -961,20 +963,39 @@ mod tests {
             .progress
     }
 
-    fn stored_events(dir: &DataDir) -> Vec<WatchEvent> {
-        Store::open(dir).unwrap().store.watch_events().unwrap()
+    /// Every stored watch, oldest first.
+    fn stored_watches(dir: &DataDir) -> Vec<Watch> {
+        let mut watches = Store::open(dir)
+            .unwrap()
+            .store
+            .history(None, 1_000)
+            .unwrap()
+            .watches;
+        watches.reverse();
+        watches
     }
 
     fn outcome(app: &Ryuuji) -> RecordOutcome {
         app.state().watch_progress.unwrap().outcome
     }
 
-    /// The `(episode, progress_before, progress)` of every stored event,
-    /// which is what a recording test cares about.
+    fn recorded(watch: &Watch) -> Recorded {
+        match watch.outcome {
+            WatchOutcome::Recorded(recorded) => recorded,
+            other => panic!("not a recording: {other:?}"),
+        }
+    }
+
+    /// The `(episode, progress_before, progress)` of every stored recording,
+    /// oldest first, which is what a recording test cares about.
     fn stored_writes(dir: &DataDir) -> Vec<(RangeInclusive<u32>, u32, u32)> {
-        stored_events(dir)
-            .into_iter()
-            .map(|event| (event.episode, event.progress_before, event.progress))
+        stored_watches(dir)
+            .iter()
+            .map(|watch| {
+                let write = recorded(watch);
+                let episode = watch.episode.clone().unwrap();
+                (episode, write.progress_before, write.progress)
+            })
             .collect()
     }
 
@@ -988,28 +1009,29 @@ mod tests {
         app.dispatch(Command::Playback(playing("Show - 01.mkv")));
         assert_eq!(app.state().library[0].progress, 0);
         assert_eq!(outcome(&app), RecordOutcome::Counting);
-        assert_eq!(stored_events(&dir), vec![]);
+        assert_eq!(stored_watches(&dir), vec![]);
 
         app.dispatch(Command::Playback(later("Show - 01.mkv", 720)));
         assert_eq!(app.state().library[0].progress, 1);
         assert_eq!(stored_progress(&dir, id), 1);
         assert!(app.state().notices.is_empty());
-        let events = stored_events(&dir);
-        assert_eq!(events.len(), 1);
-        assert_eq!(outcome(&app), RecordOutcome::Recorded(events[0].id));
-        assert_eq!(events[0].entry, id);
-        assert_eq!(events[0].episode, 1..=1);
-        assert_eq!(events[0].progress_before, 0);
-        assert_eq!(events[0].progress, 1);
-        assert_eq!(events[0].raw_title, "Show - 01.mkv");
-        assert_eq!(events[0].player, "mpv");
-        assert_eq!(events[0].undone_at, None);
+        let watches = stored_watches(&dir);
+        assert_eq!(watches.len(), 1);
+        assert_eq!(outcome(&app), RecordOutcome::Recorded(watches[0].id));
+        assert_eq!(watches[0].link, Link::Exact(id));
+        assert_eq!(watches[0].episode, Some(1..=1));
+        assert_eq!(watches[0].raw_title, "Show - 01.mkv");
+        assert_eq!(watches[0].parsed_title, "Show");
+        assert_eq!(watches[0].player, "mpv");
+        let write = recorded(&watches[0]);
+        assert_eq!((write.progress_before, write.progress), (0, 1));
+        assert_eq!(write.undone_at, None);
 
         app.dispatch(Command::Playback(later("Show - 01.mkv", 1_400)));
         assert_eq!(app.state().library[0].progress, 1);
         assert_eq!(stored_progress(&dir, id), 1);
-        assert_eq!(stored_events(&dir), events);
-        assert_eq!(outcome(&app), RecordOutcome::Recorded(events[0].id));
+        assert_eq!(stored_watches(&dir), watches);
+        assert_eq!(outcome(&app), RecordOutcome::Recorded(watches[0].id));
     }
 
     #[test]
@@ -1035,7 +1057,7 @@ mod tests {
         app.dispatch(Command::Playback(later("Show - 01.mkv", 700)));
         assert_eq!(app.state().library[0].progress, 0);
         assert_eq!(outcome(&app), RecordOutcome::Counting);
-        assert_eq!(stored_events(&dir), vec![]);
+        assert_eq!(stored_watches(&dir), vec![]);
     }
 
     #[test]
@@ -1050,7 +1072,7 @@ mod tests {
         ));
         assert_eq!(app.state().library[0].progress, 0);
         assert_eq!(outcome(&app), RecordOutcome::Declined(Decline::NotExact));
-        assert_eq!(stored_events(&dir), vec![]);
+        assert_eq!(stored_watches(&dir), vec![]);
     }
 
     #[test]
@@ -1066,7 +1088,7 @@ mod tests {
         watch_past_threshold(&mut app, "Show - 01.mkv");
         assert_eq!(app.state().library[0].progress, 0);
         assert_eq!(outcome(&app), RecordOutcome::Declined(Decline::Completed));
-        assert_eq!(stored_events(&dir), vec![]);
+        assert_eq!(stored_watches(&dir), vec![]);
 
         // Nothing sets the flag before M5, so it goes in underneath.
         app.store_mut()
@@ -1099,7 +1121,7 @@ mod tests {
         watch_past_threshold(&mut app, "Show.mkv");
         assert_eq!(app.state().library[0].progress, 4);
         assert_eq!(outcome(&app), RecordOutcome::Declined(Decline::NoEpisode));
-        assert_eq!(stored_events(&dir), vec![]);
+        assert_eq!(stored_watches(&dir), vec![]);
 
         watch_past_threshold(&mut app, "Show - 05.mkv");
         assert_eq!(app.state().library[0].progress, 5);
@@ -1122,7 +1144,7 @@ mod tests {
         watch_past_threshold(&mut app, "Show - 13.mkv");
         assert_eq!(app.state().library[0].progress, 12);
         assert_eq!(outcome(&app), RecordOutcome::Declined(Decline::PastTotal));
-        assert_eq!(stored_events(&dir), vec![]);
+        assert_eq!(stored_watches(&dir), vec![]);
     }
 
     #[test]
@@ -1147,7 +1169,7 @@ mod tests {
         let mut app = Ryuuji::open(&dir).unwrap();
         app.dispatch(Command::AddEntry(entry("Show")));
         app.dispatch(Command::Playback(playing("Show - 01.mkv")));
-        app.store_mut().execute_raw("DROP TABLE watch_events");
+        app.store_mut().execute_raw("DROP TABLE history");
 
         app.dispatch(Command::Playback(later("Show - 01.mkv", 720)));
         assert_eq!(app.state().library[0].progress, 0);
@@ -1169,31 +1191,31 @@ mod tests {
         ));
     }
 
-    /// Records episode 1 of a fresh "Show" and hands back the event id.
-    fn record_first_episode(app: &mut Ryuuji, dir: &DataDir) -> WatchEventId {
+    /// Records episode 1 of a fresh "Show" and hands back its history id.
+    fn record_first_episode(app: &mut Ryuuji, dir: &DataDir) -> HistoryId {
         app.dispatch(Command::AddEntry(entry("Show")));
         watch_past_threshold(app, "Show - 01.mkv");
         assert_eq!(app.state().library[0].progress, 1);
-        let events = stored_events(dir);
-        assert_eq!(events.len(), 1);
-        events[0].id
+        let watches = stored_watches(dir);
+        assert_eq!(watches.len(), 1);
+        watches[0].id
     }
 
     #[test]
     fn undo_restores_the_progress_in_memory_and_on_disk() {
         let (_tmp, dir) = open_tmp();
         let mut app = Ryuuji::open(&dir).unwrap();
-        let event = record_first_episode(&mut app, &dir);
+        let watch = record_first_episode(&mut app, &dir);
         let id = app.state().library[0].id;
 
-        app.dispatch(Command::UndoRecording(event));
+        app.dispatch(Command::UndoRecording(watch));
         assert_eq!(app.state().library[0].progress, 0);
         assert_eq!(stored_progress(&dir, id), 0);
         assert_eq!(outcome(&app), RecordOutcome::Undone);
         assert!(app.state().notices.is_empty());
-        let events = stored_events(&dir);
-        assert_eq!(events.len(), 1);
-        assert!(events[0].undone_at.is_some());
+        let watches = stored_watches(&dir);
+        assert_eq!(watches.len(), 1);
+        assert!(recorded(&watches[0]).undone_at.is_some());
     }
 
     #[test]
@@ -1203,9 +1225,9 @@ mod tests {
         app.dispatch(Command::AddEntry(entry("Show")));
         watch_past_threshold(&mut app, "Show - 01-12.mkv");
         assert_eq!(app.state().library[0].progress, 12);
-        let event = stored_events(&dir)[0].id;
+        let watch = stored_watches(&dir)[0].id;
 
-        app.dispatch(Command::UndoRecording(event));
+        app.dispatch(Command::UndoRecording(watch));
         assert_eq!(app.state().library[0].progress, 0);
         assert_eq!(stored_progress(&dir, app.state().library[0].id), 0);
     }
@@ -1214,12 +1236,12 @@ mod tests {
     fn undoing_twice_notices_and_leaves_the_progress_alone() {
         let (_tmp, dir) = open_tmp();
         let mut app = Ryuuji::open(&dir).unwrap();
-        let event = record_first_episode(&mut app, &dir);
+        let watch = record_first_episode(&mut app, &dir);
         let id = app.state().library[0].id;
-        app.dispatch(Command::UndoRecording(event));
+        app.dispatch(Command::UndoRecording(watch));
         app.dispatch(Command::SetProgress { id, progress: 5 });
 
-        app.dispatch(Command::UndoRecording(event));
+        app.dispatch(Command::UndoRecording(watch));
         assert!(matches!(
             app.state().notices.as_slice(),
             [Notice::SaveFailed { detail }] if detail.contains("already undone")
@@ -1233,19 +1255,19 @@ mod tests {
     fn undo_after_the_progress_moved_on_notices_and_changes_nothing() {
         let (_tmp, dir) = open_tmp();
         let mut app = Ryuuji::open(&dir).unwrap();
-        let event = record_first_episode(&mut app, &dir);
+        let watch = record_first_episode(&mut app, &dir);
         let id = app.state().library[0].id;
         app.dispatch(Command::SetProgress { id, progress: 5 });
 
-        app.dispatch(Command::UndoRecording(event));
+        app.dispatch(Command::UndoRecording(watch));
         assert!(matches!(
             app.state().notices.as_slice(),
             [Notice::SaveFailed { detail }] if detail.contains("moved on")
         ));
         assert_eq!(app.state().library[0].progress, 5);
         assert_eq!(stored_progress(&dir, id), 5);
-        assert_eq!(outcome(&app), RecordOutcome::Recorded(event));
-        assert_eq!(stored_events(&dir)[0].undone_at, None);
+        assert_eq!(outcome(&app), RecordOutcome::Recorded(watch));
+        assert_eq!(recorded(&stored_watches(&dir)[0]).undone_at, None);
     }
 
     #[test]
@@ -1267,34 +1289,34 @@ mod tests {
     fn watching_on_after_undo_does_not_record_again() {
         let (_tmp, dir) = open_tmp();
         let mut app = Ryuuji::open(&dir).unwrap();
-        let event = record_first_episode(&mut app, &dir);
-        app.dispatch(Command::UndoRecording(event));
+        let watch = record_first_episode(&mut app, &dir);
+        app.dispatch(Command::UndoRecording(watch));
 
         app.dispatch(Command::Playback(later("Show - 01.mkv", 1_400)));
         assert_eq!(app.state().library[0].progress, 0);
         assert_eq!(outcome(&app), RecordOutcome::Undone);
-        assert_eq!(stored_events(&dir).len(), 1);
+        assert_eq!(stored_watches(&dir).len(), 1);
     }
 
     #[test]
     fn a_relaunch_and_rewatch_after_undo_records_a_second_row() {
         let (_tmp, dir) = open_tmp();
         let mut app = Ryuuji::open(&dir).unwrap();
-        let event = record_first_episode(&mut app, &dir);
-        app.dispatch(Command::UndoRecording(event));
+        let watch = record_first_episode(&mut app, &dir);
+        app.dispatch(Command::UndoRecording(watch));
         drop(app);
 
         let mut app = Ryuuji::open(&dir).unwrap();
         app.dispatch(Command::Playback(later("Show - 01.mkv", 2_000)));
         app.dispatch(Command::Playback(later("Show - 01.mkv", 2_720)));
         assert_eq!(app.state().library[0].progress, 1);
-        let events = stored_events(&dir);
-        assert_eq!(events.len(), 2);
-        assert_eq!(events[0].id, event);
-        assert!(events[0].undone_at.is_some());
-        assert_eq!(events[1].undone_at, None);
+        let watches = stored_watches(&dir);
+        assert_eq!(watches.len(), 2);
+        assert_eq!(watches[0].id, watch);
+        assert!(recorded(&watches[0]).undone_at.is_some());
+        assert_eq!(recorded(&watches[1]).undone_at, None);
         assert_eq!(stored_writes(&dir), vec![(1..=1, 0, 1), (1..=1, 0, 1)]);
-        assert_eq!(outcome(&app), RecordOutcome::Recorded(events[1].id));
+        assert_eq!(outcome(&app), RecordOutcome::Recorded(watches[1].id));
     }
 
     /// `recorded` lives in memory only. On relaunch `resume` seeds the key
