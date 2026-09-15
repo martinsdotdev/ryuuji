@@ -782,7 +782,7 @@ release_information = "END"
 
 [[case.alternative]]
 text = "END"
-taken = "title_word"
+taken = "release_information"
 passed = "episode_title"
 by = "term_is_episode_title"
 
