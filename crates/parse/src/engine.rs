@@ -208,7 +208,8 @@ enum Op {
 }
 
 /// A rule's answer: what it read, what it used up, what it doubted.
-/// Applied whole or not at all.
+/// Every op lands; a rule that must not repeat a value checks the reading
+/// before it answers.
 #[derive(Default)]
 pub(crate) struct Verdict {
     ops: Vec<Op>,
@@ -365,24 +366,6 @@ impl Verdict {
     }
 }
 
-/// How the engine settles a second fact of one kind. `Both` stand in claim
-/// order (terms, seasons, the episodes of a batch); `First` refuses the
-/// verdict that brought the second, which is what the old passes' `contains`
-/// guards did.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Settle {
-    Both,
-    First,
-}
-
-fn settle(kind: ElementKind) -> Settle {
-    if kind.is_singular() {
-        Settle::First
-    } else {
-        Settle::Both
-    }
-}
-
 /// `Ep. 08 - 05v2` is one episode under two numbering schemes. The rule that
 /// reads an episode off a prefix marks the reading provisional, so a later
 /// episode does not lose to it: the lower number is the episode and the
@@ -404,8 +387,9 @@ fn settle_scheme(elements: &mut Elements, new: &str) -> Option<ElementKind> {
     }
 }
 
-/// Applies one verdict, or refuses it whole when it brings a second fact
-/// of a kind that keeps its first.
+/// Applies one verdict, op by op. A second value of a kind lands beside the
+/// first: `[v2]` and `05v2` in one name are two release versions, and
+/// `Vol.1 & Vol.2` two volumes.
 fn apply(
     name: RuleName,
     certainty: Certainty,
@@ -413,19 +397,6 @@ fn apply(
     tape: &mut Tape,
     reading: &mut Reading,
 ) {
-    let refused = verdict.ops.iter().any(|op| {
-        let kind = match op {
-            Op::Take {
-                kind, held: false, ..
-            }
-            | Op::TakeRun { kind, .. } => *kind,
-            _ => return false,
-        };
-        settle(kind) == Settle::First && reading.elements().contains(kind)
-    });
-    if refused {
-        return;
-    }
     for op in verdict.ops {
         match op {
             Op::Take {
@@ -748,7 +719,7 @@ mod tests {
     }
 
     #[test]
-    fn a_second_fact_of_a_singular_kind_refuses_the_whole_verdict() {
+    fn a_second_value_of_a_kind_lands_beside_the_first() {
         let mut tape = tape();
         let mut elements = Elements::default();
         elements.push(fact(ElementKind::ReleaseVersion, "1"));
@@ -763,8 +734,15 @@ mod tests {
             &mut tape,
             &mut reading,
         );
-        assert_eq!(reading.elements().len(), 1);
-        assert!(tape.tokens[2].is_free());
+        assert_eq!(
+            reading.elements().get_all(ElementKind::ReleaseVersion),
+            ["1", "2"]
+        );
+        assert_eq!(
+            reading.elements().get(ElementKind::EpisodeNumber),
+            Some("05")
+        );
+        assert!(!tape.tokens[2].is_free());
     }
 
     #[test]
