@@ -17,7 +17,7 @@ pub(crate) const RULE: WordRule = WordRule {
     read,
 };
 
-fn read(tape: &Tape, _reading: &Reading, at: usize) -> Verdict {
+fn read(tape: &Tape, reading: &Reading, at: usize) -> Verdict {
     if keyword_at(tape, at)
         .is_none_or(|(_, keyword)| keyword.kind != ElementKind::EpisodePrefix || !keyword.valid)
     {
@@ -32,6 +32,7 @@ fn read(tape: &Tape, _reading: &Reading, at: usize) -> Verdict {
     }
     take_number(
         Verdict::nothing().spend(ElementKind::EpisodePrefix, at),
+        reading,
         next,
         &number.text,
         Extent::Episode,

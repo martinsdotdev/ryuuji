@@ -15,7 +15,7 @@ pub(crate) const RULE: WordRule = WordRule {
     read,
 };
 
-fn read(tape: &Tape, _reading: &Reading, at: usize) -> Verdict {
+fn read(tape: &Tape, reading: &Reading, at: usize) -> Verdict {
     let text = &tape.tokens[at].text;
     let Some(digit_pos) = text.find(|c: char| c.is_ascii_digit()) else {
         return Verdict::nothing();
@@ -32,6 +32,7 @@ fn read(tape: &Tape, _reading: &Reading, at: usize) -> Verdict {
     }
     take_number_from(
         Verdict::nothing().spend_part(ElementKind::EpisodePrefix, at, 0..digit_pos),
+        reading,
         at,
         text,
         digit_pos,

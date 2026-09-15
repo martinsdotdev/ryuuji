@@ -38,7 +38,7 @@ mod year;
 use crate::element::ElementKind;
 use crate::engine::{Step, Verdict, WordRule};
 use crate::keyword::{Keyword, KeywordTable};
-use crate::numbering::{self, Extent, Numbering};
+use crate::numbering::{self, Extent, Numbering, leading_value};
 use crate::reading::Reading;
 use crate::string;
 use crate::token::Tape;
@@ -55,23 +55,76 @@ pub(super) fn keyword_at(tape: &Tape, at: usize) -> Option<(String, Keyword)> {
 }
 
 /// Reads the number at `at` through the word shapes, or takes it whole.
-pub(super) fn take_number(verdict: Verdict, at: usize, word: &str, extent: Extent) -> Verdict {
-    take_number_from(verdict, at, word, 0, extent)
+pub(super) fn take_number(
+    verdict: Verdict,
+    reading: &Reading,
+    at: usize,
+    word: &str,
+    extent: Extent,
+) -> Verdict {
+    take_number_from(verdict, reading, at, word, 0, extent)
 }
 
 /// Reads the number that starts at byte `from` of the word at `at` through
-/// the word shapes, or takes that part whole.
+/// the word shapes, or takes that part whole. A shape that only repeats the
+/// episode already read gives way to the whole number, which repeats it too
+/// and records nothing, but still ends a walk for the episode.
 pub(super) fn take_number_from(
     verdict: Verdict,
+    reading: &Reading,
     at: usize,
     word: &str,
     from: usize,
     extent: Extent,
 ) -> Verdict {
     match numbering::read(&word[from..], extent) {
-        Some(numbering) => take_pieces(verdict, at, numbering.shift(from), extent),
-        None => verdict.take_part(extent.number(), at, from..word.len(), &word[from..]),
+        Some(numbering) if !repeats(reading, &numbering) => {
+            take_pieces(verdict, at, numbering.shift(from), extent)
+        }
+        _ => verdict.take_part(extent.number(), at, from..word.len(), &word[from..]),
     }
+}
+
+/// Whether the numbering's first episode only repeats the episode a prefix
+/// already read, in a shape that gives up when it does.
+pub(super) fn repeats(reading: &Reading, numbering: &Numbering) -> bool {
+    let first = numbering
+        .pieces
+        .iter()
+        .find(|piece| piece.kind == ElementKind::EpisodeNumber);
+    reading.provisional_episode()
+        && numbering.decides
+        && first
+            .zip(reading.elements().get(ElementKind::EpisodeNumber))
+            .is_some_and(|(piece, existing)| {
+                leading_value(&piece.part.text) == leading_value(existing)
+            })
+}
+
+/// Reads the word at `at` through one episode shape. When the shape only
+/// repeats the episode already read, the word is used up with nothing
+/// recorded but its anime type, and the walk goes on.
+pub(super) fn take_shape(
+    tape: &Tape,
+    reading: &Reading,
+    at: usize,
+    shape: impl FnOnce(&str) -> Option<Numbering>,
+) -> Verdict {
+    let Some(numbering) = numbering::read_with(&tape.tokens[at].text, shape) else {
+        return Verdict::nothing();
+    };
+    if !repeats(reading, &numbering) {
+        return take_pieces(Verdict::nothing(), at, numbering, Extent::Episode);
+    }
+    let whole = 0..tape.tokens[at].text.len();
+    numbering
+        .pieces
+        .into_iter()
+        .filter(|piece| piece.kind == ElementKind::AnimeType)
+        .fold(Verdict::nothing(), |verdict, piece| {
+            verdict.take_part(ElementKind::AnimeType, at, piece.part.at, piece.part.text)
+        })
+        .spend_part(ElementKind::EpisodeNumber, at, whole)
 }
 
 /// Every piece is taken as the bytes it came from, and the bytes the shape

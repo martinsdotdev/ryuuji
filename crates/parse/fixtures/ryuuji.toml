@@ -1006,6 +1006,66 @@ anime_title = "Byousoku 5 Centimeter"
 release_group = "v2"
 episode_title = "The Beginning"
 
+[[case]]
+name = "a range starting at the prefixed episode records nothing"
+input = "Show Ep. 08 - 08-09.mkv"
+
+[case.elements]
+file_extension = "mkv"
+episode_number = "08"
+anime_title = "Show"
+
+[[case]]
+name = "a fraction repeating the prefixed episode leaves the walk to the volume after it"
+input = "Show Ep. 07 - 07.5 Vol.2.mkv"
+
+[case.elements]
+file_extension = "mkv"
+episode_number = "07"
+volume_number = "2"
+anime_title = "Show"
+
+[[case]]
+name = "a part letter repeating the prefixed episode leaves the walk to the volume after it"
+input = "Show Ep 04 - 04a Vol.2.mkv"
+
+[case.elements]
+file_extension = "mkv"
+episode_number = "04"
+volume_number = "2"
+anime_title = "Show"
+
+[[case]]
+name = "a number sign repeating the prefixed episode leaves the walk to the volume after it"
+input = "Show Ep 03 - #03-04 Vol.2.mkv"
+
+[case.elements]
+file_extension = "mkv"
+episode_number = "03"
+volume_number = "2"
+anime_title = "Show"
+
+[[case]]
+name = "a glued prefix repeating the prefixed episode ends the walk"
+input = "Show Ep 08 - EP08-09 Vol.2.mkv"
+
+[case.elements]
+file_extension = "mkv"
+episode_number = "08"
+anime_title = "Show"
+episode_title = "Vol.2"
+
+[[case]]
+name = "a type repeating the prefixed episode keeps the type and the walk"
+input = "Show Ep 08 - OVA08 Vol.2.mkv"
+
+[case.elements]
+file_extension = "mkv"
+episode_number = "08"
+anime_type = "OVA"
+volume_number = "2"
+anime_title = "Show"
+
 # Shapes the corpus and Ryuuji read differently, measured 2026-09-13.
 # anitomy itself passes 144 of its 182 cases; Ryuuji passes 156. Each case
 # below pins what Ryuuji reads today and, where the reading is a guess, the
