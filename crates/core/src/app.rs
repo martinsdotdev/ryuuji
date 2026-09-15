@@ -1,10 +1,12 @@
+use std::time::SystemTime;
+
 use crate::settings::{self, SettingsError};
 use crate::watch::{Accrual, Logged, WatchSession};
 use crate::{
-    Added, AppState, Command, DataDir, Decline, Diagnostics, HistoryId, LibraryEntry, Link,
-    NewEntry, NewRecording, Notice, NowPlaying, Opened, PlaybackEvent, ProposedMatch,
-    RecordOutcome, Recording, Settings, Store, StoreError, ThemePreference, WatchProgress,
-    WatchStatus, error_chain, matching,
+    Added, AppState, Command, DataDir, Decline, Diagnostics, EntryId, HistoryId, HistoryPage,
+    LibraryEntry, Link, NewEntry, NewRecording, Notice, NowPlaying, Opened, PlaybackEvent,
+    ProposedMatch, RecordOutcome, Recording, Settings, Store, StoreError, ThemePreference,
+    WatchProgress, WatchStatus, error_chain, matching,
 };
 
 /// The running application: the store plus the state derived from it.
@@ -68,6 +70,18 @@ impl Ryuuji {
     /// A fresh look at the files and schema, taken now.
     pub fn diagnostics(&self) -> Diagnostics {
         Diagnostics::gather(&self.dir, &self.store)
+    }
+
+    /// Up to `limit` watches, newest first, for one entry or all of them.
+    /// Read from the store on each call rather than held in [`AppState`],
+    /// which the shell clones on every dispatch.
+    pub fn history(&self, entry: Option<EntryId>, limit: usize) -> Result<HistoryPage, StoreError> {
+        self.store.history(entry, limit)
+    }
+
+    /// Episodes recorded at or after `since` that still stand.
+    pub fn episodes_recorded_since(&self, since: SystemTime) -> Result<u32, StoreError> {
+        self.store.episodes_recorded_since(since)
     }
 
     pub fn dispatch(&mut self, command: Command) {
@@ -1631,6 +1645,29 @@ mod tests {
         assert_eq!(
             app.state().last_match.as_ref().unwrap().link,
             Link::Unmatched
+        );
+    }
+
+    #[test]
+    fn history_and_the_recent_count_read_through_the_app() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        let watch = record_first_episode(&mut app, &dir);
+        let entry = app.state().library[0].id;
+
+        let page = app.history(None, 10).unwrap();
+        assert_eq!(page.watches.len(), 1);
+        assert_eq!(page.watches[0].id, watch);
+        assert_eq!(app.history(Some(entry), 10).unwrap(), page);
+        assert_eq!(
+            app.episodes_recorded_since(SystemTime::UNIX_EPOCH).unwrap(),
+            1
+        );
+
+        app.dispatch(Command::UndoRecording(watch));
+        assert_eq!(
+            app.episodes_recorded_since(SystemTime::UNIX_EPOCH).unwrap(),
+            0
         );
     }
 }
