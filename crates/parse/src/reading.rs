@@ -92,7 +92,7 @@ fn describe(kind: Option<ElementKind>, text: &str) -> String {
 /// What one name says.
 ///
 /// [`Reading::elements`] is the element list the fixture corpus and the
-/// Diagnostics grid read. The typed readers beside it are what matching
+/// Now playing facts grid read. The typed readers beside it are what matching
 /// consumes; each carries the certainty of the rule that read it, and a
 /// guessed one is explained by [`Reading::alternatives`]. The readers
 /// derive from the element list, so there is one record of what the

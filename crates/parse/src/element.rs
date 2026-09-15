@@ -111,8 +111,9 @@ impl ElementKind {
             .find(|kind| kind.label() == label)
     }
 
-    /// A singular kind holds one value per filename, so the keyword pass
-    /// stops looking once one is set.
+    /// A singular kind holds one value per filename, so the terms rule
+    /// reads no second one. Rules that read shapes append regardless, as
+    /// `[v2]` beside `05v2` makes two release versions.
     pub(crate) fn is_singular(self) -> bool {
         !matches!(
             self,

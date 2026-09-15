@@ -15,8 +15,7 @@ use crate::rules::RULES;
 use crate::string::leading_number;
 use crate::token::{Delimiters, Tape};
 
-/// A rule's name: its fixture key, its Diagnostics label, and what a fact
-/// reports as its reader. Closed, so a fixture cannot name a rule that does
+/// A rule's name: its fixture key and what a fact reports as its reader. Closed, so a fixture cannot name a rule that does
 /// not exist.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RuleName {
@@ -134,8 +133,8 @@ impl RuleName {
 pub(crate) struct Rule {
     pub(crate) name: RuleName,
     /// The kind this rule reads. The engine runs it only while no fact of
-    /// that kind stands, which is what the old passes' early returns said.
-    /// `None` for a rule that reads many kinds or only retracts.
+    /// that kind stands, so the first value read wins. `None` for a rule
+    /// that reads many kinds or only retracts.
     pub(crate) settles: Option<ElementKind>,
     pub(crate) gate: fn(&Options) -> bool,
     /// How sure this rule is of everything it reads.

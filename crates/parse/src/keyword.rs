@@ -11,10 +11,10 @@ use crate::element::ElementKind;
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Keyword {
     pub(crate) kind: ElementKind,
-    /// An identifiable keyword marks its token as an identifier, keeping it
-    /// out of the title and episode passes.
+    /// An identifiable keyword takes its word, so no title or number rule
+    /// reads it again; an unidentifiable one is held for a title to keep.
     pub(crate) identifiable: bool,
-    /// A searchable keyword may be matched by the keyword pass.
+    /// A searchable keyword may be read off a word by the keyword rules.
     pub(crate) searchable: bool,
     /// A valid keyword may stand as an element value on its own.
     pub(crate) valid: bool,
@@ -138,8 +138,8 @@ impl KeywordTable {
             .find(|keyword| keyword.kind == kind)
     }
 
-    /// The keyword the keyword pass may match this text against; a value
-    /// listed under two kinds is searchable under at most one of them.
+    /// The keyword a word may be read as; a value listed under two kinds is
+    /// searchable under at most one of them.
     pub(crate) fn find_searchable(&self, upper: &str) -> Option<Keyword> {
         self.by_text
             .get(upper)?

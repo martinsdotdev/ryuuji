@@ -740,7 +740,7 @@ episode_number_alt = "100"
 episode_number = "episode_equivalent"
 
 [[case]]
-name = "a preidentified term comes before terms the keyword pass finds"
+name = "a preidentified term comes before terms the keyword rules find"
 input = "[Nyaa] Show - 01 [10bit H.264 FLAC].mkv"
 
 [case.elements]

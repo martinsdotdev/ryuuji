@@ -1,7 +1,9 @@
 //! Anime filename parser. An anitomy-style element extractor that follows
 //! anitomy's rules where the corpus agrees with them and its own where it
-//! does not: [`parse`] splits a filename into tokens and identifies known
-//! elements (resolution, source, audio and video terms, checksum, ...).
+//! does not. [`parse`] splits a filename into tokens and runs a table of
+//! rules over them; the [`Reading`] it returns holds every element read,
+//! typed readers for what matching needs with the certainty behind each,
+//! and the alternatives a guess or a retraction left behind.
 
 mod element;
 mod engine;
@@ -19,6 +21,7 @@ pub use engine::RuleName;
 pub use options::Options;
 pub use reading::{Alternative, Certainty, Claim, Reading, Sense};
 
+/// Reads one filename or player title.
 pub fn parse(input: &str, options: &Options) -> Reading {
     parse_until(input, options, None)
 }
