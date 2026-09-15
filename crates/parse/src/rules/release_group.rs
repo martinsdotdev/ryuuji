@@ -1,6 +1,7 @@
 //! The release group: the first free run inside a bracket group that runs
 //! to the closing bracket and opens the group, delimiters kept as written
-//! (`Foo_Bar`).
+//! (`Foo_Bar`). A run that ends on a partly read word (`[OVA1]`) does not
+//! reach the bracket.
 
 use crate::element::ElementKind;
 use crate::engine::{Rule, RuleName, Verdict};
@@ -19,6 +20,7 @@ fn read(tape: &Tape, _reading: &Reading) -> Verdict {
     let Some(run) = tape.free_runs(true).find(|run| {
         run.end < tape.len()
             && tape.tokens[run.end].is_bracket()
+            && !tape.tokens[run.end - 1].is_partly_taken()
             && tape
                 .prev(run.start, token::is_not_delimiter)
                 .is_none_or(|prev| tape.tokens[prev].is_bracket())

@@ -39,10 +39,7 @@ fn read(tape: &Tape, reading: &Reading) -> Verdict {
     if !enclosed && leads_with_episode(tape, reading, begin) {
         return Verdict::nothing();
     }
-    let len = tape.len();
-    let mut end = (begin..len)
-        .find(|&at| tape.tokens[at].is_taken() || (enclosed && tape.tokens[at].is_bracket()))
-        .unwrap_or(len);
+    let mut end = tape.run_end(begin, enclosed);
     if enclosed {
         return Verdict::nothing().take_run(
             ElementKind::AnimeTitle,
