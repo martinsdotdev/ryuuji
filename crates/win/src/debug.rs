@@ -19,11 +19,10 @@ use windows_reactor::*;
 
 use crate::logging::{EventRecord, RecentEvents};
 use crate::ui::{
-    self, APP_VERSION, BUILD_PROFILE, CONTENT_MAX_WIDTH, FOLDER_GLYPH, age_of, caption, card,
-    card_frame, enum_picker, open_folder_button, section, table,
+    self, APP_VERSION, BUILD_PROFILE, CONTENT_MAX_WIDTH, FOLDER_GLYPH, MONO_FONT, age_of, caption,
+    card, card_frame, enum_picker, open_folder_button, section, table,
 };
 
-const MONO_FONT: &str = "Cascadia Mono";
 const NOT_APPLICABLE: &str = "—";
 
 pub const INJECTED_TITLE: &str =

@@ -5,6 +5,7 @@ use windows_reactor::{App, Backdrop, bootstrap};
 
 mod debug;
 mod destination;
+mod history;
 mod logging;
 mod pages;
 mod shell;

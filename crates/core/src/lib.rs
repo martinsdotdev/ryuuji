@@ -45,6 +45,7 @@ tagged_enum! {
     pub enum Page {
         Library => "library", "Library",
         NowPlaying => "now-playing", "Now playing",
+        History => "history", "History",
         Settings => "settings", "Settings",
     }
 }

@@ -3,23 +3,27 @@
 //! the data folder and the way into Diagnostics, and Now playing shows the
 //! last playback observation on a card, or a placeholder in the symbolic
 //! empty-state style the UI-direction research settled on (heading required,
-//! neutral tone). Details are built by the shell, so this module never sees
-//! the core handle or the log buffer.
+//! neutral tone). History lives in its own module and is the one page handed
+//! the core handle, since it reads its rows on demand. Details are built by
+//! the shell, so this module never sees the log buffer.
 
+use std::cell::RefCell;
 use std::ops::RangeInclusive;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 
 use ryuuji_core::{
     AppState, Certainty, Command, DataDir, Detail, ElementKind, LibraryEntry, Notice, NowPlaying,
-    Options, Page, ProposedMatch, RecordOutcome, StoreError, ThemePreference, WatchProgress,
-    error_chain, parse,
+    Options, Page, ProposedMatch, RecordOutcome, Ryuuji, StoreError, ThemePreference,
+    WatchProgress, error_chain, parse,
 };
 use windows_reactor::*;
 
+use crate::history::{self, HistoryProps};
 use crate::ui::{
     self, APP_VERSION, BUILD_PROFILE, CONTENT_MAX_WIDTH, FOLDER_GLYPH, REPAIR_GLYPH, age_of,
-    caption, card, card_frame, enum_picker, section, table,
+    caption, card, card_frame, enum_picker, episode_text, placeholder, section, table,
 };
 
 const PAGE_PADDING: f64 = 24.0;
@@ -32,6 +36,7 @@ pub fn body(
     dispatch: Dispatch<Command>,
     dir: &DataDir,
     detection_down: bool,
+    core: &Rc<RefCell<Ryuuji>>,
 ) -> Element {
     match page {
         Page::Library => library(&state.library),
@@ -46,7 +51,16 @@ pub fn body(
                     .last_match
                     .as_ref()
                     .map(|m| m.title_in(&state.library).to_owned()),
+                undo_applies: undo_applies(state),
                 detection_down,
+            },
+        ),
+        Page::History => component(
+            history::history,
+            HistoryProps {
+                dispatch,
+                core: core.clone(),
+                library: state.library.clone(),
             },
         ),
         Page::Settings => component(
@@ -162,6 +176,9 @@ struct NowPlayingProps {
     /// The proposal's title as the library knows it, resolved by the caller
     /// so the page never carries the library.
     title: Option<String>,
+    /// Whether the viewing's recording can still be undone, decided by the
+    /// caller for the same reason.
+    undo_applies: bool,
     detection_down: bool,
 }
 
@@ -205,7 +222,7 @@ fn now_playing(props: &NowPlayingProps, cx: &mut RenderCx) -> Element {
                 let episode = props.last_match.as_ref().and_then(|m| m.episode.as_ref());
                 let caption = caption(progress_text(progress, episode));
                 lines.push(match progress.outcome {
-                    RecordOutcome::Recorded(id) => {
+                    RecordOutcome::Recorded(id) if props.undo_applies => {
                         let dispatch = props.dispatch.clone();
                         hstack((
                             button("Undo")
@@ -215,7 +232,8 @@ fn now_playing(props: &NowPlayingProps, cx: &mut RenderCx) -> Element {
                         .spacing(12.0)
                         .into()
                     }
-                    RecordOutcome::Counting
+                    RecordOutcome::Recorded(_)
+                    | RecordOutcome::Counting
                     | RecordOutcome::Undone
                     | RecordOutcome::Declined(_) => caption.into(),
                 });
@@ -254,6 +272,30 @@ fn idle_placeholder_copy(detection_down: bool) -> (&'static str, &'static str) {
             "Open an episode in your player and it will show up here.",
         )
     }
+}
+
+/// Whether Now playing may offer Undo: the viewing recorded, and its show
+/// still stands at the last episode the file carries, which is the progress
+/// the recording wrote. The store refuses any other undo, and History offers
+/// Undo by the same rule.
+fn undo_applies(state: &AppState) -> bool {
+    let recorded = matches!(
+        state.watch_progress,
+        Some(WatchProgress {
+            outcome: RecordOutcome::Recorded(_),
+            ..
+        })
+    );
+    let Some(last) = state.last_match.as_ref().filter(|_| recorded) else {
+        return false;
+    };
+    let (Some(entry), Some(episode)) = (last.link.entry(), last.episode.as_ref()) else {
+        return false;
+    };
+    state
+        .library
+        .iter()
+        .any(|shown| shown.id == entry && shown.progress == *episode.end())
 }
 
 fn proposal_card(
@@ -317,16 +359,6 @@ fn episode_doubt(m: &ProposedMatch) -> Option<String> {
         })
         .collect();
     (!doubts.is_empty()).then(|| format!("A guess: {}", doubts.join("; ")))
-}
-
-/// `Episode 3`, or `Episodes 1–12` for a batch.
-fn episode_text(episode: &RangeInclusive<u32>) -> String {
-    let (low, high) = (episode.start(), episode.end());
-    if low == high {
-        format!("Episode {low}")
-    } else {
-        format!("Episodes {low}\u{2013}{high}")
-    }
 }
 
 /// The countdown to the write, then what came of it.
@@ -460,18 +492,6 @@ fn theme_card(theme: ThemePreference, dispatch: Dispatch<Command>) -> Border {
     )
 }
 
-/// Symbolic placeholder: a heading and one line of body text on a card.
-fn placeholder(heading: impl Into<String>, body: impl Into<String>) -> Element {
-    card_frame(
-        vstack((
-            text_block(heading).font_size(20.0).semibold(),
-            text_block(body).foreground(ThemeRef::SecondaryText).wrap(),
-        ))
-        .spacing(4.0),
-    )
-    .into()
-}
-
 #[cfg(test)]
 mod tests {
     use ryuuji_core::{Decline, Link, NewEntry, NewRecording, Opened, Store, WatchStatus};
@@ -569,9 +589,9 @@ mod tests {
         assert_eq!(match_caption(&proposal(), false, now), "No library entry");
     }
 
-    /// Only the store mints a `HistoryId`, so the Recorded arm needs one
-    /// recorded for real.
-    fn recorded_watch_id() -> ryuuji_core::HistoryId {
+    /// Only the store mints ids, so the Recorded arm needs a show and a
+    /// recording made for real: episode 1, which leaves progress at 1.
+    fn recorded_show() -> (LibraryEntry, ryuuji_core::HistoryId) {
         let tmp = tempfile::tempdir().unwrap();
         let dir = DataDir::at(tmp.path()).unwrap();
         let Opened { mut store, .. } = Store::open(&dir).unwrap();
@@ -584,7 +604,7 @@ mod tests {
                 rewatching: false,
             })
             .unwrap();
-        store
+        let recording = store
             .record(NewRecording {
                 watch: None,
                 entry: entry.id,
@@ -593,9 +613,38 @@ mod tests {
                 parsed_title: "Show".to_owned(),
                 player: "mpv".to_owned(),
             })
-            .unwrap()
-            .watch
-            .id
+            .unwrap();
+        (recording.entry, recording.watch.id)
+    }
+
+    fn recorded_watch_id() -> ryuuji_core::HistoryId {
+        recorded_show().1
+    }
+
+    #[test]
+    fn undo_is_offered_while_the_show_stands_at_the_recording() {
+        let (entry, watch) = recorded_show();
+        let state = |progress, outcome| AppState {
+            library: vec![LibraryEntry {
+                progress,
+                ..entry.clone()
+            }],
+            last_match: Some(ProposedMatch {
+                link: Link::Exact(entry.id),
+                episode: Some(1..=1),
+                ..proposal()
+            }),
+            watch_progress: Some(WatchProgress {
+                accrued: Duration::from_secs(720),
+                threshold: Duration::from_secs(710),
+                outcome,
+            }),
+            ..AppState::default()
+        };
+        assert!(undo_applies(&state(1, RecordOutcome::Recorded(watch))));
+        assert!(!undo_applies(&state(2, RecordOutcome::Recorded(watch))));
+        assert!(!undo_applies(&state(0, RecordOutcome::Undone)));
+        assert!(!undo_applies(&AppState::default()));
     }
 
     #[test]

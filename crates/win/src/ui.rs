@@ -1,7 +1,9 @@
-//! The Fluent building blocks the Settings and Diagnostics pages share:
-//! section headers, cards and captions in the Windows Settings idiom, the
-//! tables and enum pickers both pages build, and the relative-age text.
+//! The Fluent building blocks the pages share: section headers, cards,
+//! captions and placeholders in the Windows Settings idiom, the tables and
+//! enum pickers Settings and Diagnostics build, the episode and age text, and
+//! the zone local times are shown in.
 
+use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 use std::process::Command as Process;
 use std::sync::OnceLock;
@@ -13,6 +15,7 @@ use windows_reactor::*;
 
 pub(crate) const CONTENT_MAX_WIDTH: f64 = 1000.0;
 pub(crate) const ICON_FONT: &str = "Segoe Fluent Icons";
+pub(crate) const MONO_FONT: &str = "Cascadia Mono";
 pub(crate) const FOLDER_GLYPH: &str = "\u{E8B7}";
 pub(crate) const REPAIR_GLYPH: &str = "\u{E90F}";
 pub(crate) const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -81,6 +84,28 @@ pub(crate) fn card_frame(child: impl Into<Element>) -> Border {
         .border_thickness(Thickness::uniform(1.0))
         .corner_radius(4.0)
         .padding(Thickness::uniform(16.0))
+}
+
+/// Symbolic placeholder: a heading and one line of body text on a card.
+pub(crate) fn placeholder(heading: impl Into<String>, body: impl Into<String>) -> Element {
+    card_frame(
+        vstack((
+            text_block(heading).font_size(20.0).semibold(),
+            text_block(body).foreground(ThemeRef::SecondaryText).wrap(),
+        ))
+        .spacing(4.0),
+    )
+    .into()
+}
+
+/// `Episode 3`, or `Episodes 1–12` for a batch.
+pub(crate) fn episode_text(episode: &RangeInclusive<u32>) -> String {
+    let (low, high) = (episode.start(), episode.end());
+    if low == high {
+        format!("Episode {low}")
+    } else {
+        format!("Episodes {low}\u{2013}{high}")
+    }
 }
 
 /// A grid of uniform rows: optional header, then one row per cell array.
