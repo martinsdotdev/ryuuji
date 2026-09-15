@@ -63,21 +63,18 @@ pub struct Sense {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Alternative {
     pub span: Span,
-    /// The disputed text, as written.
+    /// The disputed value as the reading holds it: `Ita`, `5`.
     pub text: String,
     pub taken: Sense,
     pub passed: Sense,
 }
 
 impl Alternative {
-    /// Copy for a shell, from the two kinds: `episode 5, or a word of the
-    /// title`.
-    pub fn description(&self) -> String {
-        format!(
-            "{}, or {}",
-            describe(self.taken.kind, &self.text),
-            describe(self.passed.kind, &self.text)
-        )
+    /// What else the text could have been, as copy for a shell: `a word of
+    /// the title`, `the episode title`. A shell already shows what the text
+    /// was taken as, so only the passed sense is described.
+    pub fn passed_description(&self) -> String {
+        describe(self.passed.kind, &self.text)
     }
 }
 
@@ -332,9 +329,6 @@ mod tests {
                 rule: RuleName::Terms,
             },
         };
-        assert_eq!(
-            alternative.description(),
-            "episode 5, or a word of the title"
-        );
+        assert_eq!(alternative.passed_description(), "a word of the title");
     }
 }

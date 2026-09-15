@@ -295,10 +295,10 @@ fn match_caption(m: &ProposedMatch, idle: bool, now: SystemTime) -> String {
     parts.join(" \u{b7} ")
 }
 
-/// `Guess: episode 5, or a word of the title`, when the parser had to
-/// guess the episode and says what else the number could have been.
-/// Re-parsed from the raw title like the facts grid, so nothing about the
-/// doubt is carried on the proposal.
+/// `A guess: 07 may be a word of the title`, when the parser had to guess
+/// the episode. The caption already names the episode, so this says only
+/// what else its text could have been. Re-parsed from the raw title like
+/// the facts grid, so nothing about the doubt is carried on the proposal.
 fn episode_doubt(m: &ProposedMatch) -> Option<String> {
     let reading = parse(&m.raw_title, &Options::default());
     if reading.episodes()?.certainty != Certainty::Guessed {
@@ -308,9 +308,15 @@ fn episode_doubt(m: &ProposedMatch) -> Option<String> {
         .alternatives()
         .iter()
         .filter(|alternative| alternative.taken.kind == Some(ElementKind::EpisodeNumber))
-        .map(|alternative| alternative.description())
+        .map(|alternative| {
+            format!(
+                "{} may be {}",
+                alternative.text,
+                alternative.passed_description()
+            )
+        })
         .collect();
-    Some(format!("Guess: {}", doubts.join("; ")))
+    (!doubts.is_empty()).then(|| format!("A guess: {}", doubts.join("; ")))
 }
 
 /// `Episode 3`, or `Episodes 1–12` for a batch.
@@ -531,7 +537,16 @@ mod tests {
         };
         assert_eq!(
             match_caption(&m, false, SystemTime::UNIX_EPOCH),
-            "Episode 5 \u{b7} Guess: episode 5, or a word of the title \u{b7} No library entry"
+            "Episode 5 \u{b7} A guess: 5 may be a word of the title \u{b7} No library entry"
+        );
+        let padded = ProposedMatch {
+            raw_title: "Magical Girl Series 07.mkv".to_owned(),
+            episode: Some(7..=7),
+            ..proposal()
+        };
+        assert_eq!(
+            match_caption(&padded, false, SystemTime::UNIX_EPOCH),
+            "Episode 7 \u{b7} A guess: 07 may be a word of the title \u{b7} No library entry"
         );
         let sure = ProposedMatch {
             raw_title: "[Subs] Show - 05 [1080p].mkv".to_owned(),
