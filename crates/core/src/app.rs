@@ -1,5 +1,5 @@
 use crate::settings::{self, SettingsError};
-use crate::watch::{Accrual, WatchSession};
+use crate::watch::{Accrual, Logged, WatchSession};
 use crate::{
     AppState, Command, DataDir, Decline, Diagnostics, HistoryId, LibraryEntry, Link, NewEntry,
     NewRecording, Notice, NowPlaying, Opened, PlaybackEvent, ProposedMatch, RecordOutcome,
@@ -33,6 +33,13 @@ impl Ryuuji {
             tracing::warn!(error = %error_chain(&err), "last match unreadable");
             None
         });
+        let newest = store
+            .history(None, 1)
+            .map(|page| page.watches.into_iter().next())
+            .unwrap_or_else(|err| {
+                tracing::warn!(error = %error_chain(&err), "history unreadable");
+                None
+            });
         let notices = recovered
             .map(|recovered| Notice::LibraryReset {
                 backup: recovered.backup,
@@ -43,7 +50,7 @@ impl Ryuuji {
         Ok(Ryuuji {
             dir: dir.clone(),
             store,
-            session: WatchSession::resume(last_match.as_ref()),
+            session: WatchSession::resume(last_match.as_ref(), newest.as_ref()),
             state: AppState {
                 library,
                 last_match,
@@ -141,9 +148,22 @@ impl Ryuuji {
         if accrual.accrued < accrual.threshold {
             return RecordOutcome::Counting;
         }
-        let write = match self.earned() {
-            Ok(write) => write,
-            Err(decline) => return RecordOutcome::Declined(decline),
+        match self.earned() {
+            Ok(write) => self.record(write),
+            Err(decline) => {
+                self.log_decline(decline);
+                RecordOutcome::Declined(decline)
+            }
+        }
+    }
+
+    /// Writes the earned episode, into the viewing's own row when it has
+    /// one that has not recorded, so a watch declined first still reads as
+    /// one row.
+    fn record(&mut self, write: NewRecording) -> RecordOutcome {
+        let write = NewRecording {
+            watch: self.session.open_row(),
+            ..write
         };
         let outcome = self.store.record(write);
         let Some(Recording { entry, watch }) = commit(&mut self.state.notices, "progress", outcome)
@@ -157,8 +177,37 @@ impl Ryuuji {
             "episode recorded"
         );
         upsert(&mut self.state.library, entry);
-        self.session.mark_recorded();
+        self.session.mark_recorded(watch.id);
         RecordOutcome::Recorded(watch.id)
+    }
+
+    /// Logs a refusal in the viewing's row, once per change of reason, and
+    /// only for a title that named an episode: a clip or a file with no
+    /// number is not a watch worth a row. A viewing whose row has recorded
+    /// logs nothing more, which is the relaunch case, where the range gate
+    /// refuses the episode that was just written.
+    fn log_decline(&mut self, decline: Decline) {
+        let logged = Logged::Declined(decline);
+        if self
+            .session
+            .logged()
+            .is_some_and(|current| current == logged || current == Logged::Recorded)
+        {
+            return;
+        }
+        let Some(last) = self
+            .state
+            .last_match
+            .as_ref()
+            .filter(|m| m.episode.is_some())
+        else {
+            return;
+        };
+        let outcome = self.store.decline(self.session.open_row(), last, decline);
+        match commit(&mut self.state.notices, "history", outcome) {
+            Some(watch) => self.session.wrote(watch.id, logged),
+            None => self.session.tried(logged),
+        }
     }
 
     /// The write the standing viewing has earned, or the first gate that
@@ -191,6 +240,7 @@ impl Ryuuji {
             return Err(Decline::PastTotal);
         }
         Ok(NewRecording {
+            watch: None,
             entry: id,
             episode: range.clone(),
             raw_title: last.raw_title.clone(),
@@ -991,10 +1041,24 @@ mod tests {
     fn stored_writes(dir: &DataDir) -> Vec<(RangeInclusive<u32>, u32, u32)> {
         stored_watches(dir)
             .iter()
-            .map(|watch| {
-                let write = recorded(watch);
-                let episode = watch.episode.clone().unwrap();
-                (episode, write.progress_before, write.progress)
+            .filter_map(|watch| match watch.outcome {
+                WatchOutcome::Recorded(write) => Some((
+                    watch.episode.clone().unwrap(),
+                    write.progress_before,
+                    write.progress,
+                )),
+                WatchOutcome::Added | WatchOutcome::Declined(_) => None,
+            })
+            .collect()
+    }
+
+    /// The reason of every stored decline, oldest first.
+    fn stored_declines(dir: &DataDir) -> Vec<Decline> {
+        stored_watches(dir)
+            .iter()
+            .filter_map(|watch| match watch.outcome {
+                WatchOutcome::Declined(decline) => Some(decline),
+                WatchOutcome::Added | WatchOutcome::Recorded(_) => None,
             })
             .collect()
     }
@@ -1072,7 +1136,13 @@ mod tests {
         ));
         assert_eq!(app.state().library[0].progress, 0);
         assert_eq!(outcome(&app), RecordOutcome::Declined(Decline::NotExact));
-        assert_eq!(stored_watches(&dir), vec![]);
+        let watches = stored_watches(&dir);
+        assert_eq!(watches.len(), 1);
+        assert!(matches!(watches[0].link, Link::Likely(_)));
+        assert_eq!(
+            watches[0].outcome,
+            WatchOutcome::Declined(Decline::NotExact)
+        );
     }
 
     #[test]
@@ -1088,7 +1158,7 @@ mod tests {
         watch_past_threshold(&mut app, "Show - 01.mkv");
         assert_eq!(app.state().library[0].progress, 0);
         assert_eq!(outcome(&app), RecordOutcome::Declined(Decline::Completed));
-        assert_eq!(stored_watches(&dir), vec![]);
+        assert_eq!(stored_declines(&dir), vec![Decline::Completed]);
 
         // Nothing sets the flag before M5, so it goes in underneath.
         app.store_mut()
@@ -1099,6 +1169,8 @@ mod tests {
         watch_past_threshold(&mut app, "Show - 01.mkv");
         assert_eq!(app.state().library[0].progress, 1);
         assert_eq!(stored_writes(&dir), vec![(1..=1, 0, 1)]);
+        // The relaunch picked up the declined row, and the recording filled it.
+        assert_eq!(stored_watches(&dir).len(), 1);
     }
 
     #[test]
@@ -1121,7 +1193,7 @@ mod tests {
         watch_past_threshold(&mut app, "Show.mkv");
         assert_eq!(app.state().library[0].progress, 4);
         assert_eq!(outcome(&app), RecordOutcome::Declined(Decline::NoEpisode));
-        assert_eq!(stored_watches(&dir), vec![]);
+        assert_eq!(stored_declines(&dir), vec![Decline::NotNext; 3]);
 
         watch_past_threshold(&mut app, "Show - 05.mkv");
         assert_eq!(app.state().library[0].progress, 5);
@@ -1144,7 +1216,7 @@ mod tests {
         watch_past_threshold(&mut app, "Show - 13.mkv");
         assert_eq!(app.state().library[0].progress, 12);
         assert_eq!(outcome(&app), RecordOutcome::Declined(Decline::PastTotal));
-        assert_eq!(stored_watches(&dir), vec![]);
+        assert_eq!(stored_declines(&dir), vec![Decline::PastTotal; 2]);
     }
 
     #[test]
@@ -1344,6 +1416,130 @@ mod tests {
         assert_eq!(app.state().library[0].progress, 1);
         assert_eq!(stored_progress(&dir, id), 1);
         assert_eq!(stored_writes(&dir), vec![(1..=1, 0, 1)]);
+        assert_eq!(stored_watches(&dir).len(), 1);
         assert!(app.state().notices.is_empty());
+    }
+
+    #[test]
+    fn a_declined_watch_leaves_one_row_however_many_events_follow() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::AddEntry(entry("Show")));
+        let id = app.state().library[0].id;
+        app.dispatch(Command::SetProgress { id, progress: 4 });
+
+        watch_past_threshold(&mut app, "Show - 06.mkv");
+        for secs in [721, 722, 800, 1_000] {
+            app.dispatch(Command::Playback(later("Show - 06.mkv", secs)));
+        }
+        assert_eq!(outcome(&app), RecordOutcome::Declined(Decline::NotNext));
+        let watches = stored_watches(&dir);
+        assert_eq!(watches.len(), 1);
+        assert_eq!(watches[0].outcome, WatchOutcome::Declined(Decline::NotNext));
+        assert_eq!(watches[0].link, Link::Exact(id));
+        assert_eq!(watches[0].episode, Some(6..=6));
+        assert_eq!(watches[0].raw_title, "Show - 06.mkv");
+        assert!(app.state().notices.is_empty());
+    }
+
+    #[test]
+    fn a_decline_without_an_episode_number_leaves_no_row() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::AddEntry(entry("Show")));
+        watch_past_threshold(&mut app, "Show.mkv");
+        assert_eq!(outcome(&app), RecordOutcome::Declined(Decline::NoEpisode));
+        watch_past_threshold(&mut app, "Other Show.mkv");
+        assert_eq!(outcome(&app), RecordOutcome::Declined(Decline::NotExact));
+        assert_eq!(stored_watches(&dir), vec![]);
+    }
+
+    #[test]
+    fn a_decline_then_a_recording_share_one_row() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        watch_past_threshold(&mut app, "Show - 01.mkv");
+        assert_eq!(outcome(&app), RecordOutcome::Declined(Decline::NotExact));
+        let declined = stored_watches(&dir);
+        assert_eq!(declined.len(), 1);
+        assert_eq!(declined[0].link, Link::Unmatched);
+
+        app.dispatch(Command::AddEntry(entry("Show")));
+        app.dispatch(Command::Playback(later("Show - 01.mkv", 730)));
+        let id = app.state().library[0].id;
+        assert_eq!(app.state().library[0].progress, 1);
+        let watches = stored_watches(&dir);
+        assert_eq!(watches.len(), 1);
+        assert_eq!(watches[0].id, declined[0].id);
+        assert_eq!(watches[0].at, declined[0].at);
+        assert_eq!(watches[0].link, Link::Exact(id));
+        assert_eq!(outcome(&app), RecordOutcome::Recorded(watches[0].id));
+        assert_eq!(stored_writes(&dir), vec![(1..=1, 0, 1)]);
+    }
+
+    #[test]
+    fn a_changed_reason_rewrites_the_row() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::AddEntry(entry("Show")));
+        let id = app.state().library[0].id;
+        app.dispatch(Command::SetProgress { id, progress: 4 });
+        watch_past_threshold(&mut app, "Show - 06.mkv");
+        let first = stored_watches(&dir);
+        assert_eq!(stored_declines(&dir), vec![Decline::NotNext]);
+
+        app.dispatch(Command::SetStatus {
+            id,
+            status: WatchStatus::Completed,
+        });
+        app.dispatch(Command::Playback(later("Show - 06.mkv", 730)));
+        assert_eq!(outcome(&app), RecordOutcome::Declined(Decline::Completed));
+        let watches = stored_watches(&dir);
+        assert_eq!(watches.len(), 1);
+        assert_eq!(watches[0].id, first[0].id);
+        assert_eq!(stored_declines(&dir), vec![Decline::Completed]);
+    }
+
+    #[test]
+    fn a_failed_decline_write_leaves_one_notice() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::Playback(playing("Show - 01.mkv")));
+        app.store_mut().execute_raw("DROP TABLE history");
+
+        for secs in [720, 730, 740] {
+            app.dispatch(Command::Playback(later("Show - 01.mkv", secs)));
+        }
+        assert_eq!(outcome(&app), RecordOutcome::Declined(Decline::NotExact));
+        assert!(matches!(
+            app.state().notices.as_slice(),
+            [Notice::SaveFailed { .. }]
+        ));
+    }
+
+    #[test]
+    fn a_relaunch_under_a_declined_title_keeps_its_one_row() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::AddEntry(entry("Show")));
+        let id = app.state().library[0].id;
+        app.dispatch(Command::SetProgress { id, progress: 4 });
+        watch_past_threshold(&mut app, "Show - 06.mkv");
+        let declined = stored_watches(&dir);
+        assert_eq!(declined.len(), 1);
+        drop(app);
+
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::Playback(later("Show - 06.mkv", 2_000)));
+        app.dispatch(Command::Playback(later("Show - 06.mkv", 2_720)));
+        assert_eq!(outcome(&app), RecordOutcome::Declined(Decline::NotNext));
+        assert_eq!(stored_watches(&dir), declined);
+
+        app.dispatch(Command::SetProgress { id, progress: 5 });
+        app.dispatch(Command::Playback(later("Show - 06.mkv", 2_730)));
+        assert_eq!(app.state().library[0].progress, 6);
+        let watches = stored_watches(&dir);
+        assert_eq!(watches.len(), 1);
+        assert_eq!(outcome(&app), RecordOutcome::Recorded(declined[0].id));
     }
 }

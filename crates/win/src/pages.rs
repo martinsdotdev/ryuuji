@@ -586,6 +586,7 @@ mod tests {
             .unwrap();
         store
             .record(NewRecording {
+                watch: None,
                 entry: entry.id,
                 episode: 1..=1,
                 raw_title: "Show - 01.mkv".to_owned(),
