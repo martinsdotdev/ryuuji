@@ -31,6 +31,9 @@ impl fmt::Display for HistoryId {
 /// gets overwritten.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NewRecording {
+    /// The viewing's own row when it already has an unrecorded one, which
+    /// the recording then fills.
+    pub watch: Option<HistoryId>,
     pub entry: EntryId,
     /// Every episode the file carries; progress moves to its end.
     pub episode: RangeInclusive<u32>,

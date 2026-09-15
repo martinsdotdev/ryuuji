@@ -103,6 +103,10 @@ pub enum StoreError {
     /// putting `progress_before` back would erase whatever moved it since.
     #[error("the entry has moved on since history row {id} was recorded")]
     MovedOn { id: HistoryId },
+    /// A write aimed at a watch's own row found it missing or already
+    /// holding a recording, which nothing may overwrite.
+    #[error("history row {id} is missing or has already recorded")]
+    WatchClosed { id: HistoryId },
 }
 
 impl StoreError {
@@ -118,7 +122,8 @@ impl StoreError {
             | StoreError::InvalidLastMatch { .. }
             | StoreError::InvalidHistoryRow { .. }
             | StoreError::NothingToUndo { .. }
-            | StoreError::MovedOn { .. } => false,
+            | StoreError::MovedOn { .. }
+            | StoreError::WatchClosed { .. } => false,
         }
     }
 }
@@ -274,29 +279,109 @@ impl Store {
         let tx = self.conn.transaction().map_err(query_failed)?;
         let before = fetch(&tx, recording.entry)?;
         let entry = set_column(&tx, recording.entry, "progress", *recording.episode.end())?;
-        tx.execute(
-            "INSERT INTO history (entry_id, episode, episode_end, progress_before, progress, \
-             raw_title, player, at, parsed_title, confidence, recorded_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?8)",
-            params![
-                recording.entry.0,
-                recording.episode.start(),
-                recording.episode.end(),
-                before.progress,
-                entry.progress,
-                recording.raw_title,
-                recording.player,
-                unix_now(),
-                recording.parsed_title,
-                Confidence::Exact.tag(),
-            ],
-        )
-        .map_err(query_failed)?;
-        let id = HistoryId(tx.last_insert_rowid());
+        let columns = params![
+            recording.entry.0,
+            recording.episode.start(),
+            recording.episode.end(),
+            before.progress,
+            entry.progress,
+            recording.raw_title,
+            recording.player,
+            unix_now(),
+            recording.parsed_title,
+            Confidence::Exact.tag(),
+        ];
+        let id = match recording.watch {
+            None => {
+                tx.execute(
+                    "INSERT INTO history (entry_id, episode, episode_end, progress_before, \
+                     progress, raw_title, player, at, parsed_title, confidence, recorded_at) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?8)",
+                    columns,
+                )
+                .map_err(query_failed)?;
+                HistoryId(tx.last_insert_rowid())
+            }
+            // The row keeps the `at` it was opened with; the reason goes,
+            // since the recording is what the watch came to.
+            Some(id) => {
+                let changed = tx
+                    .execute(
+                        &format!(
+                            "UPDATE history SET entry_id = ?1, episode = ?2, episode_end = ?3, \
+                             progress_before = ?4, progress = ?5, raw_title = ?6, player = ?7, \
+                             recorded_at = ?8, parsed_title = ?9, confidence = ?10, \
+                             reason = NULL WHERE id = {} AND progress IS NULL",
+                            id.0
+                        ),
+                        columns,
+                    )
+                    .map_err(query_failed)?;
+                if changed == 0 {
+                    return Err(StoreError::WatchClosed { id });
+                }
+                id
+            }
+        };
         let watch = fetch_watch(&tx, id)?;
         tx.commit().map_err(query_failed)?;
         info!(watch = %id, progress = entry.progress, "progress recorded");
         Ok(Recording { entry, watch })
+    }
+
+    /// Writes why a watch past its threshold recorded nothing: a new row, or
+    /// the watch's own row rewritten while it has not recorded. The link is
+    /// rewritten with the reason, since a library edit can change the match
+    /// between one refusal and the next.
+    pub fn decline(
+        &mut self,
+        watch: Option<HistoryId>,
+        proposal: &ProposedMatch,
+        decline: Decline,
+    ) -> Result<Watch, StoreError> {
+        let _span = info_span!("store.decline", watch = ?watch, reason = decline.tag()).entered();
+        let tx = self.conn.transaction().map_err(query_failed)?;
+        let entry = proposal.link.entry().map(EntryId::as_i64);
+        let confidence = proposal.link.confidence().tag();
+        let id = match watch {
+            None => {
+                tx.execute(
+                    "INSERT INTO history (entry_id, episode, episode_end, raw_title, player, at, \
+                     parsed_title, confidence, reason) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    params![
+                        entry,
+                        proposal.episode.as_ref().map(|r| i64::from(*r.start())),
+                        proposal.episode.as_ref().map(|r| i64::from(*r.end())),
+                        proposal.raw_title,
+                        proposal.player,
+                        unix_now(),
+                        proposal.parsed_title,
+                        confidence,
+                        decline.tag(),
+                    ],
+                )
+                .map_err(query_failed)?;
+                HistoryId(tx.last_insert_rowid())
+            }
+            Some(id) => {
+                let changed = tx
+                    .execute(
+                        "UPDATE history SET entry_id = ?1, confidence = ?2, reason = ?3 \
+                         WHERE id = ?4 AND progress IS NULL",
+                        params![entry, confidence, decline.tag(), id.0],
+                    )
+                    .map_err(query_failed)?;
+                if changed == 0 {
+                    return Err(StoreError::WatchClosed { id });
+                }
+                id
+            }
+        };
+        let watch = fetch_watch(&tx, id)?;
+        tx.commit().map_err(query_failed)?;
+        info!(watch = %id, reason = decline.tag(), "decline logged");
+        Ok(watch)
     }
 
     /// Marks the recording undone and puts its `progress_before` back on
@@ -1134,6 +1219,7 @@ mod tests {
 
     fn watching(id: EntryId, episode: RangeInclusive<u32>) -> NewRecording {
         NewRecording {
+            watch: None,
             entry: id,
             episode,
             raw_title: "Show - 03.mkv".into(),
@@ -1151,6 +1237,99 @@ mod tests {
             WatchOutcome::Recorded(recorded) => recorded,
             other => panic!("not a recording: {other:?}"),
         }
+    }
+
+    #[test]
+    fn decline_writes_a_row_and_rewrites_it_while_unrecorded() {
+        let (_tmp, dir) = open_tmp();
+        let mut store = open(&dir);
+        let id = store.add(entry("Show")).unwrap().id;
+        let first = store
+            .decline(None, &proposed("Show - 03.mkv"), Decline::NotExact)
+            .unwrap();
+        assert_eq!(first.outcome, WatchOutcome::Declined(Decline::NotExact));
+        assert_eq!(first.link, Link::Unmatched);
+        assert_eq!(first.episode, Some(3..=3));
+        assert_eq!(first.raw_title, "Show - 03.mkv");
+        assert_eq!(first.parsed_title, "Show");
+        assert_eq!(first.player, "mpv");
+        assert_eq!(first.added_at, None);
+
+        let linked = ProposedMatch {
+            link: Link::Exact(id),
+            ..proposed("Show - 03.mkv")
+        };
+        let second = store
+            .decline(Some(first.id), &linked, Decline::NotNext)
+            .unwrap();
+        assert_eq!(
+            second,
+            Watch {
+                link: Link::Exact(id),
+                outcome: WatchOutcome::Declined(Decline::NotNext),
+                ..first
+            }
+        );
+        assert_eq!(watches(&store), vec![second]);
+    }
+
+    #[test]
+    fn record_fills_a_declined_row_and_nothing_overwrites_it_after() {
+        let (_tmp, dir) = open_tmp();
+        let mut store = open(&dir);
+        let id = store.add(entry("Show")).unwrap().id;
+        let declined = store
+            .decline(None, &proposed("Show - 03.mkv"), Decline::NotExact)
+            .unwrap();
+
+        let Recording { entry, watch } = store
+            .record(NewRecording {
+                watch: Some(declined.id),
+                ..watching(id, 1..=1)
+            })
+            .unwrap();
+        assert_eq!(entry.progress, 1);
+        assert_eq!(watch.id, declined.id);
+        assert_eq!(watch.at, declined.at);
+        assert_eq!(watch.link, Link::Exact(id));
+        assert_eq!(watch.episode, Some(1..=1));
+        assert!(matches!(
+            watch.outcome,
+            WatchOutcome::Recorded(Recorded {
+                progress_before: 0,
+                progress: 1,
+                undone_at: None,
+                ..
+            })
+        ));
+
+        assert!(matches!(
+            store.decline(Some(watch.id), &proposed("Show - 03.mkv"), Decline::NotNext),
+            Err(StoreError::WatchClosed { id: got }) if got == watch.id
+        ));
+        assert!(matches!(
+            store.record(NewRecording {
+                watch: Some(watch.id),
+                ..watching(id, 2..=2)
+            }),
+            Err(StoreError::WatchClosed { id: got }) if got == watch.id
+        ));
+        assert_eq!(store.entries().unwrap(), vec![entry]);
+        assert_eq!(watches(&store), vec![watch]);
+    }
+
+    #[test]
+    fn undo_refuses_a_row_that_never_recorded() {
+        let (_tmp, dir) = open_tmp();
+        let mut store = open(&dir);
+        let declined = store
+            .decline(None, &proposed("Show - 03.mkv"), Decline::NotExact)
+            .unwrap();
+        assert!(matches!(
+            store.undo(declined.id),
+            Err(StoreError::NothingToUndo { id }) if id == declined.id
+        ));
+        assert_eq!(watches(&store), vec![declined]);
     }
 
     #[test]

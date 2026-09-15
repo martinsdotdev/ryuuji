@@ -8,7 +8,9 @@
 
 use std::time::{Duration, SystemTime};
 
-use crate::{PlaybackEvent, PlaybackStatus, ProposedMatch};
+use crate::{
+    Decline, HistoryId, PlaybackEvent, PlaybackStatus, ProposedMatch, Watch, WatchOutcome,
+};
 
 /// The most one event can credit when the player never says how long the
 /// file is. Position deltas are unbounded then, so wall time is the only
@@ -36,6 +38,30 @@ pub(crate) struct WatchSession {
     duration: Duration,
     accrued: Duration,
     recorded: bool,
+    /// The history row this viewing has written, once it has one.
+    row: Option<HistoryId>,
+    /// What the viewing last put in its row, or tried to. A failed write is
+    /// remembered too, so a broken table costs one notice per change of
+    /// reason rather than one per event.
+    logged: Option<Logged>,
+}
+
+/// What a viewing's history row says, as far as the next write cares.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Logged {
+    Added,
+    Declined(Decline),
+    Recorded,
+}
+
+impl Logged {
+    fn of(outcome: WatchOutcome) -> Logged {
+        match outcome {
+            WatchOutcome::Added => Logged::Added,
+            WatchOutcome::Declined(decline) => Logged::Declined(decline),
+            WatchOutcome::Recorded(_) => Logged::Recorded,
+        }
+    }
 }
 
 /// What one event told the session. A first event is both a new viewing
@@ -63,9 +89,21 @@ pub(crate) struct Accrual {
 impl WatchSession {
     /// Picks up the viewing the persisted match describes, so a relaunch
     /// under a still-open player does not propose the same title again.
-    pub(crate) fn resume(last_match: Option<&ProposedMatch>) -> WatchSession {
+    /// When the newest history row belongs to that viewing it is picked up
+    /// too, so the relaunch does not log the same watch a second time.
+    pub(crate) fn resume(
+        last_match: Option<&ProposedMatch>,
+        newest: Option<&Watch>,
+    ) -> WatchSession {
+        let key = last_match.map(|m| (m.player.clone(), m.raw_title.clone()));
+        let newest = newest.filter(|watch| {
+            key.as_ref()
+                .is_some_and(|(player, title)| watch.player == *player && watch.raw_title == *title)
+        });
         WatchSession {
-            key: last_match.map(|m| (m.player.clone(), m.raw_title.clone())),
+            key,
+            row: newest.map(|watch| watch.id),
+            logged: newest.map(|watch| Logged::of(watch.outcome)),
             ..WatchSession::default()
         }
     }
@@ -96,10 +134,32 @@ impl WatchSession {
         }
     }
 
-    /// The episode has been written; nothing more records until the key
-    /// changes.
-    pub(crate) fn mark_recorded(&mut self) {
+    /// The episode has been written into `row`; nothing more records until
+    /// the key changes.
+    pub(crate) fn mark_recorded(&mut self, row: HistoryId) {
         self.recorded = true;
+        self.wrote(row, Logged::Recorded);
+    }
+
+    /// The row the next write for this viewing goes into: its own, unless
+    /// that row already holds a recording, which nothing overwrites.
+    pub(crate) fn open_row(&self) -> Option<HistoryId> {
+        self.row.filter(|_| self.logged != Some(Logged::Recorded))
+    }
+
+    pub(crate) fn logged(&self) -> Option<Logged> {
+        self.logged
+    }
+
+    /// `row` now says `logged`.
+    pub(crate) fn wrote(&mut self, row: HistoryId, logged: Logged) {
+        self.row = Some(row);
+        self.logged = Some(logged);
+    }
+
+    /// A write of `logged` failed; the row, if any, still says what it did.
+    pub(crate) fn tried(&mut self, logged: Logged) {
+        self.logged = Some(logged);
     }
 
     fn is_watching(&self, event: &PlaybackEvent) -> bool {
@@ -307,13 +367,76 @@ mod tests {
             player: "mpv".into(),
             at: at(900),
         };
-        let mut session = WatchSession::resume(Some(&persisted));
+        let mut session = WatchSession::resume(Some(&persisted), None);
         assert!(!session.observe(&playing("Show - 03.mkv")).new_viewing);
         assert!(session.observe(&playing("Show - 04.mkv")).new_viewing);
 
-        let mut empty = WatchSession::resume(None);
+        let mut empty = WatchSession::resume(None, None);
         assert_eq!(empty, WatchSession::default());
         assert!(empty.observe(&playing("Show - 03.mkv")).new_viewing);
+    }
+
+    fn newest_row(raw_title: &str, outcome: WatchOutcome) -> Watch {
+        Watch {
+            id: HistoryId(7),
+            at: at(800),
+            raw_title: raw_title.into(),
+            parsed_title: "Show".into(),
+            player: "mpv".into(),
+            episode: Some(3..=3),
+            link: Link::Unmatched,
+            outcome,
+            added_at: None,
+        }
+    }
+
+    #[test]
+    fn resume_picks_up_the_newest_row_only_when_it_is_the_same_viewing() {
+        let persisted = ProposedMatch {
+            raw_title: "Show - 03.mkv".into(),
+            parsed_title: "Show".into(),
+            episode: Some(3..=3),
+            season: None,
+            release_group: None,
+            link: Link::Unmatched,
+            player: "mpv".into(),
+            at: at(900),
+        };
+        let declined = newest_row("Show - 03.mkv", WatchOutcome::Declined(Decline::NotExact));
+        let session = WatchSession::resume(Some(&persisted), Some(&declined));
+        assert_eq!(session.open_row(), Some(HistoryId(7)));
+        assert_eq!(session.logged(), Some(Logged::Declined(Decline::NotExact)));
+
+        let other = newest_row("Show - 02.mkv", WatchOutcome::Declined(Decline::NotExact));
+        let session = WatchSession::resume(Some(&persisted), Some(&other));
+        assert_eq!((session.open_row(), session.logged()), (None, None));
+        assert_eq!(
+            WatchSession::resume(None, Some(&declined)),
+            WatchSession::default()
+        );
+    }
+
+    #[test]
+    fn a_recorded_row_takes_no_further_write_and_a_new_viewing_forgets_it() {
+        let mut session = WatchSession::default();
+        session.observe(&playing_at(100, 1_000));
+        session.wrote(HistoryId(4), Logged::Declined(Decline::NotNext));
+        assert_eq!(session.open_row(), Some(HistoryId(4)));
+        session.mark_recorded(HistoryId(4));
+        assert_eq!(session.open_row(), None);
+        assert_eq!(session.logged(), Some(Logged::Recorded));
+
+        session.observe(&event("Show - 04.mkv", PlaybackStatus::Playing, 5, 1_005));
+        assert_eq!((session.open_row(), session.logged()), (None, None));
+    }
+
+    #[test]
+    fn a_failed_write_is_remembered_without_a_row() {
+        let mut session = WatchSession::default();
+        session.observe(&playing_at(100, 1_000));
+        session.tried(Logged::Declined(Decline::NotExact));
+        assert_eq!(session.open_row(), None);
+        assert_eq!(session.logged(), Some(Logged::Declined(Decline::NotExact)));
     }
 
     #[test]
@@ -476,7 +599,7 @@ mod tests {
     fn mark_recorded_sticks_across_same_title_events() {
         let mut session = WatchSession::default();
         session.observe(&playing_at(100, 1_000));
-        session.mark_recorded();
+        session.mark_recorded(HistoryId(1));
         assert!(
             session
                 .observe(&playing_at(160, 1_060))
