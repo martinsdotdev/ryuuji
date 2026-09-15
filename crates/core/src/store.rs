@@ -493,6 +493,24 @@ impl Store {
         Ok(HistoryPage { watches, more })
     }
 
+    /// How many episodes the recordings made at or after `since` wrote and
+    /// still stand: a batch counts every episode it carried, and an undone
+    /// recording counts none. Read from the table, so the count does not
+    /// depend on how much of the history a page has loaded.
+    pub fn episodes_recorded_since(&self, since: SystemTime) -> Result<u32, StoreError> {
+        let _span = info_span!("store.episodes_recorded_since").entered();
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COALESCE(SUM(episode_end - episode + 1), 0) FROM history \
+                 WHERE progress IS NOT NULL AND undone_at IS NULL AND recorded_at >= ?1",
+                [unix_secs(since)],
+                |row| row.get(0),
+            )
+            .map_err(query_failed)?;
+        Ok(u32::try_from(count).unwrap_or(u32::MAX))
+    }
+
     /// Reads `PRAGMA user_version`; touches nothing on disk.
     pub fn schema_version(&self) -> Result<SchemaVersion, StoreError> {
         self.conn
@@ -1466,6 +1484,30 @@ mod tests {
         ));
         assert_eq!(store.entries().unwrap(), vec![written.entry]);
         assert_eq!(watches(&store), vec![written.watch]);
+    }
+
+    #[test]
+    fn episodes_recorded_since_counts_the_episodes_that_still_stand() {
+        let (_tmp, dir) = open_tmp();
+        let mut store = open(&dir);
+        let a = store.add(entry("A")).unwrap().id;
+        let b = store.add(entry("B")).unwrap().id;
+        store.record(watching(a, 1..=1)).unwrap();
+        let batch = store.record(watching(b, 1..=3)).unwrap();
+        store
+            .decline(None, &proposed("Show - 03.mkv"), Decline::NotExact)
+            .unwrap();
+        assert_eq!(store.episodes_recorded_since(UNIX_EPOCH).unwrap(), 4);
+
+        store.undo(batch.watch.id).unwrap();
+        assert_eq!(store.episodes_recorded_since(UNIX_EPOCH).unwrap(), 1);
+        let hour_ahead = SystemTime::now() + Duration::from_secs(3_600);
+        assert_eq!(store.episodes_recorded_since(hour_ahead).unwrap(), 0);
+
+        store.execute_raw("UPDATE history SET recorded_at = 100 WHERE progress IS NOT NULL");
+        let at = |secs| UNIX_EPOCH + Duration::from_secs(secs);
+        assert_eq!(store.episodes_recorded_since(at(100)).unwrap(), 1);
+        assert_eq!(store.episodes_recorded_since(at(101)).unwrap(), 0);
     }
 
     #[test]
