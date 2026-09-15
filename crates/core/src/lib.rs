@@ -200,8 +200,9 @@ pub enum RecordOutcome {
     /// past it tries again.
     Counting,
     Recorded(HistoryId),
-    /// The recording was undone from this viewing. The session stays
-    /// recorded, so watching on writes nothing more; a relaunch starts over.
+    /// The viewing's recording was undone, while it stood or while it was
+    /// set aside for another player. The viewing stays recorded, so watching
+    /// on writes nothing more; a relaunch starts over.
     Undone,
     /// The threshold was met and the gates refused the write. Recomputed on
     /// every event, so a decline never outlives what caused it.

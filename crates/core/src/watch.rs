@@ -4,7 +4,9 @@
 //! wants to know when a different title starts and how much of it has
 //! actually been watched. [`WatchSession`] keeps what that takes across
 //! events: which player and title are being watched, where the player last
-//! was, and the time credited so far against the recording threshold.
+//! was, and the time credited so far against the recording threshold. It
+//! also keeps the last few viewings it left, because detection can report
+//! another player for a moment and then come back.
 
 use std::time::{Duration, SystemTime};
 
@@ -22,6 +24,12 @@ const MAX_STEP: Duration = Duration::from_secs(15);
 /// known duration the threshold is half the episode instead.
 const FALLBACK_THRESHOLD: Duration = Duration::from_secs(120);
 
+/// How many viewings the session keeps after leaving them. A paused browser
+/// tab is reported for a moment at every switch between players, so a viewing
+/// coming back is often two switches behind; three leaves room for that tab
+/// and two other viewings in between.
+const SET_ASIDE: usize = 3;
+
 /// Across-events memory of what is being watched. The viewing is what one
 /// player and title have come to. The cursor is where the player last was,
 /// and it advances on every event, Stopped and untitled ones included,
@@ -29,9 +37,19 @@ const FALLBACK_THRESHOLD: Duration = Duration::from_secs(120);
 /// changes only when a titled event names another player or title: a Stopped
 /// in the middle of a viewing keeps it, which is what guards a spurious
 /// Stopped-then-Playing pair from detection.
+///
+/// A viewing left for another player or title is set aside, and a titled
+/// event naming it again brings it back whole: its row, what it logged, its
+/// recording and its accrued time. Detection reports a paused browser tab
+/// ahead of a player whose session is still starting, and again for a moment
+/// at every switch between players; a viewing lost to that would log its
+/// watch a second time and start its count over. The last `SET_ASIDE`
+/// viewings left are kept, and time spent away is never credited.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct WatchSession {
     viewing: Option<Viewing>,
+    /// The viewings last left for another one, newest first.
+    set_aside: Vec<Viewing>,
     cursor: Cursor,
 }
 
@@ -80,12 +98,13 @@ impl Logged {
     }
 }
 
-/// What one event told the session. A first event is both a new viewing
-/// and a countdown, so the two are separate facts rather than variants.
+/// What one event told the session. A switch is also a countdown, so the
+/// two are separate facts rather than variants.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Observed {
-    /// A titled player other than the one being watched.
-    pub new_viewing: bool,
+    /// A titled player or title other than the one being watched: a new
+    /// viewing, or a set-aside one coming back.
+    pub switched: bool,
     /// `Some` whenever a viewing stands.
     pub progress: Option<Accrual>,
 }
@@ -107,7 +126,9 @@ impl WatchSession {
     /// Picks up the viewing the persisted match describes, so a relaunch
     /// under a still-open player does not propose the same title again.
     /// When the newest history row belongs to that viewing it is picked up
-    /// too, so the relaunch does not log the same watch a second time.
+    /// too, so the relaunch does not log the same watch a second time. Like
+    /// any viewing it is set aside when detection reports another player
+    /// first, as it does at launch, and comes back with its player.
     pub(crate) fn resume(
         last_match: Option<&ProposedMatch>,
         newest: Option<&Watch>,
@@ -123,6 +144,7 @@ impl WatchSession {
         });
         WatchSession {
             viewing,
+            set_aside: Vec::new(),
             cursor: Cursor::default(),
         }
     }
@@ -132,17 +154,17 @@ impl WatchSession {
             event.status,
             PlaybackStatus::Playing | PlaybackStatus::Paused
         ) && !event.title.trim().is_empty();
-        let new_viewing = titled && !self.is_watching(event);
-        if new_viewing {
-            self.viewing = Some(Viewing::new((event.player.clone(), event.title.clone())));
+        let switched = titled && !self.is_watching(event);
+        if switched {
+            self.switch_to(event);
         }
         if titled && let Some(viewing) = self.viewing.as_mut() {
             if !event.duration.is_zero() {
                 viewing.duration = event.duration;
             }
-            // The cursor belongs to what was watched before, so the event
-            // that starts a viewing credits nothing.
-            if !new_viewing {
+            // The cursor belongs to the viewing just left, so the event that
+            // switches credits nothing and time away is never counted.
+            if !switched {
                 viewing.accrued += self.cursor.credit(event, viewing.duration);
             }
         }
@@ -151,13 +173,13 @@ impl WatchSession {
             seen: Some(event.observed_at),
         };
         Observed {
-            new_viewing,
+            switched,
             progress: self.progress(),
         }
     }
 
-    /// The episode has been written into `row`; nothing more records until
-    /// the key changes.
+    /// The episode has been written into `row`; this viewing records nothing
+    /// more.
     pub(crate) fn mark_recorded(&mut self, row: HistoryId) {
         self.wrote(row, Logged::Recorded);
         if let Some(viewing) = self.viewing.as_mut() {
@@ -165,13 +187,15 @@ impl WatchSession {
         }
     }
 
-    /// The recording in `row` was undone. The viewing that wrote it still
-    /// writes nothing more, and now says its recording was undone.
+    /// The recording in `row` was undone. The viewing that wrote it, standing
+    /// or set aside, still writes nothing more and now says its recording
+    /// was undone.
     pub(crate) fn undid(&mut self, row: HistoryId) {
-        if let Some(viewing) = self.viewing.as_mut()
-            && viewing.recorded == Some(RecordOutcome::Recorded(row))
-        {
-            viewing.recorded = Some(RecordOutcome::Undone);
+        let recorded = Some(RecordOutcome::Recorded(row));
+        for viewing in self.viewing.iter_mut().chain(&mut self.set_aside) {
+            if viewing.recorded == recorded {
+                viewing.recorded = Some(RecordOutcome::Undone);
+            }
         }
     }
 
@@ -207,6 +231,20 @@ impl WatchSession {
         self.viewing
             .as_ref()
             .is_some_and(|viewing| viewing.is(event))
+    }
+
+    /// Makes `event`'s player and title the standing viewing: the set-aside
+    /// viewing that names them, else a fresh one. The viewing left goes to the
+    /// front of the set-aside ones, and the oldest past `SET_ASIDE` is dropped.
+    fn switch_to(&mut self, event: &PlaybackEvent) {
+        let arriving = match self.set_aside.iter().position(|viewing| viewing.is(event)) {
+            Some(index) => self.set_aside.remove(index),
+            None => Viewing::new((event.player.clone(), event.title.clone())),
+        };
+        if let Some(left) = self.viewing.replace(arriving) {
+            self.set_aside.insert(0, left);
+            self.set_aside.truncate(SET_ASIDE);
+        }
     }
 
     fn progress(&self) -> Option<Accrual> {
@@ -308,12 +346,12 @@ mod tests {
     #[test]
     fn first_titled_event_starts_a_viewing() {
         let mut session = WatchSession::default();
-        assert!(session.observe(&playing("Show - 03.mkv")).new_viewing);
+        assert!(session.observe(&playing("Show - 03.mkv")).switched);
         let mut paused = WatchSession::default();
         assert!(
             paused
                 .observe(&event("Show - 03.mkv", PlaybackStatus::Paused, 0, 1_000))
-                .new_viewing
+                .switched
         );
     }
 
@@ -324,7 +362,7 @@ mod tests {
         assert_eq!(
             observed,
             Observed {
-                new_viewing: true,
+                switched: true,
                 progress: Some(Accrual {
                     accrued: Duration::ZERO,
                     threshold: secs(710),
@@ -338,11 +376,11 @@ mod tests {
     fn same_title_continues_the_viewing() {
         let mut session = WatchSession::default();
         session.observe(&playing("Show - 03.mkv"));
-        assert!(!session.observe(&playing_at(400, 1_060)).new_viewing);
+        assert!(!session.observe(&playing_at(400, 1_060)).switched);
         assert!(
             !session
                 .observe(&event("Show - 03.mkv", PlaybackStatus::Paused, 400, 1_070))
-                .new_viewing
+                .switched
         );
     }
 
@@ -350,8 +388,8 @@ mod tests {
     fn title_change_starts_a_new_viewing() {
         let mut session = WatchSession::default();
         session.observe(&playing("Show - 03.mkv"));
-        assert!(session.observe(&playing("Show - 04.mkv")).new_viewing);
-        assert!(!session.observe(&playing("Show - 04.mkv")).new_viewing);
+        assert!(session.observe(&playing("Show - 04.mkv")).switched);
+        assert!(!session.observe(&playing("Show - 04.mkv")).switched);
     }
 
     #[test]
@@ -362,8 +400,8 @@ mod tests {
             player: "vlc".into(),
             ..playing("Show - 03.mkv")
         };
-        assert!(session.observe(&other).new_viewing);
-        assert!(!session.observe(&other).new_viewing);
+        assert!(session.observe(&other).switched);
+        assert!(!session.observe(&other).switched);
     }
 
     #[test]
@@ -373,18 +411,18 @@ mod tests {
         assert_eq!(
             observed,
             Observed {
-                new_viewing: false,
+                switched: false,
                 progress: None
             }
         );
-        assert!(!session.observe(&playing("  \t")).new_viewing);
+        assert!(!session.observe(&playing("  \t")).switched);
         assert_eq!(session.viewing, None);
 
         session.observe(&playing("Show - 03.mkv"));
         let observed = session.observe(&playing(""));
-        assert!(!observed.new_viewing);
+        assert!(!observed.switched);
         assert!(observed.progress.is_some());
-        assert!(!session.observe(&playing("Show - 03.mkv")).new_viewing);
+        assert!(!session.observe(&playing("Show - 03.mkv")).switched);
     }
 
     #[test]
@@ -392,12 +430,12 @@ mod tests {
         let mut session = WatchSession::default();
         session.observe(&playing("Show - 03.mkv"));
         let stopped = event("Show - 03.mkv", PlaybackStatus::Stopped, 1_400, 2_100);
-        assert!(!session.observe(&stopped).new_viewing);
+        assert!(!session.observe(&stopped).switched);
         assert_eq!(session.cursor.position, Duration::from_secs(1_400));
         assert_eq!(session.cursor.seen, Some(at(2_100)));
         // Stopped does not end the viewing either: the same title coming
         // back is the same viewing.
-        assert!(!session.observe(&playing("Show - 03.mkv")).new_viewing);
+        assert!(!session.observe(&playing("Show - 03.mkv")).switched);
     }
 
     #[test]
@@ -419,9 +457,17 @@ mod tests {
         assert_eq!(session.cursor.seen, Some(at(1_400)));
     }
 
-    #[test]
-    fn resume_seeds_the_key_from_a_persisted_match() {
-        let persisted = ProposedMatch {
+    /// A paused browser tab, which detection reports ahead of a player whose
+    /// session is still starting.
+    fn elsewhere(seen: u64) -> PlaybackEvent {
+        PlaybackEvent {
+            player: "brave".into(),
+            ..event("Video", PlaybackStatus::Paused, 0, seen)
+        }
+    }
+
+    fn persisted_match() -> ProposedMatch {
+        ProposedMatch {
             raw_title: "Show - 03.mkv".into(),
             parsed_title: "Show".into(),
             episode: Some(3..=3),
@@ -430,14 +476,19 @@ mod tests {
             link: Link::Unmatched,
             player: "mpv".into(),
             at: at(900),
-        };
+        }
+    }
+
+    #[test]
+    fn resume_seeds_the_key_from_a_persisted_match() {
+        let persisted = persisted_match();
         let mut session = WatchSession::resume(Some(&persisted), None);
-        assert!(!session.observe(&playing("Show - 03.mkv")).new_viewing);
-        assert!(session.observe(&playing("Show - 04.mkv")).new_viewing);
+        assert!(!session.observe(&playing("Show - 03.mkv")).switched);
+        assert!(session.observe(&playing("Show - 04.mkv")).switched);
 
         let mut empty = WatchSession::resume(None, None);
         assert_eq!(empty, WatchSession::default());
-        assert!(empty.observe(&playing("Show - 03.mkv")).new_viewing);
+        assert!(empty.observe(&playing("Show - 03.mkv")).switched);
     }
 
     fn newest_row(raw_title: &str, outcome: WatchOutcome) -> Watch {
@@ -456,16 +507,7 @@ mod tests {
 
     #[test]
     fn resume_picks_up_the_newest_row_only_when_it_is_the_same_viewing() {
-        let persisted = ProposedMatch {
-            raw_title: "Show - 03.mkv".into(),
-            parsed_title: "Show".into(),
-            episode: Some(3..=3),
-            season: None,
-            release_group: None,
-            link: Link::Unmatched,
-            player: "mpv".into(),
-            at: at(900),
-        };
+        let persisted = persisted_match();
         let declined = newest_row("Show - 03.mkv", WatchOutcome::Declined(Decline::NotExact));
         let session = WatchSession::resume(Some(&persisted), Some(&declined));
         assert_eq!(session.open_row(), Some(HistoryId(7)));
@@ -646,7 +688,7 @@ mod tests {
         session.mark_recorded(HistoryId(1));
 
         let observed = session.observe(&event("Show - 04.mkv", PlaybackStatus::Playing, 5, 1_305));
-        assert!(observed.new_viewing);
+        assert!(observed.switched);
         assert_eq!(
             observed.progress,
             Some(Accrual {
@@ -705,5 +747,153 @@ mod tests {
         session.observe(&playing_at(160, 940));
         assert_eq!(accrued(&session), Duration::ZERO);
         assert_eq!(session.cursor.seen, Some(at(940)));
+    }
+
+    #[test]
+    fn returning_to_the_set_aside_viewing_continues_its_accrual() {
+        let mut session = WatchSession::default();
+        session.observe(&playing_at(100, 1_000));
+        session.observe(&playing_at(400, 1_300));
+        assert!(session.observe(&elsewhere(1_301)).switched);
+        assert_eq!(accrued(&session), Duration::ZERO);
+
+        let back = session.observe(&playing_at(401, 1_302));
+        assert!(back.switched);
+        assert_eq!(back.progress.unwrap().accrued, secs(300));
+        session.observe(&playing_at(461, 1_362));
+        assert_eq!(accrued(&session), secs(360));
+    }
+
+    #[test]
+    fn time_away_is_not_credited_on_return() {
+        let brave = |position, seen| PlaybackEvent {
+            player: "brave".into(),
+            ..event("Video", PlaybackStatus::Playing, position, seen)
+        };
+        let mut session = WatchSession::default();
+        session.observe(&playing_at(100, 1_000));
+        session.observe(&playing_at(160, 1_060));
+        session.observe(&brave(0, 1_061));
+        session.observe(&brave(200, 1_261));
+        assert_eq!(accrued(&session), secs(200));
+
+        // The player kept going while the tab was reported: 300 s of file
+        // and 1,202 s of wall time, none of it credited.
+        session.observe(&playing_at(460, 1_262));
+        assert_eq!(accrued(&session), secs(60));
+        // And the tab it left is the one set aside now.
+        session.observe(&brave(201, 1_263));
+        assert_eq!(accrued(&session), secs(200));
+    }
+
+    #[test]
+    fn a_return_keeps_the_row_logged_and_recording() {
+        let mut session = WatchSession::default();
+        session.observe(&playing_at(100, 1_000));
+        session.wrote(HistoryId(4), Logged::Declined(Decline::NotExact));
+        session.observe(&elsewhere(1_001));
+        assert_eq!((session.open_row(), session.logged()), (None, None));
+        session.observe(&playing_at(101, 1_002));
+        assert_eq!(session.open_row(), Some(HistoryId(4)));
+        assert_eq!(session.logged(), Some(Logged::Declined(Decline::NotExact)));
+
+        session.mark_recorded(HistoryId(4));
+        session.observe(&elsewhere(1_003));
+        let back = session.observe(&playing_at(102, 1_004));
+        assert_eq!(
+            back.progress.unwrap().recorded,
+            Some(RecordOutcome::Recorded(HistoryId(4)))
+        );
+        assert_eq!(session.logged(), Some(Logged::Recorded));
+    }
+
+    /// What detection reported live, switching between two players with a
+    /// paused browser tab open: the tab, for a moment, at every switch.
+    #[test]
+    fn a_tab_reported_at_every_switch_does_not_push_the_viewing_out() {
+        let other =
+            |position, seen| event("Other - 01.mkv", PlaybackStatus::Playing, position, seen);
+        let mut session = WatchSession::default();
+        session.observe(&playing_at(100, 1_000));
+        session.observe(&playing_at(400, 1_300));
+        session.wrote(HistoryId(4), Logged::Added);
+        session.observe(&elsewhere(1_301));
+        session.observe(&other(0, 1_302));
+        session.observe(&other(10, 1_312));
+        session.observe(&elsewhere(1_313));
+
+        let back = session.observe(&playing_at(401, 1_314));
+        assert!(back.switched);
+        assert_eq!(back.progress.unwrap().accrued, secs(300));
+        assert_eq!(session.open_row(), Some(HistoryId(4)));
+    }
+
+    #[test]
+    fn only_the_last_three_viewings_left_are_kept() {
+        let other = |title: &str, seen| event(title, PlaybackStatus::Playing, 5, seen);
+        let mut session = WatchSession::default();
+        session.observe(&playing_at(100, 1_000));
+        session.observe(&playing_at(400, 1_300));
+        session.wrote(HistoryId(4), Logged::Added);
+        for (title, seen) in [
+            ("Show - 04.mkv", 1_301),
+            ("Show - 05.mkv", 1_302),
+            ("Show - 06.mkv", 1_303),
+        ] {
+            session.observe(&other(title, seen));
+        }
+        let back = session.observe(&playing_at(401, 1_304));
+        assert_eq!(back.progress.unwrap().accrued, secs(300));
+        assert_eq!(session.open_row(), Some(HistoryId(4)));
+
+        for (title, seen) in [
+            ("Show - 04.mkv", 1_305),
+            ("Show - 05.mkv", 1_306),
+            ("Show - 06.mkv", 1_307),
+            ("Show - 07.mkv", 1_308),
+        ] {
+            session.observe(&other(title, seen));
+        }
+        let back = session.observe(&playing_at(402, 1_309));
+        assert!(back.switched);
+        assert_eq!(back.progress.unwrap().accrued, Duration::ZERO);
+        assert_eq!((session.open_row(), session.logged()), (None, None));
+    }
+
+    #[test]
+    fn a_resumed_viewing_survives_an_interloper() {
+        let declined = newest_row("Show - 03.mkv", WatchOutcome::Declined(Decline::NotNext));
+        let mut session = WatchSession::resume(Some(&persisted_match()), Some(&declined));
+        assert!(session.observe(&elsewhere(1_000)).switched);
+        assert!(session.observe(&playing_at(100, 1_002)).switched);
+        assert_eq!(session.open_row(), Some(HistoryId(7)));
+        assert_eq!(session.logged(), Some(Logged::Declined(Decline::NotNext)));
+    }
+
+    #[test]
+    fn stopped_and_blank_events_leave_the_set_aside_viewing_alone() {
+        let mut session = WatchSession::default();
+        session.observe(&playing_at(100, 1_000));
+        session.observe(&playing_at(400, 1_300));
+        session.observe(&elsewhere(1_301));
+        assert!(!session.observe(&playing("")).switched);
+        let stopped = event("Show - 03.mkv", PlaybackStatus::Stopped, 0, 1_303);
+        assert!(!session.observe(&stopped).switched);
+
+        let back = session.observe(&playing_at(401, 1_304));
+        assert!(back.switched);
+        assert_eq!(back.progress.unwrap().accrued, secs(300));
+    }
+
+    #[test]
+    fn undid_marks_the_set_aside_viewing_too() {
+        let mut session = WatchSession::default();
+        session.observe(&playing_at(100, 1_000));
+        session.mark_recorded(HistoryId(4));
+        session.observe(&elsewhere(1_001));
+        session.undid(HistoryId(4));
+
+        let back = session.observe(&playing_at(101, 1_002));
+        assert_eq!(back.progress.unwrap().recorded, Some(RecordOutcome::Undone));
     }
 }

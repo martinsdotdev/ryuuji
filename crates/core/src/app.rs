@@ -128,7 +128,9 @@ impl Ryuuji {
             "playback"
         );
         let observed = self.session.observe(&event);
-        if observed.new_viewing {
+        // A viewing coming back is proposed again too: the last match is the
+        // other player's by then, and the library may have changed meanwhile.
+        if observed.switched {
             let proposal = matching::propose(&event, &self.state.library);
             self.record_match(proposal);
         }
@@ -1008,6 +1010,16 @@ mod tests {
         }
     }
 
+    /// A paused browser tab, which detection reports ahead of a player whose
+    /// session is still starting.
+    fn elsewhere(secs: u64) -> PlaybackEvent {
+        PlaybackEvent {
+            player: "brave".into(),
+            status: PlaybackStatus::Paused,
+            ..later("Video", secs)
+        }
+    }
+
     fn watch_past_threshold(app: &mut Ryuuji, title: &str) {
         app.dispatch(Command::Playback(playing(title)));
         app.dispatch(Command::Playback(later(title, 720)));
@@ -1660,5 +1672,119 @@ mod tests {
             app.episodes_recorded_since(SystemTime::UNIX_EPOCH).unwrap(),
             0
         );
+    }
+
+    /// The live failure: after a relaunch detection reported a paused
+    /// browser tab before the player still playing the recorded file, and
+    /// the watch logged a second row.
+    #[test]
+    fn a_relaunch_under_an_interloper_keeps_the_recorded_row() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        let watch = record_first_episode(&mut app, &dir);
+        drop(app);
+
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::Playback(elsewhere(2_000)));
+        app.dispatch(Command::Playback(later("Show - 01.mkv", 2_001)));
+        app.dispatch(Command::Playback(later("Show - 01.mkv", 2_721)));
+        assert_eq!(outcome(&app), RecordOutcome::Declined(Decline::NotNext));
+        let watches = stored_watches(&dir);
+        assert_eq!(watches.len(), 1);
+        assert_eq!(watches[0].id, watch);
+        assert_eq!(stored_declines(&dir), vec![]);
+        assert_eq!(app.state().library[0].progress, 1);
+    }
+
+    /// A relaunch while another player plays, then the switch back, with the
+    /// paused tab reported for a moment in between, as the live run saw.
+    #[test]
+    fn a_relaunch_with_another_player_first_keeps_the_recorded_row() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        let watch = record_first_episode(&mut app, &dir);
+        drop(app);
+
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::Playback(later("Other - 01.mkv", 2_000)));
+        app.dispatch(Command::Playback(elsewhere(2_010)));
+        app.dispatch(Command::Playback(later("Show - 01.mkv", 2_011)));
+        app.dispatch(Command::Playback(later("Show - 01.mkv", 2_731)));
+        assert_eq!(outcome(&app), RecordOutcome::Declined(Decline::NotNext));
+        let watches = stored_watches(&dir);
+        assert_eq!(watches.len(), 1);
+        assert_eq!(watches[0].id, watch);
+    }
+
+    /// Switching to another player and back after Add to library, with the
+    /// paused tab reported for a moment at each switch, as the live run saw.
+    #[test]
+    fn add_to_library_then_switching_players_fills_the_added_row() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::Playback(playing("Show - 01.mkv")));
+        app.dispatch(Command::AddProposedToLibrary);
+        let added = stored_watches(&dir);
+        assert_eq!(added.len(), 1);
+
+        app.dispatch(Command::Playback(elsewhere(100)));
+        app.dispatch(Command::Playback(later("Other - 01.mkv", 101)));
+        app.dispatch(Command::Playback(later("Other - 01.mkv", 111)));
+        app.dispatch(Command::Playback(elsewhere(112)));
+        app.dispatch(Command::Playback(later("Show - 01.mkv", 113)));
+        app.dispatch(Command::Playback(later("Show - 01.mkv", 833)));
+        assert_eq!(app.state().library[0].progress, 1);
+        let watches = stored_watches(&dir);
+        assert_eq!(watches.len(), 1);
+        assert_eq!(watches[0].id, added[0].id);
+        assert!(watches[0].added_at.is_some());
+        assert_eq!(outcome(&app), RecordOutcome::Recorded(watches[0].id));
+    }
+
+    #[test]
+    fn a_switch_mid_episode_counts_the_time_before_it() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::AddEntry(entry("Show")));
+        app.dispatch(Command::Playback(playing("Show - 01.mkv")));
+        app.dispatch(Command::Playback(later("Show - 01.mkv", 400)));
+        app.dispatch(Command::Playback(elsewhere(401)));
+        app.dispatch(Command::Playback(later("Show - 01.mkv", 1_000)));
+        let progress = app.state().watch_progress.unwrap();
+        assert_eq!(progress.accrued, Duration::from_secs(400));
+        assert_eq!(progress.outcome, RecordOutcome::Counting);
+
+        app.dispatch(Command::Playback(later("Show - 01.mkv", 1_310)));
+        assert_eq!(app.state().library[0].progress, 1);
+        assert_eq!(stored_writes(&dir), vec![(1..=1, 0, 1)]);
+    }
+
+    #[test]
+    fn returning_to_a_recorded_viewing_shows_its_recording() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        let watch = record_first_episode(&mut app, &dir);
+        app.dispatch(Command::Playback(elsewhere(800)));
+        assert_eq!(outcome(&app), RecordOutcome::Counting);
+
+        app.dispatch(Command::Playback(later("Show - 01.mkv", 801)));
+        assert_eq!(outcome(&app), RecordOutcome::Recorded(watch));
+        assert_eq!(stored_watches(&dir).len(), 1);
+    }
+
+    #[test]
+    fn an_undo_while_away_shows_undone_on_return() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        let watch = record_first_episode(&mut app, &dir);
+        app.dispatch(Command::Playback(elsewhere(800)));
+        app.dispatch(Command::UndoRecording(watch));
+        assert_eq!(app.state().library[0].progress, 0);
+
+        app.dispatch(Command::Playback(later("Show - 01.mkv", 801)));
+        app.dispatch(Command::Playback(later("Show - 01.mkv", 1_600)));
+        assert_eq!(outcome(&app), RecordOutcome::Undone);
+        assert_eq!(app.state().library[0].progress, 0);
+        assert_eq!(stored_watches(&dir).len(), 1);
     }
 }
