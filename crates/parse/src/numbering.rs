@@ -78,6 +78,11 @@ pub(crate) struct Piece {
 pub(crate) struct Numbering {
     pub(crate) pieces: Vec<Piece>,
     pub(crate) used: Range<usize>,
+    /// The first episode decides for the whole word: when it only repeats
+    /// an episode already read, the word records nothing. A range, a number
+    /// sign, a fraction and a part letter decide; a version suffix, a season
+    /// with its episode and a counter record the rest regardless.
+    pub(crate) decides: bool,
 }
 
 impl Numbering {
@@ -85,6 +90,7 @@ impl Numbering {
         Numbering {
             pieces: Vec::new(),
             used,
+            decides: false,
         }
     }
 
@@ -185,6 +191,7 @@ pub(crate) fn range(word: &str, extent: Extent) -> Option<Numbering> {
         return None;
     }
     let mut numbering = Numbering::new(0..word.len());
+    numbering.decides = true;
     numbering.push(extent.number(), lower);
     numbering.push(extent.number(), upper);
     for part in [lower_version, upper_version].into_iter().flatten() {
@@ -248,6 +255,7 @@ pub(crate) fn type_and_episode(word: &str) -> Option<Numbering> {
         Some(numbering) => numbering.shift(digit_pos),
         None => {
             let mut numbering = Numbering::new(digit_pos..word.len());
+            numbering.decides = true;
             numbering.push(
                 ElementKind::EpisodeNumber,
                 Part {
@@ -322,6 +330,7 @@ pub(crate) fn number_sign(word: &str) -> Option<Numbering> {
         return None;
     }
     let mut numbering = Numbering::new(0..rest.len());
+    numbering.decides = true;
     numbering.push(ElementKind::EpisodeNumber, first);
     if let Some(episode) = second
         && leading_value(&episode.text) <= EPISODE_NUMBER_MAX
@@ -358,6 +367,7 @@ fn whole_word(word: &str, extent: Extent) -> Option<Numbering> {
         return None;
     }
     let mut numbering = Numbering::new(0..word.len());
+    numbering.decides = true;
     numbering.push(
         extent.number(),
         Part {
@@ -494,6 +504,17 @@ mod tests {
             pieces("12話", Extent::Episode),
             [(ElementKind::EpisodeNumber, "12".to_owned(), 0..2, false)]
         );
+    }
+
+    #[test]
+    fn only_shapes_that_give_up_on_their_first_episode_decide() {
+        let decides = |word: &str| read(word, Extent::Episode).map(|numbering| numbering.decides);
+        for word in ["01-02", "#03", "07.5", "4a", "OVA1", "OVA01-02"] {
+            assert_eq!(decides(word), Some(true), "{word}");
+        }
+        for word in ["05v2", "S01E02", "12\u{8a71}", "OVA01v2"] {
+            assert_eq!(decides(word), Some(false), "{word}");
+        }
     }
 
     #[test]

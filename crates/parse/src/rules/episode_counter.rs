@@ -1,9 +1,9 @@
 //! `12話`: a digit run closed by the Japanese episode counter.
 
 use crate::engine::{RuleName, Verdict, WordRule};
-use crate::numbering::{self, Extent};
+use crate::numbering;
 use crate::reading::{Certainty, Reading};
-use crate::rules::take_pieces;
+use crate::rules::take_shape;
 use crate::token::Tape;
 
 pub(crate) const RULE: WordRule = WordRule {
@@ -12,11 +12,8 @@ pub(crate) const RULE: WordRule = WordRule {
     read,
 };
 
-fn read(tape: &Tape, _reading: &Reading, at: usize) -> Verdict {
-    match numbering::read_with(&tape.tokens[at].text, numbering::counter) {
-        Some(numbering) => take_pieces(Verdict::nothing(), at, numbering, Extent::Episode),
-        None => Verdict::nothing(),
-    }
+fn read(tape: &Tape, reading: &Reading, at: usize) -> Verdict {
+    take_shape(tape, reading, at, numbering::counter)
 }
 
 #[cfg(test)]
