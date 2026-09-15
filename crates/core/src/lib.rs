@@ -9,6 +9,7 @@
 mod app;
 mod data_dir;
 mod diagnostics;
+mod history;
 mod matching;
 mod playback;
 mod settings;
@@ -17,13 +18,13 @@ mod tagged;
 mod watch;
 
 use std::fmt;
-use std::ops::RangeInclusive;
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 pub use app::Ryuuji;
 pub use data_dir::{DataDir, DataDirError, DataDirSource};
 pub use diagnostics::{ByteSize, Diagnostics, FileFacts, FileStat, ProbeFailed};
+pub use history::{HistoryId, HistoryPage, NewRecording, Recorded, Watch, WatchOutcome};
 pub use matching::{Confidence, Link, ProposedMatch, normalize_title, propose, similarity};
 pub use playback::{PlaybackEvent, PlaybackSource, PlaybackStatus};
 // Shells depend on this crate alone, so the parser reaches them through here.
@@ -137,49 +138,6 @@ pub struct LibraryEntry {
     pub rewatching: bool,
 }
 
-/// Identity of a stored watch event. Only [`Store`] mints these.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct WatchEventId(i64);
-
-impl WatchEventId {
-    pub fn as_i64(self) -> i64 {
-        self.0
-    }
-}
-
-impl fmt::Display for WatchEventId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-/// A progress write that watching is about to cause. The title and player
-/// name the proposal it was decided on, since the last match is one row and
-/// gets overwritten.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NewWatchEvent {
-    pub entry: EntryId,
-    /// Every episode the file carries; progress moves to its end.
-    pub episode: RangeInclusive<u32>,
-    pub raw_title: String,
-    pub player: String,
-}
-
-/// One progress write that watching caused, as stored. Rows are never
-/// deleted: undoing one marks it and puts `progress_before` back.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WatchEvent {
-    pub id: WatchEventId,
-    pub entry: EntryId,
-    pub episode: RangeInclusive<u32>,
-    pub progress_before: u32,
-    pub progress: u32,
-    pub raw_title: String,
-    pub player: String,
-    pub at: SystemTime,
-    pub undone_at: Option<SystemTime>,
-}
-
 /// What the detection side currently reports.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub enum NowPlaying {
@@ -235,7 +193,7 @@ pub enum RecordOutcome {
     /// Still short of the threshold, or a write failed and the next event
     /// past it tries again.
     Counting,
-    Recorded(WatchEventId),
+    Recorded(HistoryId),
     /// The recording was undone from this viewing. The session stays
     /// recorded, so watching on writes nothing more; a relaunch starts over.
     Undone,
@@ -244,30 +202,20 @@ pub enum RecordOutcome {
     Declined(Decline),
 }
 
-/// Why a viewing past its threshold wrote nothing, in the order the gates
-/// run: the match first, then the entry.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Decline {
-    NotExact,
-    Completed,
-    NoEpisode,
-    NotNext,
-    /// Numbered past a known total. Taiga's `IsValidEpisodeNumber` refuses
-    /// the same; such a file is more often absolute numbering than a real
-    /// episode.
-    PastTotal,
-}
-
-impl Decline {
-    /// Human-readable label.
-    pub fn label(self) -> &'static str {
-        match self {
-            Decline::NotExact => "Not recorded: no exact match",
-            Decline::Completed => "Not recorded: show is completed",
-            Decline::NoEpisode => "Not recorded: no episode number",
-            Decline::NotNext => "Not recorded: not the next episode",
-            Decline::PastTotal => "Not recorded: past the show's total",
-        }
+tagged_enum! {
+    /// Why a viewing past its threshold wrote nothing, in the order the
+    /// gates run: the match first, then the entry. Tags are stored in the
+    /// history table's `reason` column.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Decline {
+        NotExact => "not-exact", "Not recorded: no exact match",
+        Completed => "completed", "Not recorded: show is completed",
+        NoEpisode => "no-episode", "Not recorded: no episode number",
+        NotNext => "not-next", "Not recorded: not the next episode",
+        /// Numbered past a known total. Taiga's `IsValidEpisodeNumber`
+        /// refuses the same; such a file is more often absolute numbering
+        /// than a real episode.
+        PastTotal => "past-total", "Not recorded: past the show's total",
     }
 }
 
@@ -299,7 +247,7 @@ pub enum Command {
     /// Marks a recording undone and puts the entry's progress back to what
     /// it was before the write, while the entry still stands where the
     /// recording left it.
-    UndoRecording(WatchEventId),
+    UndoRecording(HistoryId),
 }
 
 /// Something the shell should surface to the user until dismissed.

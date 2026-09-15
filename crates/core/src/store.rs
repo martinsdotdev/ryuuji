@@ -9,8 +9,8 @@ use rusqlite_migration::Migrations;
 use tracing::{debug, info, info_span, warn};
 
 use crate::{
-    Confidence, DataDir, EntryId, LibraryEntry, Link, NewEntry, NewWatchEvent, ProposedMatch,
-    WatchEvent, WatchEventId, WatchStatus,
+    Confidence, DataDir, Decline, EntryId, HistoryId, HistoryPage, LibraryEntry, Link, NewEntry,
+    NewRecording, ProposedMatch, Recorded, Watch, WatchOutcome, WatchStatus,
 };
 
 /// The schema, compiled in from `migrations/`, one numbered directory per
@@ -20,8 +20,9 @@ static MIGRATIONS: include_dir::Dir<'static> =
 
 const SELECT_ENTRY: &str = "SELECT id, title, status, progress, total, rewatching FROM entries";
 
-const SELECT_EVENT: &str = "SELECT id, entry_id, episode, episode_end, progress_before, progress, \
-                            raw_title, player, at, undone_at FROM watch_events";
+const SELECT_WATCH: &str = "SELECT id, entry_id, episode, episode_end, progress_before, progress, \
+                            raw_title, player, at, undone_at, parsed_title, confidence, reason, \
+                            recorded_at, added_at FROM history";
 
 /// Files SQLite may keep beside the database; they move with it.
 const SIDECAR_SUFFIXES: [&str; 3] = ["-journal", "-wal", "-shm"];
@@ -94,17 +95,14 @@ pub enum StoreError {
     InvalidRow { id: EntryId, field: &'static str },
     #[error("the stored last match has an invalid {field}")]
     InvalidLastMatch { field: &'static str },
-    #[error("watch event {id} has an invalid {field}")]
-    InvalidWatchEvent {
-        id: WatchEventId,
-        field: &'static str,
-    },
-    #[error("watch event {id} is missing or already undone")]
-    NothingToUndo { id: WatchEventId },
-    /// The entry's progress is no longer what the event wrote, so putting
-    /// `progress_before` back would erase whatever moved it since.
-    #[error("the entry has moved on since watch event {id} was recorded")]
-    MovedOn { id: WatchEventId },
+    #[error("history row {id} has an invalid {field}")]
+    InvalidHistoryRow { id: HistoryId, field: &'static str },
+    #[error("history row {id} is missing, not a recording, or already undone")]
+    NothingToUndo { id: HistoryId },
+    /// The entry's progress is no longer what the recording wrote, so
+    /// putting `progress_before` back would erase whatever moved it since.
+    #[error("the entry has moved on since history row {id} was recorded")]
+    MovedOn { id: HistoryId },
 }
 
 impl StoreError {
@@ -118,7 +116,7 @@ impl StoreError {
             | StoreError::NotFound { .. }
             | StoreError::InvalidRow { .. }
             | StoreError::InvalidLastMatch { .. }
-            | StoreError::InvalidWatchEvent { .. }
+            | StoreError::InvalidHistoryRow { .. }
             | StoreError::NothingToUndo { .. }
             | StoreError::MovedOn { .. } => false,
         }
@@ -148,12 +146,12 @@ pub struct Recovered {
     pub backup: PathBuf,
 }
 
-/// An entry and the watch event that last moved its progress, both as
-/// stored after the same transaction.
+/// An entry and the watch that last moved its progress, both as stored
+/// after the same transaction.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Recording {
     pub entry: LibraryEntry,
-    pub event: WatchEvent,
+    pub watch: Watch,
 }
 
 /// The on-disk library. Every mutation runs in one transaction and returns
@@ -266,76 +264,97 @@ impl Store {
     /// Writes the progress a viewing earned and the row that says so, in one
     /// transaction, so neither can exist without the other. `at` is the
     /// write's own clock, like `updated_at`.
-    pub fn record(&mut self, event: NewWatchEvent) -> Result<Recording, StoreError> {
+    pub fn record(&mut self, recording: NewRecording) -> Result<Recording, StoreError> {
         let _span = info_span!(
             "store.record",
-            entry = %event.entry,
-            episode = *event.episode.end()
+            entry = %recording.entry,
+            episode = *recording.episode.end()
         )
         .entered();
         let tx = self.conn.transaction().map_err(query_failed)?;
-        let before = fetch(&tx, event.entry)?;
-        let entry = set_column(&tx, event.entry, "progress", *event.episode.end())?;
+        let before = fetch(&tx, recording.entry)?;
+        let entry = set_column(&tx, recording.entry, "progress", *recording.episode.end())?;
         tx.execute(
-            "INSERT INTO watch_events (entry_id, episode, episode_end, progress_before, \
-             progress, raw_title, player, at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO history (entry_id, episode, episode_end, progress_before, progress, \
+             raw_title, player, at, parsed_title, confidence, recorded_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?8)",
             params![
-                event.entry.0,
-                event.episode.start(),
-                event.episode.end(),
+                recording.entry.0,
+                recording.episode.start(),
+                recording.episode.end(),
                 before.progress,
                 entry.progress,
-                event.raw_title,
-                event.player,
+                recording.raw_title,
+                recording.player,
                 unix_now(),
+                recording.parsed_title,
+                Confidence::Exact.tag(),
             ],
         )
         .map_err(query_failed)?;
-        let id = WatchEventId(tx.last_insert_rowid());
-        let event = fetch_event(&tx, id)?;
+        let id = HistoryId(tx.last_insert_rowid());
+        let watch = fetch_watch(&tx, id)?;
         tx.commit().map_err(query_failed)?;
-        info!(event = %id, progress = entry.progress, "progress recorded");
-        Ok(Recording { entry, event })
+        info!(watch = %id, progress = entry.progress, "progress recorded");
+        Ok(Recording { entry, watch })
     }
 
-    /// Marks the event undone and puts its `progress_before` back on the
-    /// entry, in one transaction. Restoring rather than decrementing is what
-    /// takes a batch back to where it started. The row stays: nothing here
-    /// deletes, and the mark is what stops a second undo. An entry whose
-    /// progress has moved past the event, by a later recording or by hand,
-    /// is refused, since restoring would erase that move.
-    pub fn undo(&mut self, id: WatchEventId) -> Result<Recording, StoreError> {
-        let _span = info_span!("store.undo", event = %id).entered();
+    /// Marks the recording undone and puts its `progress_before` back on
+    /// the entry, in one transaction. Restoring rather than decrementing is
+    /// what takes a batch back to where it started. The row stays: nothing
+    /// here deletes, and the mark is what stops a second undo. An entry
+    /// whose progress has moved past the recording, by a later one or by
+    /// hand, is refused, since restoring would erase that move.
+    pub fn undo(&mut self, id: HistoryId) -> Result<Recording, StoreError> {
+        let _span = info_span!("store.undo", watch = %id).entered();
         let tx = self.conn.transaction().map_err(query_failed)?;
-        let event = find_event(&tx, id)?
-            .filter(|event| event.undone_at.is_none())
-            .ok_or(StoreError::NothingToUndo { id })?;
-        if fetch(&tx, event.entry)?.progress != event.progress {
+        let watch = find_watch(&tx, id)?.ok_or(StoreError::NothingToUndo { id })?;
+        let (entry_id, recorded) = match (watch.outcome, watch.link.entry()) {
+            (WatchOutcome::Recorded(recorded), Some(entry)) if recorded.undone_at.is_none() => {
+                (entry, recorded)
+            }
+            _ => return Err(StoreError::NothingToUndo { id }),
+        };
+        if fetch(&tx, entry_id)?.progress != recorded.progress {
             return Err(StoreError::MovedOn { id });
         }
         tx.execute(
-            "UPDATE watch_events SET undone_at = ?1 WHERE id = ?2",
+            "UPDATE history SET undone_at = ?1 WHERE id = ?2",
             params![unix_now(), id.0],
         )
         .map_err(query_failed)?;
-        let event = fetch_event(&tx, id)?;
-        let entry = set_column(&tx, event.entry, "progress", event.progress_before)?;
+        let watch = fetch_watch(&tx, id)?;
+        let entry = set_column(&tx, entry_id, "progress", recorded.progress_before)?;
         tx.commit().map_err(query_failed)?;
         info!(entry = %entry.id, progress = entry.progress, "progress restored");
-        Ok(Recording { entry, event })
+        Ok(Recording { entry, watch })
     }
 
-    /// Every watch event, oldest first, undone ones included.
-    pub fn watch_events(&self) -> Result<Vec<WatchEvent>, StoreError> {
-        let _span = info_span!("store.watch_events").entered();
+    /// Up to `limit` watches, newest first, for one entry or all of them.
+    /// One row past the limit is read to learn whether older ones exist.
+    pub fn history(&self, entry: Option<EntryId>, limit: usize) -> Result<HistoryPage, StoreError> {
+        let _span = info_span!("store.history", entry = ?entry, limit).entered();
+        let wanted = i64::try_from(limit).unwrap_or(i64::MAX).saturating_add(1);
+        // One statement per case, so the entry filter can use the index.
+        let (filter, args) = match entry {
+            Some(id) => (
+                "WHERE entry_id = ?1 ORDER BY id DESC LIMIT ?2",
+                vec![id.0, wanted],
+            ),
+            None => ("ORDER BY id DESC LIMIT ?1", vec![wanted]),
+        };
         let mut stmt = self
             .conn
-            .prepare(&format!("{SELECT_EVENT} ORDER BY id"))
+            .prepare(&format!("{SELECT_WATCH} {filter}"))
             .map_err(query_failed)?;
-        let rows = stmt
-            .query_map([], RawWatchEvent::read)
-            .map_err(query_failed)?;
-        rows.map(|row| row.map_err(query_failed)?.parse()).collect()
+        let mut watches = stmt
+            .query_map(rusqlite::params_from_iter(args), RawWatch::read)
+            .map_err(query_failed)?
+            .map(|row| row.map_err(query_failed)?.parse())
+            .collect::<Result<Vec<_>, _>>()?;
+        let more = watches.len() > limit;
+        watches.truncate(limit);
+        Ok(HistoryPage { watches, more })
     }
 
     /// Reads `PRAGMA user_version`; touches nothing on disk.
@@ -479,25 +498,19 @@ fn set_column(
     fetch(conn, id)
 }
 
-fn fetch_event(conn: &Connection, id: WatchEventId) -> Result<WatchEvent, StoreError> {
-    conn.query_row(
-        &format!("{SELECT_EVENT} WHERE id = ?1"),
-        [id.0],
-        RawWatchEvent::read,
-    )
-    .map_err(query_failed)?
-    .parse()
+fn fetch_watch(conn: &Connection, id: HistoryId) -> Result<Watch, StoreError> {
+    find_watch(conn, id)?.ok_or(StoreError::InvalidHistoryRow { id, field: "id" })
 }
 
-fn find_event(conn: &Connection, id: WatchEventId) -> Result<Option<WatchEvent>, StoreError> {
+fn find_watch(conn: &Connection, id: HistoryId) -> Result<Option<Watch>, StoreError> {
     conn.query_row(
-        &format!("{SELECT_EVENT} WHERE id = ?1"),
+        &format!("{SELECT_WATCH} WHERE id = ?1"),
         [id.0],
-        RawWatchEvent::read,
+        RawWatch::read,
     )
     .optional()
     .map_err(query_failed)?
-    .map(RawWatchEvent::parse)
+    .map(RawWatch::parse)
     .transpose()
 }
 
@@ -599,25 +612,30 @@ impl RawLastMatch {
     }
 }
 
-/// A watch-event row as SQLite hands it over, before the domain checks in
+/// A history row as SQLite hands it over, before the domain checks in
 /// `parse`.
-struct RawWatchEvent {
+struct RawWatch {
     id: i64,
-    entry_id: i64,
-    episode: i64,
-    episode_end: i64,
-    progress_before: i64,
-    progress: i64,
-    raw_title: String,
-    player: String,
+    entry_id: Option<i64>,
+    episode: Option<i64>,
+    episode_end: Option<i64>,
+    progress_before: Option<i64>,
+    progress: Option<i64>,
+    raw_title: Option<String>,
+    player: Option<String>,
     at: i64,
     undone_at: Option<i64>,
+    parsed_title: Option<String>,
+    confidence: String,
+    reason: Option<String>,
+    recorded_at: Option<i64>,
+    added_at: Option<i64>,
 }
 
-impl RawWatchEvent {
-    // Positional, so `SELECT_EVENT` only ever appends a column.
-    fn read(row: &Row<'_>) -> rusqlite::Result<RawWatchEvent> {
-        Ok(RawWatchEvent {
+impl RawWatch {
+    // Positional, so `SELECT_WATCH` only ever appends a column.
+    fn read(row: &Row<'_>) -> rusqlite::Result<RawWatch> {
+        Ok(RawWatch {
             id: row.get(0)?,
             entry_id: row.get(1)?,
             episode: row.get(2)?,
@@ -628,29 +646,63 @@ impl RawWatchEvent {
             player: row.get(7)?,
             at: row.get(8)?,
             undone_at: row.get(9)?,
+            parsed_title: row.get(10)?,
+            confidence: row.get(11)?,
+            reason: row.get(12)?,
+            recorded_at: row.get(13)?,
+            added_at: row.get(14)?,
         })
     }
 
-    fn parse(self) -> Result<WatchEvent, StoreError> {
-        let id = WatchEventId(self.id);
-        let invalid = |field| StoreError::InvalidWatchEvent { id, field };
-        let progress = |value: i64, field| u32::try_from(value).map_err(|_| invalid(field));
-        Ok(WatchEvent {
-            id,
-            entry: EntryId(self.entry_id),
-            episode: match episode_range(Some(self.episode), Some(self.episode_end)) {
-                Ok(Some(range)) => range,
-                Ok(None) | Err(()) => return Err(invalid("episode")),
+    /// The outcome is read from which columns are set: the progress pair
+    /// means a recording, else a reason means a decline, else the added
+    /// mark alone.
+    fn parse(self) -> Result<Watch, StoreError> {
+        let id = HistoryId(self.id);
+        let invalid = |field| StoreError::InvalidHistoryRow { id, field };
+        let time = |secs: i64, field| unix_time(secs).ok_or_else(|| invalid(field));
+        let count = |value: i64, field| u32::try_from(value).map_err(|_| invalid(field));
+        let confidence =
+            Confidence::from_tag(&self.confidence).ok_or_else(|| invalid("confidence"))?;
+        let link = Link::from_columns(self.entry_id.map(EntryId), confidence)
+            .ok_or_else(|| invalid("link"))?;
+        let episode =
+            episode_range(self.episode, self.episode_end).map_err(|()| invalid("episode"))?;
+        let outcome = match (self.progress_before, self.progress, self.recorded_at) {
+            (Some(before), Some(progress), Some(recorded_at)) => {
+                if !matches!(link, Link::Exact(_)) {
+                    return Err(invalid("link"));
+                }
+                if episode.is_none() {
+                    return Err(invalid("episode"));
+                }
+                WatchOutcome::Recorded(Recorded {
+                    progress_before: count(before, "progress_before")?,
+                    progress: count(progress, "progress")?,
+                    at: time(recorded_at, "recorded_at")?,
+                    undone_at: self.undone_at.map(|at| time(at, "undone_at")).transpose()?,
+                })
+            }
+            (None, None, None) if self.undone_at.is_some() => return Err(invalid("undone_at")),
+            (None, None, None) => match (&self.reason, self.added_at) {
+                (Some(reason), _) => WatchOutcome::Declined(
+                    Decline::from_tag(reason).ok_or_else(|| invalid("reason"))?,
+                ),
+                (None, Some(_)) => WatchOutcome::Added,
+                (None, None) => return Err(invalid("outcome")),
             },
-            progress_before: progress(self.progress_before, "progress_before")?,
-            progress: progress(self.progress, "progress")?,
-            raw_title: self.raw_title,
-            player: self.player,
-            at: unix_time(self.at).ok_or_else(|| invalid("at"))?,
-            undone_at: self
-                .undone_at
-                .map(|at| unix_time(at).ok_or_else(|| invalid("undone_at")))
-                .transpose()?,
+            _ => return Err(invalid("progress")),
+        };
+        Ok(Watch {
+            id,
+            at: time(self.at, "at")?,
+            raw_title: self.raw_title.ok_or_else(|| invalid("raw_title"))?,
+            parsed_title: self.parsed_title.unwrap_or_default(),
+            player: self.player.ok_or_else(|| invalid("player"))?,
+            episode,
+            link,
+            outcome,
+            added_at: self.added_at.map(|at| time(at, "added_at")).transpose()?,
         })
     }
 }
@@ -741,13 +793,13 @@ mod tests {
     }
 
     #[test]
-    fn open_creates_the_database_at_schema_v5_without_recovery() {
+    fn open_creates_the_database_at_schema_v6_without_recovery() {
         let (_tmp, dir) = open_tmp();
         let store = open(&dir);
         assert!(dir.root().join("library.sqlite").is_file());
-        assert_eq!(schema_version(&store), SchemaVersion(5));
+        assert_eq!(schema_version(&store), SchemaVersion(6));
         drop(store);
-        assert_eq!(schema_version(&open(&dir)), SchemaVersion(5));
+        assert_eq!(schema_version(&open(&dir)), SchemaVersion(6));
     }
 
     #[test]
@@ -774,7 +826,7 @@ mod tests {
         let recovered = recovered.expect("recovery reported");
         assert_backup_name(&backup_name(&recovered));
         assert_eq!(fs::read(&recovered.backup).unwrap(), garbage);
-        assert_eq!(schema_version(&store), SchemaVersion(5));
+        assert_eq!(schema_version(&store), SchemaVersion(6));
         assert_eq!(store.entries().unwrap(), vec![]);
         drop(store);
 
@@ -876,7 +928,7 @@ mod tests {
     }
 
     #[test]
-    fn v1_library_migrates_to_v5_and_keeps_entries() {
+    fn v1_library_migrates_to_v6_and_keeps_entries() {
         let (_tmp, dir) = open_tmp();
         let conn = Connection::open(dir.library_db()).unwrap();
         conn.execute_batch(include_str!("../migrations/01-entries/up.sql"))
@@ -891,7 +943,7 @@ mod tests {
         drop(conn);
 
         let store = open(&dir);
-        assert_eq!(schema_version(&store), SchemaVersion(5));
+        assert_eq!(schema_version(&store), SchemaVersion(6));
         let entries = store.entries().unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].title, "Show");
@@ -921,7 +973,7 @@ mod tests {
         drop(conn);
 
         let store = open(&dir);
-        assert_eq!(schema_version(&store), SchemaVersion(5));
+        assert_eq!(schema_version(&store), SchemaVersion(6));
         assert_eq!(store.last_match().unwrap(), Some(proposed("Show - 03.mkv")));
     }
 
@@ -948,12 +1000,12 @@ mod tests {
         drop(conn);
 
         let store = open(&dir);
-        assert_eq!(schema_version(&store), SchemaVersion(5));
+        assert_eq!(schema_version(&store), SchemaVersion(6));
         assert_eq!(store.last_match().unwrap(), Some(proposed("Show - 03.mkv")));
     }
 
     #[test]
-    fn v4_library_migrates_to_v5_with_an_empty_history() {
+    fn v4_library_migrates_to_v6_with_an_empty_history() {
         let (_tmp, dir) = open_tmp();
         let conn = Connection::open(dir.library_db()).unwrap();
         for sql in [
@@ -982,7 +1034,7 @@ mod tests {
         drop(conn);
 
         let store = open(&dir);
-        assert_eq!(schema_version(&store), SchemaVersion(5));
+        assert_eq!(schema_version(&store), SchemaVersion(6));
         let entries = store.entries().unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].id, EntryId(7));
@@ -994,16 +1046,134 @@ mod tests {
                 ..proposed("Show - 03.mkv")
             })
         );
-        assert_eq!(store.watch_events().unwrap(), vec![]);
+        assert_eq!(watches(&store), vec![]);
     }
 
-    fn watching(id: EntryId, episode: RangeInclusive<u32>) -> NewWatchEvent {
-        NewWatchEvent {
+    #[test]
+    fn v5_watch_events_become_recorded_history_rows() {
+        let (_tmp, dir) = open_tmp();
+        let conn = Connection::open(dir.library_db()).unwrap();
+        for sql in [
+            include_str!("../migrations/01-entries/up.sql"),
+            include_str!("../migrations/02-last_match/up.sql"),
+            include_str!("../migrations/03-drop_outcome/up.sql"),
+            include_str!("../migrations/04-episode_range_and_rewatching/up.sql"),
+            include_str!("../migrations/05-watch_events/up.sql"),
+        ] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO entries (id, title, status, progress, total, updated_at) \
+             VALUES (7, 'Show', 'watching', 1, 12, 0); \
+             INSERT INTO watch_events (id, entry_id, episode, episode_end, progress_before, \
+             progress, raw_title, player, at, undone_at) VALUES \
+             (4, 7, 1, 1, 0, 1, 'Show - 01.mkv', 'mpv', 1700000000, NULL), \
+             (9, 7, 2, 3, 1, 3, 'Show - 02-03.mkv', 'vlc', 1700000100, 1700000200);",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 5).unwrap();
+        drop(conn);
+
+        let store = open(&dir);
+        assert_eq!(schema_version(&store), SchemaVersion(6));
+        let at = |secs: u64| UNIX_EPOCH + Duration::from_secs(secs);
+        let copied = |id: i64,
+                      episode: RangeInclusive<u32>,
+                      progress_before: u32,
+                      progress: u32,
+                      raw_title: &str,
+                      player: &str,
+                      secs: u64,
+                      undone_at: Option<SystemTime>| Watch {
+            id: HistoryId(id),
+            at: at(secs),
+            raw_title: raw_title.into(),
+            parsed_title: String::new(),
+            player: player.into(),
+            episode: Some(episode),
+            link: Link::Exact(EntryId(7)),
+            outcome: WatchOutcome::Recorded(Recorded {
+                progress_before,
+                progress,
+                at: at(secs),
+                undone_at,
+            }),
+            added_at: None,
+        };
+        assert_eq!(
+            store.history(None, 10).unwrap(),
+            HistoryPage {
+                watches: vec![
+                    copied(
+                        9,
+                        2..=3,
+                        1,
+                        3,
+                        "Show - 02-03.mkv",
+                        "vlc",
+                        1_700_000_100,
+                        Some(at(1_700_000_200)),
+                    ),
+                    copied(4, 1..=1, 0, 1, "Show - 01.mkv", "mpv", 1_700_000_000, None),
+                ],
+                more: false,
+            }
+        );
+        let mut stmt = store
+            .conn
+            .prepare("SELECT name FROM sqlite_master")
+            .unwrap();
+        let names: Vec<String> = stmt
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(names.iter().any(|name| name == "history_by_entry"));
+        assert!(!names.iter().any(|name| name.starts_with("watch_events")));
+    }
+
+    fn watching(id: EntryId, episode: RangeInclusive<u32>) -> NewRecording {
+        NewRecording {
             entry: id,
             episode,
             raw_title: "Show - 03.mkv".into(),
+            parsed_title: "Show".into(),
             player: "mpv".into(),
         }
+    }
+
+    fn watches(store: &Store) -> Vec<Watch> {
+        store.history(None, 100).unwrap().watches
+    }
+
+    fn recorded(watch: &Watch) -> Recorded {
+        match watch.outcome {
+            WatchOutcome::Recorded(recorded) => recorded,
+            other => panic!("not a recording: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn history_reads_newest_first_up_to_the_limit_and_filters_by_entry() {
+        let (_tmp, dir) = open_tmp();
+        let mut store = open(&dir);
+        let a = store.add(entry("A")).unwrap().id;
+        let b = store.add(entry("B")).unwrap().id;
+        let a1 = store.record(watching(a, 1..=1)).unwrap().watch;
+        let b1 = store.record(watching(b, 1..=1)).unwrap().watch;
+        let a2 = store.record(watching(a, 2..=2)).unwrap().watch;
+        let page = |watches: &[&Watch], more| HistoryPage {
+            watches: watches.iter().map(|watch| (*watch).clone()).collect(),
+            more,
+        };
+        assert_eq!(
+            store.history(None, 3).unwrap(),
+            page(&[&a2, &b1, &a1], false)
+        );
+        assert_eq!(store.history(None, 2).unwrap(), page(&[&a2, &b1], true));
+        assert_eq!(store.history(Some(a), 1).unwrap(), page(&[&a2], true));
+        assert_eq!(store.history(Some(b), 5).unwrap(), page(&[&b1], false));
+        assert_eq!(store.history(None, 0).unwrap(), page(&[], true));
     }
 
     #[test]
@@ -1013,25 +1183,33 @@ mod tests {
         let id = store.add(entry("Show")).unwrap().id;
         store.set_progress(id, 2).unwrap();
 
-        let Recording { entry, event } = store.record(watching(id, 3..=4)).unwrap();
+        let Recording { entry, watch } = store.record(watching(id, 3..=4)).unwrap();
         assert_eq!(entry.progress, 4);
-        assert_eq!(event.entry, id);
-        assert_eq!(event.episode, 3..=4);
-        assert_eq!(event.progress_before, 2);
-        assert_eq!(event.progress, 4);
-        assert_eq!(event.raw_title, "Show - 03.mkv");
-        assert_eq!(event.player, "mpv");
-        assert!(event.at >= UNIX_EPOCH + Duration::from_secs(1_700_000_000));
-        assert_eq!(event.undone_at, None);
+        assert_eq!(watch.link, Link::Exact(id));
+        assert_eq!(watch.episode, Some(3..=4));
+        assert_eq!(watch.raw_title, "Show - 03.mkv");
+        assert_eq!(watch.parsed_title, "Show");
+        assert_eq!(watch.player, "mpv");
+        assert!(watch.at >= UNIX_EPOCH + Duration::from_secs(1_700_000_000));
+        assert_eq!(watch.added_at, None);
+        assert_eq!(
+            recorded(&watch),
+            Recorded {
+                progress_before: 2,
+                progress: 4,
+                at: watch.at,
+                undone_at: None,
+            }
+        );
 
         let second = store.record(watching(id, 5..=5)).unwrap();
-        assert!(second.event.id > event.id);
-        assert_eq!(second.event.progress_before, 4);
+        assert!(second.watch.id > watch.id);
+        assert_eq!(recorded(&second.watch).progress_before, 4);
         drop(store);
 
         let reopened = open(&dir);
         assert_eq!(reopened.entries().unwrap(), vec![second.entry]);
-        assert_eq!(reopened.watch_events().unwrap(), vec![event, second.event]);
+        assert_eq!(watches(&reopened), vec![second.watch, watch]);
     }
 
     #[test]
@@ -1045,7 +1223,7 @@ mod tests {
             Err(StoreError::NotFound { id }) if id == unknown
         ));
         assert_eq!(store.entries().unwrap(), vec![existing]);
-        assert_eq!(store.watch_events().unwrap(), vec![]);
+        assert_eq!(watches(&store), vec![]);
     }
 
     #[test]
@@ -1054,46 +1232,50 @@ mod tests {
         let mut store = open(&dir);
         let id = store.add(entry("Show")).unwrap().id;
         store.set_progress(id, 2).unwrap();
-        let recorded = store.record(watching(id, 3..=5)).unwrap();
-        assert_eq!(recorded.entry.progress, 5);
+        let written = store.record(watching(id, 3..=5)).unwrap();
+        assert_eq!(written.entry.progress, 5);
 
-        let Recording { entry, event } = store.undo(recorded.event.id).unwrap();
+        let Recording { entry, watch } = store.undo(written.watch.id).unwrap();
         assert_eq!(entry.progress, 2);
-        assert!(event.undone_at.is_some());
+        let undone_at = recorded(&watch).undone_at;
+        assert!(undone_at.is_some());
         assert_eq!(
-            event,
-            WatchEvent {
-                undone_at: event.undone_at,
-                ..recorded.event
+            watch,
+            Watch {
+                outcome: WatchOutcome::Recorded(Recorded {
+                    undone_at,
+                    ..recorded(&written.watch)
+                }),
+                ..written.watch
             }
         );
         drop(store);
 
         let reopened = open(&dir);
         assert_eq!(reopened.entries().unwrap(), vec![entry]);
-        assert_eq!(reopened.watch_events().unwrap(), vec![event]);
+        assert_eq!(watches(&reopened), vec![watch]);
     }
 
     #[test]
-    fn undo_refuses_an_undone_or_unknown_event_and_changes_nothing() {
+    fn undo_refuses_an_undone_or_unknown_watch_and_changes_nothing() {
         let (_tmp, dir) = open_tmp();
         let mut store = open(&dir);
         let id = store.add(entry("Show")).unwrap().id;
-        let event = store.record(watching(id, 1..=1)).unwrap().event.id;
-        let undone = store.undo(event).unwrap();
+        let watch = store.record(watching(id, 1..=1)).unwrap().watch.id;
+        let undone = store.undo(watch).unwrap();
         let moved_on = store.set_progress(id, 4).unwrap();
 
         assert!(matches!(
-            store.undo(event),
-            Err(StoreError::NothingToUndo { id }) if id == event
+            store.undo(watch),
+            Err(StoreError::NothingToUndo { id }) if id == watch
         ));
-        let unknown = WatchEventId(event.0 + 100);
+        let unknown = HistoryId(watch.0 + 100);
         assert!(matches!(
             store.undo(unknown),
             Err(StoreError::NothingToUndo { id }) if id == unknown
         ));
         assert_eq!(store.entries().unwrap(), vec![moved_on]);
-        assert_eq!(store.watch_events().unwrap(), vec![undone.event]);
+        assert_eq!(watches(&store), vec![undone.watch]);
     }
 
     #[test]
@@ -1101,7 +1283,7 @@ mod tests {
         let (_tmp, dir) = open_tmp();
         let mut store = open(&dir);
         let id = store.add(entry("Show")).unwrap().id;
-        let first = store.record(watching(id, 1..=1)).unwrap().event;
+        let first = store.record(watching(id, 1..=1)).unwrap().watch;
         let second = store.record(watching(id, 2..=2)).unwrap();
 
         assert!(matches!(
@@ -1109,60 +1291,75 @@ mod tests {
             Err(StoreError::MovedOn { id: got }) if got == first.id
         ));
         assert_eq!(store.entries().unwrap(), vec![second.entry.clone()]);
-        assert_eq!(
-            store.watch_events().unwrap(),
-            vec![first.clone(), second.event.clone()]
-        );
+        assert_eq!(watches(&store), vec![second.watch.clone(), first.clone()]);
 
         let by_hand = store.set_progress(id, 7).unwrap();
         assert!(matches!(
-            store.undo(second.event.id),
-            Err(StoreError::MovedOn { id: got }) if got == second.event.id
+            store.undo(second.watch.id),
+            Err(StoreError::MovedOn { id: got }) if got == second.watch.id
         ));
         assert_eq!(store.entries().unwrap(), vec![by_hand]);
-        assert_eq!(store.watch_events().unwrap(), vec![first, second.event]);
+        assert_eq!(watches(&store), vec![second.watch, first]);
     }
 
     #[test]
-    fn undo_is_allowed_again_once_the_entry_is_back_where_the_event_left_it() {
+    fn undo_is_allowed_again_once_the_entry_is_back_where_the_recording_left_it() {
         let (_tmp, dir) = open_tmp();
         let mut store = open(&dir);
         let id = store.add(entry("Show")).unwrap().id;
-        let event = store.record(watching(id, 1..=3)).unwrap().event;
+        let written = store.record(watching(id, 1..=3)).unwrap().watch;
         store.set_progress(id, 5).unwrap();
         store.set_progress(id, 3).unwrap();
 
-        let Recording { entry, event } = store.undo(event.id).unwrap();
+        let Recording { entry, watch } = store.undo(written.id).unwrap();
         assert_eq!(entry.progress, 0);
-        assert!(event.undone_at.is_some());
+        assert!(recorded(&watch).undone_at.is_some());
     }
 
+    /// Each step breaks the row a little further, so every check in `parse`
+    /// is reached with the ones before it passing.
     #[test]
-    fn garbage_watch_event_surfaces_as_invalid() {
+    fn garbage_history_row_surfaces_as_invalid() {
         let (_tmp, dir) = open_tmp();
         let mut store = open(&dir);
         let id = store.add(entry("Show")).unwrap().id;
-        let event = store.record(watching(id, 1..=1)).unwrap().event.id;
+        let watch = store.record(watching(id, 1..=1)).unwrap().watch.id;
         for (broken, field) in [
+            ("UPDATE history SET episode = 5, episode_end = 2", "episode"),
             (
-                "UPDATE watch_events SET episode = 5, episode_end = 2",
-                "episode",
-            ),
-            (
-                "UPDATE watch_events SET episode = 1, episode_end = 1, progress = -1",
+                "UPDATE history SET episode = 1, episode_end = 1, progress = -1",
                 "progress",
             ),
             (
-                "UPDATE watch_events SET progress = 1, undone_at = -5",
+                "UPDATE history SET progress = 1, undone_at = -5",
                 "undone_at",
+            ),
+            (
+                "UPDATE history SET undone_at = NULL, confidence = 'likely'",
+                "link",
+            ),
+            ("UPDATE history SET confidence = 'bogus'", "confidence"),
+            (
+                "UPDATE history SET confidence = 'exact', progress = NULL",
+                "progress",
+            ),
+            (
+                "UPDATE history SET progress_before = NULL, recorded_at = NULL, undone_at = 5",
+                "undone_at",
+            ),
+            ("UPDATE history SET undone_at = NULL", "outcome"),
+            ("UPDATE history SET reason = 'bogus'", "reason"),
+            (
+                "UPDATE history SET reason = 'not-next', raw_title = NULL",
+                "raw_title",
             ),
         ] {
             store.execute_raw(broken);
             assert!(
                 matches!(
-                    store.watch_events(),
-                    Err(StoreError::InvalidWatchEvent { id: got, field: got_field })
-                        if got == event && got_field == field
+                    store.history(None, 10),
+                    Err(StoreError::InvalidHistoryRow { id: got, field: got_field })
+                        if got == watch && got_field == field
                 ),
                 "{broken}"
             );
