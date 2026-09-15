@@ -4,8 +4,10 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command as Process;
+use std::sync::OnceLock;
 use std::time::{Duration, SystemTime};
 
+use ryuuji_core::TimeZone;
 use tracing::warn;
 use windows_reactor::*;
 
@@ -208,6 +210,20 @@ pub(crate) fn use_refresh(cx: &mut RenderCx, running: bool) {
             }
         }
     });
+}
+
+/// The zone local times are shown in: the system's, read once. A zone that
+/// cannot be read falls back to UTC, with one warning rather than one per
+/// render.
+pub(crate) fn local_zone() -> TimeZone {
+    static ZONE: OnceLock<TimeZone> = OnceLock::new();
+    ZONE.get_or_init(|| {
+        TimeZone::try_system().unwrap_or_else(|err| {
+            warn!(%err, "system time zone unreadable; showing times in UTC");
+            TimeZone::UTC
+        })
+    })
+    .clone()
 }
 
 /// "2 h ago"-style age of `modified` at `now`.

@@ -4,7 +4,10 @@ use std::{fmt, fs, io};
 
 use tracing::{debug, debug_span};
 
-use crate::{DataDir, DataDirSource, SchemaVersion, Store, error_chain};
+use crate::{DataDir, DataDirSource, SchemaVersion, Store, Watch, error_chain};
+
+/// How many of the newest watches a snapshot lists.
+const WATCHES_LISTED: usize = 20;
 
 /// A byte count that prints in binary units.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -82,16 +85,24 @@ pub struct Diagnostics {
     pub logs: PathBuf,
     /// The newest file in `logs`, when there is one.
     pub current_log: Option<FileFacts>,
+    /// The newest watches in the history, or why it could not be read.
+    pub watches: Result<Vec<Watch>, ProbeFailed>,
 }
 
 impl Diagnostics {
-    /// Reads file metadata and `PRAGMA user_version` only. Never reads
-    /// file contents and never runs a check that could write.
+    /// Reads file metadata, `PRAGMA user_version` and the newest history
+    /// rows. Never reads other file contents and never runs anything that
+    /// could write.
     pub fn gather(dir: &DataDir, store: &Store) -> Diagnostics {
         let _span = debug_span!("diagnostics.gather").entered();
-        let schema = store.schema_version().map_err(|err| ProbeFailed {
+        let probe_failed = |err: crate::StoreError| ProbeFailed {
             detail: error_chain(&err),
-        });
+        };
+        let schema = store.schema_version().map_err(probe_failed);
+        let watches = store
+            .history(None, WATCHES_LISTED)
+            .map(|page| page.watches)
+            .map_err(probe_failed);
         let logs = dir.logs();
         let current_log = newest_file(&logs).map(FileFacts::of);
         let diagnostics = Diagnostics {
@@ -102,6 +113,7 @@ impl Diagnostics {
             settings: FileFacts::of(dir.settings_file()),
             logs,
             current_log,
+            watches,
         };
         debug!(
             library = ?diagnostics.library.stat,
@@ -129,7 +141,7 @@ mod tests {
     use std::time::{Duration, UNIX_EPOCH};
 
     use super::*;
-    use crate::{Opened, settings};
+    use crate::{NewEntry, NewRecording, Opened, WatchStatus, settings};
 
     fn open_tmp() -> (tempfile::TempDir, DataDir, Store) {
         let tmp = tempfile::tempdir().unwrap();
@@ -162,6 +174,42 @@ mod tests {
         ));
         assert_eq!(diagnostics.schema, Ok(SchemaVersion(6)));
         assert_eq!(diagnostics.logs, dir.logs());
+    }
+
+    #[test]
+    fn gather_lists_the_newest_watches_up_to_the_limit() {
+        let (_tmp, dir, mut store) = open_tmp();
+        assert_eq!(Diagnostics::gather(&dir, &store).watches, Ok(vec![]));
+
+        let entry = store
+            .add(NewEntry {
+                title: "Show".into(),
+                status: WatchStatus::Watching,
+                progress: 0,
+                total: None,
+                rewatching: false,
+            })
+            .unwrap()
+            .id;
+        let written: Vec<_> = (1..=WATCHES_LISTED as u32 + 2)
+            .map(|episode| {
+                store
+                    .record(NewRecording {
+                        watch: None,
+                        entry,
+                        episode: episode..=episode,
+                        raw_title: format!("Show - {episode:02}.mkv"),
+                        parsed_title: "Show".into(),
+                        player: "mpv".into(),
+                    })
+                    .unwrap()
+                    .watch
+                    .id
+            })
+            .collect();
+        let listed = Diagnostics::gather(&dir, &store).watches.unwrap();
+        assert_eq!(listed.len(), WATCHES_LISTED);
+        assert_eq!(Some(&listed[0].id), written.last());
     }
 
     #[test]

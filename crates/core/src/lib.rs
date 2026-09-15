@@ -25,8 +25,8 @@ pub use app::Ryuuji;
 pub use data_dir::{DataDir, DataDirError, DataDirSource};
 pub use diagnostics::{ByteSize, Diagnostics, FileFacts, FileStat, ProbeFailed};
 pub use history::{
-    Day, HistoryId, HistoryPage, NewRecording, Recorded, Watch, WatchOutcome, days, time_of_day,
-    week_start,
+    Day, HistoryId, HistoryPage, NewRecording, Recorded, Watch, WatchOutcome, date_time, days,
+    time_of_day, week_start,
 };
 // The zone history reads its local days in; a shell passes the system's.
 pub use jiff::tz::TimeZone;
