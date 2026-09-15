@@ -297,7 +297,8 @@ pub enum Command {
     /// Creates a Watching entry from the unmatched last proposal and relinks it.
     AddProposedToLibrary,
     /// Marks a recording undone and puts the entry's progress back to what
-    /// it was before the write.
+    /// it was before the write, while the entry still stands where the
+    /// recording left it.
     UndoRecording(WatchEventId),
 }
 

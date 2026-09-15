@@ -99,9 +99,12 @@ pub enum StoreError {
         id: WatchEventId,
         field: &'static str,
     },
-    /// One UPDATE guards both cases, so the store does not know which.
     #[error("watch event {id} is missing or already undone")]
     NothingToUndo { id: WatchEventId },
+    /// The entry's progress is no longer what the event wrote, so putting
+    /// `progress_before` back would erase whatever moved it since.
+    #[error("the entry has moved on since watch event {id} was recorded")]
+    MovedOn { id: WatchEventId },
 }
 
 impl StoreError {
@@ -116,7 +119,8 @@ impl StoreError {
             | StoreError::InvalidRow { .. }
             | StoreError::InvalidLastMatch { .. }
             | StoreError::InvalidWatchEvent { .. }
-            | StoreError::NothingToUndo { .. } => false,
+            | StoreError::NothingToUndo { .. }
+            | StoreError::MovedOn { .. } => false,
         }
     }
 }
@@ -297,19 +301,23 @@ impl Store {
     /// Marks the event undone and puts its `progress_before` back on the
     /// entry, in one transaction. Restoring rather than decrementing is what
     /// takes a batch back to where it started. The row stays: nothing here
-    /// deletes, and the mark is what stops a second undo.
+    /// deletes, and the mark is what stops a second undo. An entry whose
+    /// progress has moved past the event, by a later recording or by hand,
+    /// is refused, since restoring would erase that move.
     pub fn undo(&mut self, id: WatchEventId) -> Result<Recording, StoreError> {
         let _span = info_span!("store.undo", event = %id).entered();
         let tx = self.conn.transaction().map_err(query_failed)?;
-        let changed = tx
-            .execute(
-                "UPDATE watch_events SET undone_at = ?1 WHERE id = ?2 AND undone_at IS NULL",
-                params![unix_now(), id.0],
-            )
-            .map_err(query_failed)?;
-        if changed == 0 {
-            return Err(StoreError::NothingToUndo { id });
+        let event = find_event(&tx, id)?
+            .filter(|event| event.undone_at.is_none())
+            .ok_or(StoreError::NothingToUndo { id })?;
+        if fetch(&tx, event.entry)?.progress != event.progress {
+            return Err(StoreError::MovedOn { id });
         }
+        tx.execute(
+            "UPDATE watch_events SET undone_at = ?1 WHERE id = ?2",
+            params![unix_now(), id.0],
+        )
+        .map_err(query_failed)?;
         let event = fetch_event(&tx, id)?;
         let entry = set_column(&tx, event.entry, "progress", event.progress_before)?;
         tx.commit().map_err(query_failed)?;
@@ -479,6 +487,18 @@ fn fetch_event(conn: &Connection, id: WatchEventId) -> Result<WatchEvent, StoreE
     )
     .map_err(query_failed)?
     .parse()
+}
+
+fn find_event(conn: &Connection, id: WatchEventId) -> Result<Option<WatchEvent>, StoreError> {
+    conn.query_row(
+        &format!("{SELECT_EVENT} WHERE id = ?1"),
+        [id.0],
+        RawWatchEvent::read,
+    )
+    .optional()
+    .map_err(query_failed)?
+    .map(RawWatchEvent::parse)
+    .transpose()
 }
 
 /// A row as SQLite hands it over, before the domain checks in `parse`.
@@ -1074,6 +1094,47 @@ mod tests {
         ));
         assert_eq!(store.entries().unwrap(), vec![moved_on]);
         assert_eq!(store.watch_events().unwrap(), vec![undone.event]);
+    }
+
+    #[test]
+    fn undo_refuses_a_recording_the_entry_has_moved_past() {
+        let (_tmp, dir) = open_tmp();
+        let mut store = open(&dir);
+        let id = store.add(entry("Show")).unwrap().id;
+        let first = store.record(watching(id, 1..=1)).unwrap().event;
+        let second = store.record(watching(id, 2..=2)).unwrap();
+
+        assert!(matches!(
+            store.undo(first.id),
+            Err(StoreError::MovedOn { id: got }) if got == first.id
+        ));
+        assert_eq!(store.entries().unwrap(), vec![second.entry.clone()]);
+        assert_eq!(
+            store.watch_events().unwrap(),
+            vec![first.clone(), second.event.clone()]
+        );
+
+        let by_hand = store.set_progress(id, 7).unwrap();
+        assert!(matches!(
+            store.undo(second.event.id),
+            Err(StoreError::MovedOn { id: got }) if got == second.event.id
+        ));
+        assert_eq!(store.entries().unwrap(), vec![by_hand]);
+        assert_eq!(store.watch_events().unwrap(), vec![first, second.event]);
+    }
+
+    #[test]
+    fn undo_is_allowed_again_once_the_entry_is_back_where_the_event_left_it() {
+        let (_tmp, dir) = open_tmp();
+        let mut store = open(&dir);
+        let id = store.add(entry("Show")).unwrap().id;
+        let event = store.record(watching(id, 1..=3)).unwrap().event;
+        store.set_progress(id, 5).unwrap();
+        store.set_progress(id, 3).unwrap();
+
+        let Recording { entry, event } = store.undo(event.id).unwrap();
+        assert_eq!(entry.progress, 0);
+        assert!(event.undone_at.is_some());
     }
 
     #[test]
