@@ -198,13 +198,11 @@ enum Op {
     Retract {
         kind: ElementKind,
         value: String,
+        keeps: Option<ElementKind>,
     },
     /// A doubt: the token at `at` was read as the rule's kind but could be
     /// `passed` instead.
-    Instead {
-        at: usize,
-        passed: Sense,
-    },
+    Instead { at: usize, passed: Sense },
 }
 
 /// A rule's answer: what it read, what it used up, what it doubted.
@@ -333,12 +331,19 @@ impl Verdict {
         self
     }
 
-    /// Drops a value an earlier rule read, and records it as what the
-    /// text could have been.
-    pub(crate) fn retract(mut self, kind: ElementKind, value: impl Into<String>) -> Verdict {
+    /// Drops a value an earlier rule read, and records it as what the text
+    /// could have been. `keeps` is what the text stays: `None` for a word of
+    /// the anime title, or the kind that still holds it.
+    pub(crate) fn retract(
+        mut self,
+        kind: ElementKind,
+        value: impl Into<String>,
+        keeps: Option<ElementKind>,
+    ) -> Verdict {
         self.ops.push(Op::Retract {
             kind,
             value: value.into(),
+            keeps,
         });
         self
     }
@@ -451,7 +456,7 @@ fn apply(
                 let part = part.unwrap_or(0..tape.tokens[at].text.len());
                 tape.tokens[at].take(name, kind, part, false);
             }
-            Op::Retract { kind, value } => {
+            Op::Retract { kind, value, keeps } => {
                 if let Some(fact) = reading
                     .elements()
                     .facts()
@@ -462,7 +467,7 @@ fn apply(
                         span: fact.span,
                         text: fact.value.clone(),
                         taken: Sense {
-                            kind: None,
+                            kind: keeps,
                             rule: name,
                         },
                         passed: Sense {
@@ -822,7 +827,7 @@ mod tests {
         apply(
             RuleName::Prelude,
             Certainty::Stated,
-            Verdict::nothing().retract(ElementKind::Other, "Show"),
+            Verdict::nothing().retract(ElementKind::Other, "Show", None),
             &mut tape,
             &mut reading,
         );

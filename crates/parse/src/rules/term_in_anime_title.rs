@@ -28,7 +28,7 @@ fn read(_tape: &Tape, reading: &Reading) -> Verdict {
     let mut verdict = Verdict::nothing();
     for (kind, value) in unidentifiable(reading) {
         if kind != ElementKind::AnimeType && has_word(title, value) {
-            verdict = verdict.retract(kind, value);
+            verdict = verdict.retract(kind, value, None);
         }
     }
     verdict

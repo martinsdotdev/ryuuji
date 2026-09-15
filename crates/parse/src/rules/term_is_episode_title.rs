@@ -22,9 +22,9 @@ fn read(_tape: &Tape, reading: &Reading) -> Verdict {
     let mut verdict = Verdict::nothing();
     for (kind, value) in unidentifiable(reading) {
         if title.eq_ignore_ascii_case(value) {
-            verdict = verdict.retract(ElementKind::EpisodeTitle, title);
+            verdict = verdict.retract(ElementKind::EpisodeTitle, title, Some(kind));
         } else if has_word(title, value) {
-            verdict = verdict.retract(kind, value);
+            verdict = verdict.retract(kind, value, Some(ElementKind::EpisodeTitle));
         }
     }
     verdict
@@ -43,6 +43,12 @@ mod tests {
             reading.elements().get(ElementKind::ReleaseInformation),
             Some("END")
         );
+        let alternative = &reading.alternatives()[0];
+        assert_eq!(
+            alternative.taken.kind,
+            Some(ElementKind::ReleaseInformation)
+        );
+        assert_eq!(alternative.passed.kind, Some(ElementKind::EpisodeTitle));
     }
 
     #[test]
@@ -55,6 +61,12 @@ mod tests {
         assert_eq!(
             reading.elements().get(ElementKind::EpisodeTitle),
             Some("The END of It")
+        );
+        let alternative = &reading.alternatives()[0];
+        assert_eq!(alternative.taken.kind, Some(ElementKind::EpisodeTitle));
+        assert_eq!(
+            alternative.passed.kind,
+            Some(ElementKind::ReleaseInformation)
         );
     }
 }
