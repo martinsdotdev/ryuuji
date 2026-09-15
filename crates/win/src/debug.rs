@@ -9,8 +9,9 @@ use std::rc::Rc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ryuuji_core::{
-    Command, DataDirSource, Diagnostics, FileFacts, FileStat, PlaybackEvent, PlaybackSource,
-    PlaybackStatus, ProbeFailed, ProposedMatch, Ryuuji, SchemaVersion, error_chain,
+    Command, DataDirSource, Diagnostics, FileFacts, FileStat, Link, PlaybackEvent, PlaybackSource,
+    PlaybackStatus, ProbeFailed, ProposedMatch, Recorded, Ryuuji, SchemaVersion, TimeZone, Watch,
+    WatchOutcome, date_time, error_chain,
 };
 use ryuuji_detect::{SessionFacts, WatchError, Watcher};
 use tracing::{Level, warn};
@@ -86,6 +87,8 @@ pub struct Report {
     pub events: Vec<EventRecord>,
     /// Every SMTC session at the last refresh, or why detection is off.
     pub sessions: std::result::Result<Vec<SessionFacts>, String>,
+    /// The zone the watches' times are printed in.
+    pub zone: TimeZone,
 }
 
 impl Report {
@@ -105,6 +108,7 @@ impl Report {
             core.state().last_match.clone(),
             recent.snapshot(),
             sessions,
+            ui::local_zone(),
         )
     }
 
@@ -113,6 +117,7 @@ impl Report {
         last_match: Option<ProposedMatch>,
         events: Vec<EventRecord>,
         sessions: std::result::Result<Vec<SessionFacts>, String>,
+        zone: TimeZone,
     ) -> Report {
         Report {
             now: SystemTime::now(),
@@ -120,6 +125,7 @@ impl Report {
             last_match,
             events,
             sessions,
+            zone,
         }
     }
 
@@ -185,6 +191,18 @@ impl Report {
             }
         }
         let _ = writeln!(out);
+        match &core.watches {
+            Ok(watches) => {
+                let _ = writeln!(out, "Watches ({}):", watches.len());
+                for watch in watches {
+                    let _ = writeln!(out, "  {}", watch_line(watch, &self.zone));
+                }
+            }
+            Err(ProbeFailed { detail }) => {
+                let _ = writeln!(out, "Watches: unreadable ({detail})");
+            }
+        }
+        let _ = writeln!(out);
         let _ = writeln!(out, "Media sessions:");
         match &self.sessions {
             Ok(sessions) if sessions.is_empty() => {
@@ -238,6 +256,52 @@ fn session_line(session: &SessionFacts) -> String {
         session.status,
         session.player.as_deref().unwrap_or(NOT_APPLICABLE)
     )
+}
+
+/// `#id | opened | outcome | match | raw title | player`, matching the
+/// watches card.
+fn watch_line(watch: &Watch, zone: &TimeZone) -> String {
+    format!(
+        "#{} | {} | {} | {} | {} | {}",
+        watch.id,
+        date_time(watch.at, zone),
+        outcome_text(watch),
+        match_text(&watch.link),
+        watch.raw_title,
+        watch.player
+    )
+}
+
+/// What the row says in the store's own words: `recorded 7→8`, a decline's
+/// tag, or `added`, then `, added` or `, undone` for a mark on top.
+fn outcome_text(watch: &Watch) -> String {
+    let mut text = match watch.outcome {
+        WatchOutcome::Recorded(Recorded {
+            progress_before,
+            progress,
+            ..
+        }) => format!("recorded {progress_before}\u{2192}{progress}"),
+        WatchOutcome::Declined(decline) => decline.tag().to_owned(),
+        WatchOutcome::Added => "added".to_owned(),
+    };
+    if watch.added_at.is_some() && watch.outcome != WatchOutcome::Added {
+        text.push_str(", added");
+    }
+    if let WatchOutcome::Recorded(Recorded {
+        undone_at: Some(_), ..
+    }) = watch.outcome
+    {
+        text.push_str(", undone");
+    }
+    text
+}
+
+/// `exact · entry 3`, or the confidence alone when nothing is linked.
+fn match_text(link: &Link) -> String {
+    match link.entry() {
+        Some(entry) => format!("{} \u{b7} entry {entry}", link.confidence().tag()),
+        None => link.confidence().tag().to_owned(),
+    }
 }
 
 /// `HH:MM:SS.mmm LEVEL target message`, time of day in UTC.
@@ -425,6 +489,7 @@ pub fn diagnostics(props: &DiagnosticsProps, cx: &mut RenderCx) -> Element {
             actions_row,
             vstack((section("Data directory"), directory_card)).spacing(8.0),
             vstack((section("Files"), files_card(core, report.now))).spacing(8.0),
+            vstack((section("Watches · newest first"), watches_card(&report))).spacing(8.0),
             vstack((section("Playback"), playback_card)).spacing(8.0),
             vstack((section("Media sessions"), sessions_card(&report.sessions))).spacing(8.0),
             vstack((events_header, events_card(&report, filter))).spacing(8.0),
@@ -509,6 +574,40 @@ fn files_card(core: &Diagnostics, now: SystemTime) -> Border {
         .header(["Name", "Size", "Modified", "Note"])
         .rows(rows.into_iter().map(FileRow::cells)),
     )
+}
+
+fn watches_card(report: &Report) -> Border {
+    let watches = match &report.core.watches {
+        Ok(watches) if watches.is_empty() => return card_frame(caption("No watches yet.")),
+        Ok(watches) => watches,
+        Err(ProbeFailed { detail }) => {
+            return card_frame(caption(format!("History unreadable: {detail}")));
+        }
+    };
+    card_frame(
+        table([
+            GridLength::Auto,
+            GridLength::Auto,
+            GridLength::Auto,
+            GridLength::Auto,
+            GridLength::STAR,
+        ])
+        .spacing(6.0, 14.0)
+        .header(["Id", "Opened", "Outcome", "Match", "Raw title"])
+        .rows(watches.iter().map(|watch| watch_cells(watch, &report.zone))),
+    )
+}
+
+fn watch_cells(watch: &Watch, zone: &TimeZone) -> [TextBlock; 5] {
+    [
+        mono(watch.id.to_string()).foreground(ThemeRef::SecondaryText),
+        mono(date_time(watch.at, zone)).foreground(ThemeRef::SecondaryText),
+        mono(outcome_text(watch)),
+        mono(match_text(&watch.link)),
+        mono(format!("{} \u{b7} {}", watch.raw_title, watch.player))
+            .wrap()
+            .selectable(),
+    ]
 }
 
 fn sessions_card(sessions: &std::result::Result<Vec<SessionFacts>, String>) -> Border {
@@ -597,7 +696,10 @@ fn level_brush(level: Level) -> ThemeRef {
 
 #[cfg(test)]
 mod tests {
-    use ryuuji_core::{ByteSize, DataDir, Link, Opened, ProposedMatch, Store};
+    use ryuuji_core::{
+        ByteSize, DataDir, Decline, Link, NewEntry, NewRecording, Opened, ProposedMatch, Store,
+        WatchStatus,
+    };
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 
@@ -647,11 +749,103 @@ mod tests {
         );
     }
 
+    fn show(title: &str) -> NewEntry {
+        NewEntry {
+            title: title.to_owned(),
+            status: WatchStatus::Watching,
+            progress: 0,
+            total: None,
+            rewatching: false,
+        }
+    }
+
+    fn recording(entry: ryuuji_core::EntryId, raw_title: &str) -> NewRecording {
+        NewRecording {
+            watch: None,
+            entry,
+            episode: 1..=1,
+            raw_title: raw_title.to_owned(),
+            parsed_title: "Show".to_owned(),
+            player: "mpv".to_owned(),
+        }
+    }
+
+    #[test]
+    fn watch_outcomes_and_matches_read_in_the_stores_words() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = DataDir::at(tmp.path()).unwrap();
+        let Opened { mut store, .. } = Store::open(&dir).unwrap();
+        let proposal = |raw_title: &str, link| ProposedMatch {
+            raw_title: raw_title.to_owned(),
+            parsed_title: "Other".to_owned(),
+            episode: Some(3..=3),
+            season: None,
+            release_group: None,
+            link,
+            player: "mpv".to_owned(),
+            at: UNIX_EPOCH,
+        };
+
+        let a = store.add(show("A")).unwrap().id;
+        store.record(recording(a, "A - 01.mkv")).unwrap();
+        let unmatched = proposal("Other - 03.mkv", Link::Unmatched);
+        let declined = store.decline(None, &unmatched, Decline::NotExact).unwrap();
+        let added = store
+            .add_to_library(show("Other"), Some(declined.id), &unmatched)
+            .unwrap();
+        let other = added.entry.id;
+        store
+            .decline(
+                Some(added.watch.id),
+                &proposal("Other - 03.mkv", Link::Exact(other)),
+                Decline::NotNext,
+            )
+            .unwrap();
+        let b = store.add(show("B")).unwrap().id;
+        let undone = store.record(recording(b, "B - 01.mkv")).unwrap().watch.id;
+        store.undo(undone).unwrap();
+        let c = store
+            .add_to_library(show("C"), None, &proposal("C - 03.mkv", Link::Unmatched))
+            .unwrap()
+            .entry
+            .id;
+        store
+            .decline(
+                None,
+                &proposal("Z - 03.mkv", Link::Likely(b)),
+                Decline::NotExact,
+            )
+            .unwrap();
+
+        let watches = store.history(None, 10).unwrap().watches;
+        let read: Vec<(String, String)> = watches
+            .iter()
+            .rev()
+            .map(|watch| (outcome_text(watch), match_text(&watch.link)))
+            .collect();
+        let pair = |outcome: &str, link: String| (outcome.to_owned(), link);
+        assert_eq!(
+            read,
+            vec![
+                pair("recorded 0\u{2192}1", format!("exact \u{b7} entry {a}")),
+                pair("not-next, added", format!("exact \u{b7} entry {other}")),
+                pair(
+                    "recorded 0\u{2192}1, undone",
+                    format!("exact \u{b7} entry {b}")
+                ),
+                pair("added", format!("exact \u{b7} entry {c}")),
+                pair("not-exact", format!("likely \u{b7} entry {b}")),
+            ]
+        );
+    }
+
     #[test]
     fn report_text_contains_every_fact_and_ignores_the_view_filter() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = DataDir::at(tmp.path()).unwrap();
-        let Opened { store, .. } = Store::open(&dir).unwrap();
+        let Opened { mut store, .. } = Store::open(&dir).unwrap();
+        let entry = store.add(show("Show")).unwrap().id;
+        store.record(recording(entry, "Show - 01.mkv")).unwrap();
         let core = Diagnostics::gather(&dir, &store);
         let events = vec![
             record(Level::INFO, 1_756_400_000, 0, "info event"),
@@ -681,9 +875,22 @@ mod tests {
             player: "mpv".to_owned(),
             at: UNIX_EPOCH + Duration::from_secs(1_700_000_000),
         };
-        let report = Report::new(core.clone(), Some(last), events, Ok(sessions));
+        let report = Report::new(
+            core.clone(),
+            Some(last),
+            events,
+            Ok(sessions),
+            TimeZone::UTC,
+        );
 
         let text = report.to_text();
+        let watch = &core.watches.as_ref().unwrap()[0];
+        assert!(text.contains(&format!(
+            "\n\nWatches (1):\n  #{} | {} | recorded 0\u{2192}1 | exact \u{b7} entry {entry} | \
+             Show - 01.mkv | mpv\n\nMedia sessions:",
+            watch.id,
+            date_time(watch.at, &TimeZone::UTC)
+        )));
         assert!(text.starts_with(&format!("Ryuuji {} (", env!("CARGO_PKG_VERSION"))));
         assert!(text.contains(&format!(
             "Data directory: {} [explicit]",
@@ -749,11 +956,25 @@ mod tests {
         let Opened { store, .. } = Store::open(&dir).unwrap();
         let core = Diagnostics::gather(&dir, &store);
 
-        let text = Report::new(core.clone(), None, Vec::new(), Ok(Vec::new())).to_text();
-        assert!(text.contains("Current log: none\nLast match: none\n"));
+        let text = Report::new(
+            core.clone(),
+            None,
+            Vec::new(),
+            Ok(Vec::new()),
+            TimeZone::UTC,
+        )
+        .to_text();
+        assert!(text.contains("Current log: none\nLast match: none\n\nWatches (0):\n\n"));
         assert!(text.contains("Media sessions:\n  none\n\nRecent events (0):\n"));
 
-        let text = Report::new(core, None, Vec::new(), Err("no manager".to_owned())).to_text();
+        let text = Report::new(
+            core,
+            None,
+            Vec::new(),
+            Err("no manager".to_owned()),
+            TimeZone::UTC,
+        )
+        .to_text();
         assert!(text.contains("Media sessions:\n  unavailable: no manager\n"));
     }
 

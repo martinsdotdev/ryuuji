@@ -151,6 +151,12 @@ pub fn time_of_day(at: SystemTime, zone: &TimeZone) -> String {
     local(at, zone).strftime("%H:%M").to_string()
 }
 
+/// `2026-09-15 23:14`: the local date and 24-hour time of `at`, for the
+/// places that list rows from more than one day without grouping them.
+pub fn date_time(at: SystemTime, zone: &TimeZone) -> String {
+    local(at, zone).strftime("%Y-%m-%d %H:%M").to_string()
+}
+
 /// The first instant of "the last 7 days": local midnight six days before
 /// today, so the span covers today and the six days before it, the same
 /// days the page groups under.
@@ -216,6 +222,18 @@ mod tests {
         assert_eq!(
             label("2025-12-28T20:00:00Z", "2026-01-02T09:00:00Z", "UTC0"),
             "Sunday, 28 December 2025"
+        );
+    }
+
+    #[test]
+    fn date_time_prints_the_local_date_and_clock() {
+        assert_eq!(
+            date_time(utc("2026-09-15T02:00:00Z"), &zone("<-03>3")),
+            "2026-09-14 23:00"
+        );
+        assert_eq!(
+            date_time(utc("2026-09-15T21:36:00Z"), &zone("UTC0")),
+            "2026-09-15 21:36"
         );
     }
 
