@@ -86,6 +86,20 @@ impl Token {
         matches!(self.shape, Shape::Word | Shape::Term) && !self.is_free()
     }
 
+    /// A word a rule has taken part of, with free chars still before the
+    /// taking: the `OVA` of `OVA1` once the `1` is read. A free run keeps
+    /// those chars and ends with the word.
+    pub(crate) fn is_partly_taken(&self) -> bool {
+        self.is_free() && !self.covered().is_empty()
+    }
+
+    /// How many bytes stand free before the first hard taking.
+    fn free_head(&self) -> usize {
+        self.covered()
+            .first()
+            .map_or(self.text.len(), |part| part.start)
+    }
+
     /// The parts of the text hard takings cover, merged and in order.
     fn covered(&self) -> Vec<Range<usize>> {
         let mut parts: Vec<Range<usize>> = self
@@ -225,8 +239,26 @@ impl Tape {
         (0..from).rev().find(|&index| want(&self.tokens[index]))
     }
 
+    /// Where a run of free tokens from `begin` ends: at a taken token, at
+    /// a bracket when `stop_at_brackets`, just after a partly taken token,
+    /// or at the end of the tape.
+    pub(crate) fn run_end(&self, begin: usize, stop_at_brackets: bool) -> usize {
+        (begin..self.tokens.len())
+            .find_map(|index| {
+                let token = &self.tokens[index];
+                if token.is_taken() || (stop_at_brackets && token.is_bracket()) {
+                    Some(index)
+                } else if token.is_partly_taken() {
+                    Some(index + 1)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(self.tokens.len())
+    }
+
     /// Each run of free tokens carrying the given `enclosed` flag, ending
-    /// at the next bracket, taken token, or the end of the tape.
+    /// where [`Tape::run_end`] says.
     pub(crate) fn free_runs(&self, enclosed: bool) -> impl Iterator<Item = Range<usize>> + '_ {
         let len = self.tokens.len();
         let mut search_from = 0;
@@ -234,9 +266,7 @@ impl Tape {
             let begin = (search_from..len).find(|&index| {
                 self.tokens[index].enclosed == enclosed && self.tokens[index].is_free()
             })?;
-            let end = (begin..len)
-                .find(|&index| self.tokens[index].is_bracket() || self.tokens[index].is_taken())
-                .unwrap_or(len);
+            let end = self.run_end(begin, true);
             search_from = end;
             Some(begin..end)
         })
@@ -276,10 +306,18 @@ impl Tape {
         }
     }
 
+    /// Where a run sits in the caller's input; a partly taken last token
+    /// counts only its free head.
     pub(crate) fn span(&self, run: Range<usize>) -> Span {
+        let last = run.end - 1;
+        let end = if self.tokens[last].is_partly_taken() {
+            self.input_span(last, 0..self.tokens[last].free_head()).end
+        } else {
+            self.tokens[last].span.end
+        };
         Span {
             start: self.tokens[run.start].span.start,
-            end: self.tokens[run.end - 1].span.end,
+            end,
         }
     }
 
@@ -328,6 +366,53 @@ mod tests {
         assert_eq!(word.free_text(), "OVA");
         word.take(RuleName::Terms, ElementKind::AnimeType, 0..3, false);
         assert!(!word.is_free());
+    }
+
+    #[test]
+    fn a_free_run_ends_just_after_a_partly_taken_word() {
+        let mut tape = tape(vec![
+            Token::new(
+                Shape::Word,
+                "Show".to_owned(),
+                Span { start: 0, end: 4 },
+                false,
+                None,
+            ),
+            Token::new(
+                Shape::Delimiter,
+                " ".to_owned(),
+                Span { start: 4, end: 5 },
+                false,
+                None,
+            ),
+            Token::new(
+                Shape::Word,
+                "OVA1".to_owned(),
+                Span { start: 5, end: 9 },
+                false,
+                None,
+            ),
+            Token::new(
+                Shape::Delimiter,
+                " ".to_owned(),
+                Span { start: 9, end: 10 },
+                false,
+                None,
+            ),
+            Token::new(
+                Shape::Word,
+                "Title".to_owned(),
+                Span { start: 10, end: 15 },
+                false,
+                None,
+            ),
+        ]);
+        tape.tokens[2].take(RuleName::Terms, ElementKind::AnimeType, 0..3, true);
+        tape.tokens[2].take(RuleName::Terms, ElementKind::EpisodeNumber, 3..4, false);
+        assert!(tape.tokens[2].is_partly_taken());
+        assert_eq!(tape.free_runs(false).collect::<Vec<_>>(), [0..3, 4..5]);
+        assert_eq!(tape.value(0..3, Delimiters::Folded), "Show OVA");
+        assert_eq!(tape.span(0..3), Span { start: 0, end: 8 });
     }
 
     #[test]

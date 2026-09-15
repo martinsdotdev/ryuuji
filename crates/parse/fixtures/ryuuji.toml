@@ -1066,6 +1066,81 @@ anime_type = "OVA"
 volume_number = "2"
 anime_title = "Show"
 
+[[case]]
+name = "a type glued to its number ends the title after the type"
+input = "[Group] Show OVA1 - Episode Title [720p].mkv"
+
+[case.elements]
+file_extension = "mkv"
+video_resolution = "720p"
+anime_type = "OVA"
+episode_number = "1"
+anime_title = "Show OVA"
+release_group = "Group"
+episode_title = "Episode Title"
+
+[case.by]
+episode_number = "episode_type"
+episode_title = "episode_title"
+
+[[case]]
+name = "a type glued to its number after a dash stays in the title"
+input = "[Group] Show - OVA1 [BD 1080p].mkv"
+
+[case.elements]
+file_extension = "mkv"
+video_resolution = "1080p"
+source = "BD"
+anime_type = "OVA"
+episode_number = "1"
+anime_title = "Show - OVA"
+release_group = "Group"
+
+[[case]]
+name = "a special glued to its number leaves the next word to the episode title"
+input = "Show Special1 Title.mkv"
+
+[case.elements]
+file_extension = "mkv"
+anime_type = "Special"
+episode_number = "1"
+anime_title = "Show Special"
+episode_title = "Title"
+
+[[case]]
+name = "a keyword after a glued type is not a word of the title"
+input = "Show OVA1 END.mkv"
+
+[case.elements]
+file_extension = "mkv"
+release_information = "END"
+anime_type = "OVA"
+episode_number = "1"
+anime_title = "Show OVA"
+
+[[case]]
+name = "a glued type alone after the season is an episode title that is only a type"
+input = "[Group] Show Season 2 OVA1 Title [720p].mkv"
+
+[case.elements]
+file_extension = "mkv"
+video_resolution = "720p"
+anime_season = "2"
+anime_type = "OVA"
+episode_number = "1"
+anime_title = "Show"
+release_group = "Group"
+
+[[case]]
+name = "a glued type in the first bracket is not the release group"
+input = "[OVA1] Show - 03.mkv"
+
+[case.elements]
+file_extension = "mkv"
+anime_type = "OVA"
+episode_number = "1"
+anime_title = "Show - 03"
+
 # Shapes the corpus and Ryuuji read differently, measured 2026-09-13.
 # anitomy itself passes 144 of its 182 cases; Ryuuji passes 156. Each case
 # below pins what Ryuuji reads today and, where the reading is a guess, the
