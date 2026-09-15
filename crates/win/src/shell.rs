@@ -91,9 +91,14 @@ impl Component for Shell {
         // The one place a body is chosen, so a new `Detail` stops the build
         // here until it is given an arm.
         let body = match showing.body {
-            Body::Page(page) => {
-                pages::body(page, &state, dispatch.clone(), &self.dir, detection_down)
-            }
+            Body::Page(page) => pages::body(
+                page,
+                &state,
+                dispatch.clone(),
+                &self.dir,
+                detection_down,
+                core,
+            ),
             // Built here rather than in `pages`: the props carry the core
             // handle, the log buffer and the watcher, all owned by `Shell`.
             Body::Detail(Detail::Diagnostics) => component(
@@ -148,6 +153,8 @@ fn icon_for(page: Page) -> Symbol {
     match page {
         Page::Library => Symbol::Library,
         Page::NowPlaying => Symbol::Play,
+        // The Symbol set has no History glyph; the clock is the nearest.
+        Page::History => Symbol::Clock,
         Page::Settings => Symbol::Setting,
     }
 }
