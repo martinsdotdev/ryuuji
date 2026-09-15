@@ -29,7 +29,7 @@ pub use matching::{Confidence, Link, ProposedMatch, normalize_title, propose, si
 pub use playback::{PlaybackEvent, PlaybackSource, PlaybackStatus};
 // Shells depend on this crate alone, so the parser reaches them through here.
 pub use ryuuji_parse::{Certainty, ElementKind, Options, parse};
-pub use store::{DbError, Opened, Recording, Recovered, SchemaVersion, Store, StoreError};
+pub use store::{Added, DbError, Opened, Recording, Recovered, SchemaVersion, Store, StoreError};
 use tagged::tagged_enum;
 
 tagged_enum! {
@@ -242,7 +242,8 @@ pub enum Command {
     DismissNotice,
     /// A detection strategy or the inject control observed a player.
     Playback(PlaybackEvent),
-    /// Creates a Watching entry from the unmatched last proposal and relinks it.
+    /// Creates a Watching entry from the unmatched last proposal, relinks
+    /// it, and marks the viewing's history row as added.
     AddProposedToLibrary,
     /// Marks a recording undone and puts the entry's progress back to what
     /// it was before the write, while the entry still stands where the

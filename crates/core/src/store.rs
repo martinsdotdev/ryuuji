@@ -159,6 +159,14 @@ pub struct Recording {
     pub watch: Watch,
 }
 
+/// An entry added from a watch and that watch's row carrying the mark, both
+/// as stored after the same transaction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Added {
+    pub entry: LibraryEntry,
+    pub watch: Watch,
+}
+
 /// The on-disk library. Every mutation runs in one transaction and returns
 /// the row as stored.
 pub struct Store {
@@ -216,21 +224,8 @@ impl Store {
     pub fn add(&mut self, entry: NewEntry) -> Result<LibraryEntry, StoreError> {
         let _span = info_span!("store.add", title = %entry.title).entered();
         let tx = self.conn.transaction().map_err(query_failed)?;
-        tx.execute(
-            "INSERT INTO entries (title, status, progress, total, updated_at, rewatching) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                entry.title,
-                entry.status.tag(),
-                entry.progress,
-                entry.total,
-                unix_now(),
-                entry.rewatching
-            ],
-        )
-        .map_err(query_failed)?;
-        let id = EntryId(tx.last_insert_rowid());
-        let stored = fetch(&tx, id)?;
+        let stored = insert_entry(&tx, entry)?;
+        let id = stored.id;
         tx.commit().map_err(query_failed)?;
         info!(id = %id, "entry added");
         Ok(stored)
@@ -327,6 +322,62 @@ impl Store {
         tx.commit().map_err(query_failed)?;
         info!(watch = %id, progress = entry.progress, "progress recorded");
         Ok(Recording { entry, watch })
+    }
+
+    /// Adds the show a proposal names and marks the watch that asked for it,
+    /// in one transaction, so neither exists without the other. The watch's
+    /// own row takes the mark while it has not recorded and drops its
+    /// reason, which was about a match that now exists; a watch with no row
+    /// yet gets one.
+    pub fn add_to_library(
+        &mut self,
+        entry: NewEntry,
+        watch: Option<HistoryId>,
+        proposal: &ProposedMatch,
+    ) -> Result<Added, StoreError> {
+        let _span =
+            info_span!("store.add_to_library", title = %entry.title, watch = ?watch).entered();
+        let tx = self.conn.transaction().map_err(query_failed)?;
+        let entry = insert_entry(&tx, entry)?;
+        let now = unix_now();
+        let id = match watch {
+            None => {
+                tx.execute(
+                    "INSERT INTO history (entry_id, episode, episode_end, raw_title, player, at, \
+                     parsed_title, confidence, added_at) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?6)",
+                    params![
+                        entry.id.0,
+                        proposal.episode.as_ref().map(|r| i64::from(*r.start())),
+                        proposal.episode.as_ref().map(|r| i64::from(*r.end())),
+                        proposal.raw_title,
+                        proposal.player,
+                        now,
+                        proposal.parsed_title,
+                        Confidence::Exact.tag(),
+                    ],
+                )
+                .map_err(query_failed)?;
+                HistoryId(tx.last_insert_rowid())
+            }
+            Some(id) => {
+                let changed = tx
+                    .execute(
+                        "UPDATE history SET entry_id = ?1, confidence = ?2, reason = NULL, \
+                         added_at = ?3 WHERE id = ?4 AND progress IS NULL",
+                        params![entry.id.0, Confidence::Exact.tag(), now, id.0],
+                    )
+                    .map_err(query_failed)?;
+                if changed == 0 {
+                    return Err(StoreError::WatchClosed { id });
+                }
+                id
+            }
+        };
+        let watch = fetch_watch(&tx, id)?;
+        tx.commit().map_err(query_failed)?;
+        info!(entry = %entry.id, watch = %id, "entry added from a watch");
+        Ok(Added { entry, watch })
     }
 
     /// Writes why a watch past its threshold recorded nothing: a new row, or
@@ -548,6 +599,25 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
     name.push(suffix);
     PathBuf::from(name)
+}
+
+/// Inserts one entry on the caller's connection, so a transaction can pair
+/// it with another write, and reads it back as stored.
+fn insert_entry(conn: &Connection, entry: NewEntry) -> Result<LibraryEntry, StoreError> {
+    conn.execute(
+        "INSERT INTO entries (title, status, progress, total, updated_at, rewatching) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            entry.title,
+            entry.status.tag(),
+            entry.progress,
+            entry.total,
+            unix_now(),
+            entry.rewatching
+        ],
+    )
+    .map_err(query_failed)?;
+    fetch(conn, EntryId(conn.last_insert_rowid()))
 }
 
 fn fetch(conn: &Connection, id: EntryId) -> Result<LibraryEntry, StoreError> {
@@ -1330,6 +1400,72 @@ mod tests {
             Err(StoreError::NothingToUndo { id }) if id == declined.id
         ));
         assert_eq!(watches(&store), vec![declined]);
+    }
+
+    #[test]
+    fn add_to_library_marks_the_watch_or_opens_a_row_for_it() {
+        let (_tmp, dir) = open_tmp();
+        let mut store = open(&dir);
+        let declined = store
+            .decline(None, &proposed("Show - 03.mkv"), Decline::NotExact)
+            .unwrap();
+
+        let Added { entry: show, watch } = store
+            .add_to_library(entry("Show"), Some(declined.id), &proposed("Show - 03.mkv"))
+            .unwrap();
+        assert_eq!(store.entries().unwrap(), vec![show.clone()]);
+        let added_at = watch.added_at.expect("the watch is marked");
+        assert_eq!(
+            watch,
+            Watch {
+                link: Link::Exact(show.id),
+                outcome: WatchOutcome::Added,
+                added_at: Some(added_at),
+                ..declined
+            }
+        );
+
+        let linked = ProposedMatch {
+            link: Link::Exact(show.id),
+            ..proposed("Show - 03.mkv")
+        };
+        let refused = store
+            .decline(Some(watch.id), &linked, Decline::NotNext)
+            .unwrap();
+        assert_eq!(refused.outcome, WatchOutcome::Declined(Decline::NotNext));
+        assert_eq!(refused.added_at, Some(added_at));
+
+        let no_episode = ProposedMatch {
+            episode: None,
+            ..proposed("Other.mkv")
+        };
+        let fresh = store
+            .add_to_library(entry("Other"), None, &no_episode)
+            .unwrap();
+        assert_eq!(fresh.watch.outcome, WatchOutcome::Added);
+        assert_eq!(fresh.watch.episode, None);
+        assert_eq!(fresh.watch.link, Link::Exact(fresh.entry.id));
+        assert_eq!(fresh.watch.added_at, Some(fresh.watch.at));
+        assert_eq!(watches(&store), vec![fresh.watch, refused]);
+    }
+
+    #[test]
+    fn add_to_library_refuses_a_recorded_watch_and_adds_nothing() {
+        let (_tmp, dir) = open_tmp();
+        let mut store = open(&dir);
+        let id = store.add(entry("Show")).unwrap().id;
+        let written = store.record(watching(id, 1..=1)).unwrap();
+
+        assert!(matches!(
+            store.add_to_library(
+                entry("Again"),
+                Some(written.watch.id),
+                &proposed("Show - 03.mkv")
+            ),
+            Err(StoreError::WatchClosed { id: got }) if got == written.watch.id
+        ));
+        assert_eq!(store.entries().unwrap(), vec![written.entry]);
+        assert_eq!(watches(&store), vec![written.watch]);
     }
 
     #[test]

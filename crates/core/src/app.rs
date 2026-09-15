@@ -1,10 +1,10 @@
 use crate::settings::{self, SettingsError};
 use crate::watch::{Accrual, Logged, WatchSession};
 use crate::{
-    AppState, Command, DataDir, Decline, Diagnostics, HistoryId, LibraryEntry, Link, NewEntry,
-    NewRecording, Notice, NowPlaying, Opened, PlaybackEvent, ProposedMatch, RecordOutcome,
-    Recording, Settings, Store, StoreError, ThemePreference, WatchProgress, WatchStatus,
-    error_chain, matching,
+    Added, AppState, Command, DataDir, Decline, Diagnostics, HistoryId, LibraryEntry, Link,
+    NewEntry, NewRecording, Notice, NowPlaying, Opened, PlaybackEvent, ProposedMatch,
+    RecordOutcome, Recording, Settings, Store, StoreError, ThemePreference, WatchProgress,
+    WatchStatus, error_chain, matching,
 };
 
 /// The running application: the store plus the state derived from it.
@@ -331,27 +331,34 @@ impl Ryuuji {
         else {
             return;
         };
-        let title = last.shown_title().to_owned();
-        let outcome = self.store.add(NewEntry {
-            title,
+        let entry = NewEntry {
+            title: last.shown_title().to_owned(),
             status: WatchStatus::Watching,
             progress: 0,
             total: None,
             rewatching: false,
-        });
+        };
+        let outcome = self
+            .store
+            .add_to_library(entry, self.session.open_row(), &last);
         // Not `absorb`: the link is known here, so re-resolving first would
         // save a proposal that the relink below immediately replaces, and a
         // single click would notice a failed last-match write twice.
-        let Some(entry) = commit(&mut self.state.notices, "entry", outcome) else {
+        let Some(Added { entry, watch }) = commit(&mut self.state.notices, "entry", outcome) else {
             return;
         };
         let id = entry.id;
         upsert(&mut self.state.library, entry);
+        self.session.wrote(watch.id, Logged::Added);
         self.record_match(ProposedMatch {
             link: Link::Exact(id),
             ..last
         });
-        tracing::info!(entry = id.as_i64(), "proposal added to library");
+        tracing::info!(
+            entry = id.as_i64(),
+            watch = watch.id.as_i64(),
+            "proposal added to library"
+        );
     }
 
     #[cfg(test)]
@@ -1541,5 +1548,89 @@ mod tests {
         let watches = stored_watches(&dir);
         assert_eq!(watches.len(), 1);
         assert_eq!(outcome(&app), RecordOutcome::Recorded(declined[0].id));
+    }
+
+    #[test]
+    fn add_to_library_after_a_decline_marks_that_row_and_the_recording_fills_it() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        watch_past_threshold(&mut app, "Show - 01.mkv");
+        let declined = stored_watches(&dir);
+        assert_eq!(stored_declines(&dir), vec![Decline::NotExact]);
+
+        app.dispatch(Command::AddProposedToLibrary);
+        let id = app.state().library[0].id;
+        let added = stored_watches(&dir);
+        assert_eq!(added.len(), 1);
+        assert_eq!(added[0].id, declined[0].id);
+        assert_eq!(added[0].outcome, WatchOutcome::Added);
+        assert_eq!(added[0].link, Link::Exact(id));
+        assert!(added[0].added_at.is_some());
+
+        app.dispatch(Command::Playback(later("Show - 01.mkv", 730)));
+        assert_eq!(app.state().library[0].progress, 1);
+        let watches = stored_watches(&dir);
+        assert_eq!(watches.len(), 1);
+        assert_eq!(watches[0].id, declined[0].id);
+        assert_eq!(watches[0].added_at, added[0].added_at);
+        assert_eq!(outcome(&app), RecordOutcome::Recorded(watches[0].id));
+        assert_eq!(stored_writes(&dir), vec![(1..=1, 0, 1)]);
+        assert!(app.state().notices.is_empty());
+    }
+
+    #[test]
+    fn add_to_library_before_the_threshold_opens_a_row_that_later_records() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::Playback(playing("Show - 01.mkv")));
+        assert_eq!(stored_watches(&dir), vec![]);
+
+        app.dispatch(Command::AddProposedToLibrary);
+        let added = stored_watches(&dir);
+        assert_eq!(added.len(), 1);
+        assert_eq!(added[0].outcome, WatchOutcome::Added);
+        assert_eq!(added[0].episode, Some(1..=1));
+
+        app.dispatch(Command::Playback(later("Show - 01.mkv", 720)));
+        let watches = stored_watches(&dir);
+        assert_eq!(watches.len(), 1);
+        assert_eq!(watches[0].id, added[0].id);
+        assert!(watches[0].added_at.is_some());
+        assert_eq!(stored_writes(&dir), vec![(1..=1, 0, 1)]);
+    }
+
+    #[test]
+    fn a_decline_after_adding_keeps_the_added_mark() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        watch_past_threshold(&mut app, "Show - 03.mkv");
+        app.dispatch(Command::AddProposedToLibrary);
+
+        app.dispatch(Command::Playback(later("Show - 03.mkv", 730)));
+        assert_eq!(outcome(&app), RecordOutcome::Declined(Decline::NotNext));
+        let watches = stored_watches(&dir);
+        assert_eq!(watches.len(), 1);
+        assert_eq!(watches[0].outcome, WatchOutcome::Declined(Decline::NotNext));
+        assert!(watches[0].added_at.is_some());
+    }
+
+    #[test]
+    fn a_failed_add_to_library_adds_no_entry() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::Playback(playing("Show - 01.mkv")));
+        app.store_mut().execute_raw("DROP TABLE history");
+
+        app.dispatch(Command::AddProposedToLibrary);
+        assert!(matches!(
+            app.state().notices.as_slice(),
+            [Notice::SaveFailed { .. }]
+        ));
+        assert!(app.state().library.is_empty());
+        assert_eq!(Store::open(&dir).unwrap().store.entries().unwrap(), vec![]);
+        assert_eq!(
+            app.state().last_match.as_ref().unwrap().link,
+            Link::Unmatched
+        );
     }
 }
