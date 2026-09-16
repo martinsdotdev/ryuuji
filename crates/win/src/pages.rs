@@ -121,6 +121,7 @@ pub fn body(
                     .map(|m| m.title_in(&state.library).to_owned()),
                 undo_applies: undo_applies(state),
                 ignored: state.ignored,
+                rewatching: rewatch_under_way(state),
                 shows: choices(&state.library),
                 detection_down,
             },
@@ -300,6 +301,9 @@ struct NowPlayingProps {
     /// file reads as unmatched, so without this the card would offer to add
     /// the very show it was told to leave alone.
     ignored: bool,
+    /// Whether the show the proposal names is being watched again, resolved
+    /// by the caller for the same reason as `title`.
+    rewatching: bool,
     /// The shows the picker can offer, resolved by the caller for the same
     /// reason as `title`.
     shows: Vec<ShowChoice>,
@@ -380,6 +384,7 @@ fn now_playing(props: &NowPlayingProps, cx: &mut RenderCx) -> Element {
                         .unwrap_or_else(|| m.shown_title().to_owned()),
                     idle,
                     ignored: props.ignored,
+                    rewatching: props.rewatching,
                     shows: props.shows.clone(),
                     now,
                 },
@@ -431,6 +436,18 @@ fn undo_applies(state: &AppState) -> bool {
         .any(|shown| shown.id == entry && shown.progress == *episode.end())
 }
 
+/// Whether the show the standing proposal names is being watched again,
+/// decided by the caller so the page never carries the library.
+fn rewatch_under_way(state: &AppState) -> bool {
+    let Some(entry) = state.last_match.as_ref().and_then(|m| m.link.entry()) else {
+        return false;
+    };
+    state
+        .library
+        .iter()
+        .any(|shown| shown.id == entry && shown.rewatching)
+}
+
 /// What the card says in place of the match facts once a file is ignored.
 /// The confidence label would read "No library entry", which is true and
 /// beside the point: nothing is being matched because nothing is meant to.
@@ -448,6 +465,9 @@ struct ProposalProps {
     title: String,
     idle: bool,
     ignored: bool,
+    /// Whether the show this names is being watched again, resolved by the
+    /// caller for the same reason as `title`.
+    rewatching: bool,
     shows: Vec<ShowChoice>,
     now: SystemTime,
 }
@@ -465,7 +485,7 @@ fn proposal_card(props: &ProposalProps, cx: &mut RenderCx) -> Element {
     let body = if props.ignored {
         IGNORED_BODY.to_owned()
     } else {
-        match_caption(m, props.idle, props.now)
+        match_caption(m, props.idle, props.now, props.rewatching)
     };
     let mut children: Vec<Element> = vec![title.into(), caption(body).into()];
     let rows = fact_rows(m);
@@ -660,13 +680,18 @@ fn offers(m: &ProposedMatch, ignored: bool) -> Vec<Offer> {
     }
 }
 
-fn match_caption(m: &ProposedMatch, idle: bool, now: SystemTime) -> String {
+fn match_caption(m: &ProposedMatch, idle: bool, now: SystemTime, rewatching: bool) -> String {
     let mut parts = Vec::new();
     if let Some(episode) = &m.episode {
         parts.push(episode_text(episode));
         parts.extend(episode_doubt(m));
     }
     parts.push(m.link.confidence().label().to_owned());
+    // After the confidence, which says which show this is, and before the
+    // idle tail, which is about the observation rather than the show.
+    if rewatching {
+        parts.push("Rewatching".to_owned());
+    }
     if idle {
         parts.push(format!("Last seen in {}", m.player));
         parts.push(age_of(m.at, now));
@@ -871,7 +896,7 @@ mod tests {
             ..proposal()
         };
         assert_eq!(
-            match_caption(&m, true, SystemTime::UNIX_EPOCH),
+            match_caption(&m, true, SystemTime::UNIX_EPOCH, false),
             "Episode 1 \u{b7} No library entry \u{b7} Last seen in mpv \u{b7} 0 s ago"
         );
         let batch = ProposedMatch {
@@ -879,11 +904,11 @@ mod tests {
             ..proposal()
         };
         assert_eq!(
-            match_caption(&batch, false, SystemTime::UNIX_EPOCH),
+            match_caption(&batch, false, SystemTime::UNIX_EPOCH, false),
             "Episodes 1\u{2013}12 \u{b7} No library entry"
         );
         assert_eq!(
-            match_caption(&proposal(), false, SystemTime::UNIX_EPOCH),
+            match_caption(&proposal(), false, SystemTime::UNIX_EPOCH, false),
             "No library entry"
         );
     }
@@ -896,7 +921,7 @@ mod tests {
             ..proposal()
         };
         assert_eq!(
-            match_caption(&m, false, SystemTime::UNIX_EPOCH),
+            match_caption(&m, false, SystemTime::UNIX_EPOCH, false),
             "Episode 5 \u{b7} A guess: 5 may be a word of the title \u{b7} No library entry"
         );
         let padded = ProposedMatch {
@@ -905,7 +930,7 @@ mod tests {
             ..proposal()
         };
         assert_eq!(
-            match_caption(&padded, false, SystemTime::UNIX_EPOCH),
+            match_caption(&padded, false, SystemTime::UNIX_EPOCH, false),
             "Episode 7 \u{b7} A guess: 07 may be a word of the title \u{b7} No library entry"
         );
         let sure = ProposedMatch {
@@ -914,7 +939,7 @@ mod tests {
             ..proposal()
         };
         assert_eq!(
-            match_caption(&sure, false, SystemTime::UNIX_EPOCH),
+            match_caption(&sure, false, SystemTime::UNIX_EPOCH, false),
             "Episode 5 \u{b7} No library entry"
         );
     }
@@ -923,10 +948,51 @@ mod tests {
     fn match_caption_appends_last_seen_and_age_when_idle() {
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(2 * 3600);
         assert_eq!(
-            match_caption(&proposal(), true, now),
+            match_caption(&proposal(), true, now, false),
             "No library entry \u{b7} Last seen in mpv \u{b7} 2 h ago"
         );
-        assert_eq!(match_caption(&proposal(), false, now), "No library entry");
+        assert_eq!(
+            match_caption(&proposal(), false, now, false),
+            "No library entry"
+        );
+    }
+
+    #[test]
+    fn match_caption_says_when_the_show_is_being_watched_again() {
+        let m = ProposedMatch {
+            episode: Some(1..=1),
+            ..proposal()
+        };
+        assert_eq!(
+            match_caption(&m, false, SystemTime::UNIX_EPOCH, true),
+            "Episode 1 \u{b7} No library entry \u{b7} Rewatching"
+        );
+        // After the confidence and before the idle tail, which is about the
+        // observation rather than the show.
+        assert_eq!(
+            match_caption(&m, true, SystemTime::UNIX_EPOCH, true),
+            "Episode 1 \u{b7} No library entry \u{b7} Rewatching \u{b7} Last seen in mpv \u{b7} 0 s ago"
+        );
+    }
+
+    #[test]
+    fn a_rewatch_is_read_off_the_show_the_proposal_names() {
+        let (entry, _) = recorded_show();
+        let state = |link, rewatching| AppState {
+            library: vec![LibraryEntry {
+                rewatching,
+                ..entry.clone()
+            }],
+            last_match: Some(ProposedMatch { link, ..proposal() }),
+            ..AppState::default()
+        };
+        assert!(rewatch_under_way(&state(Link::Exact(entry.id), true)));
+        assert!(!rewatch_under_way(&state(Link::Exact(entry.id), false)));
+        // A guess names a show as well, and the card says the same of it.
+        assert!(rewatch_under_way(&state(Link::Likely(entry.id), true)));
+        // No show is named, so there is nothing to be watching again.
+        assert!(!rewatch_under_way(&state(Link::Unmatched, true)));
+        assert!(!rewatch_under_way(&AppState::default()));
     }
 
     /// Only the store mints ids, so the Recorded arm needs a show and a
