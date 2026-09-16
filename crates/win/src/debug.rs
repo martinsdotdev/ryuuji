@@ -293,6 +293,12 @@ fn outcome_text(watch: &Watch) -> String {
     {
         text.push_str(", undone");
     }
+    if let Some(entry) = watch.moved_to {
+        let _ = write!(text, ", moved to {entry}");
+    }
+    if let Some(entry) = watch.moved_from {
+        let _ = write!(text, ", moved from {entry}");
+    }
     text
 }
 
@@ -768,6 +774,30 @@ mod tests {
             parsed_title: "Show".to_owned(),
             player: "mpv".to_owned(),
         }
+    }
+
+    #[test]
+    fn a_moved_pair_says_where_the_episode_went_and_came_from() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = DataDir::at(tmp.path()).unwrap();
+        let Opened { mut store, .. } = Store::open(&dir).unwrap();
+        let from = store.add(show("From")).unwrap().id;
+        let to = store.add(show("To")).unwrap().id;
+        let strayed = store
+            .record(recording(from, "From - 01.mkv"))
+            .unwrap()
+            .watch
+            .id;
+        let moved = store.move_recording(strayed, to).unwrap();
+
+        assert_eq!(
+            outcome_text(&moved.undone),
+            format!("recorded 0\u{2192}1, undone, moved to {to}")
+        );
+        assert_eq!(
+            outcome_text(&moved.watch),
+            format!("recorded 0\u{2192}1, moved from {from}")
+        );
     }
 
     #[test]
