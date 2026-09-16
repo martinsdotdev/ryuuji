@@ -34,7 +34,9 @@ pub use matching::{Confidence, Link, ProposedMatch, normalize_title, similarity}
 pub use playback::{PlaybackEvent, PlaybackSource, PlaybackStatus};
 // Shells depend on this crate alone, so the parser reaches them through here.
 pub use ryuuji_parse::{Certainty, ElementKind, Options, parse};
-pub use store::{Added, DbError, Opened, Recording, Recovered, SchemaVersion, Store, StoreError};
+pub use store::{
+    Added, DbError, Moved, Opened, Recording, Recovered, SchemaVersion, Store, StoreError,
+};
 use tagged::tagged_enum;
 
 tagged_enum! {

@@ -514,6 +514,8 @@ mod tests {
             link: Link::Unmatched,
             outcome,
             added_at: None,
+            moved_to: None,
+            moved_from: None,
         }
     }
 

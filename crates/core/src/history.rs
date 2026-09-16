@@ -61,6 +61,12 @@ pub struct Watch {
     pub outcome: WatchOutcome,
     /// When Add to library created the entry this watch links to.
     pub added_at: Option<SystemTime>,
+    /// The show a correction moved this recording's episode onto. Set only
+    /// on a row undone to make room for that correction, so the history can
+    /// say where the episode went rather than only that it was taken back.
+    pub moved_to: Option<EntryId>,
+    /// The show whose recording this row corrects.
+    pub moved_from: Option<EntryId>,
 }
 
 /// What a watch came to. A recording is final; a decline is rewritten while
@@ -349,6 +355,8 @@ mod tests {
                 undone_at,
             }),
             added_at: None,
+            moved_to: None,
+            moved_from: None,
         }
     }
 
