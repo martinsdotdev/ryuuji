@@ -6,7 +6,7 @@
 //! A title the person has confirmed once is remembered in [`Aliases`] and
 //! settles the decision outright, ahead of every other gate.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::RangeInclusive;
 use std::time::SystemTime;
 
@@ -279,6 +279,23 @@ impl Aliases {
     }
 }
 
+/// The files a person has said not to track, by the raw title the player
+/// reports. Ignoring is per file, not per show: the title is what was
+/// pointed at, and none of it is parsed or folded, so a clip the parser
+/// cannot read a show out of is still something you can silence.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Ignored(HashSet<String>);
+
+impl Ignored {
+    pub(crate) fn of(rows: impl IntoIterator<Item = String>) -> Ignored {
+        Ignored(rows.into_iter().collect())
+    }
+
+    pub(crate) fn contains(&self, raw_title: &str) -> bool {
+        self.0.contains(raw_title)
+    }
+}
+
 /// The matching decision for an already-parsed title: a remembered title
 /// first, then an entry whose title folds to the same thing, then the
 /// closest entry above the threshold.
@@ -326,13 +343,20 @@ pub(crate) fn propose(
     event: &PlaybackEvent,
     library: &[LibraryEntry],
     aliases: &Aliases,
+    ignored: &Ignored,
 ) -> ProposedMatch {
     let reading = parse(&event.title, &Options::default());
     let parsed_title = reading
         .title()
         .map(|title| title.value.to_owned())
         .unwrap_or_default();
-    let resolution = resolve(&parsed_title, library, aliases);
+    // An ignored file is not matched against the library at all, so the card
+    // names the file and offers the way back instead of naming a show.
+    let resolution = if ignored.contains(&event.title) {
+        Resolution::Unmatched
+    } else {
+        resolve(&parsed_title, library, aliases)
+    };
     let score = match resolution {
         Resolution::Likely { score, .. } => Some(score),
         Resolution::Exact(_) | Resolution::Unmatched => None,
@@ -549,7 +573,7 @@ mod tests {
     #[test]
     fn propose_carries_player_and_at() {
         let event = event("[Subs] Show - 03 (1080p).mkv");
-        let proposal = propose(&event, &[], &Aliases::default());
+        let proposal = propose(&event, &[], &Aliases::default(), &Ignored::default());
         assert_eq!(proposal.raw_title, event.title);
         assert_eq!(proposal.player, "mpv");
         assert_eq!(proposal.at, event.observed_at);
@@ -562,6 +586,7 @@ mod tests {
             &event("[Subs] Show - 03.mkv"),
             &library,
             &Aliases::default(),
+            &Ignored::default(),
         );
         assert_eq!(proposal.shown_title(), "Show");
         assert_eq!(proposal.title_in(&library), "Show");
@@ -580,9 +605,57 @@ mod tests {
 
     #[test]
     fn propose_without_a_title_is_unmatched() {
-        let proposal = propose(&event(""), &library(&["Show"]), &Aliases::default());
+        let proposal = propose(
+            &event(""),
+            &library(&["Show"]),
+            &Aliases::default(),
+            &Ignored::default(),
+        );
         assert_eq!(proposal.parsed_title, "");
         assert_eq!(proposal.link, Link::Unmatched);
+    }
+
+    #[test]
+    fn an_ignored_file_is_unmatched_however_well_its_title_reads() {
+        let library = library(&["Show"]);
+        let event = event("Show - 03.mkv");
+        assert_eq!(
+            propose(&event, &library, &Aliases::default(), &Ignored::default()).link,
+            Link::Exact(library[0].id)
+        );
+        let ignored = Ignored::of([event.title.clone()]);
+        assert_eq!(
+            propose(&event, &library, &Aliases::default(), &ignored).link,
+            Link::Unmatched
+        );
+    }
+
+    #[test]
+    fn ignoring_one_file_leaves_the_rest_of_the_show_alone() {
+        let library = library(&["Show"]);
+        let ignored = Ignored::of(["Show - 03.mkv".to_owned()]);
+        assert_eq!(
+            propose(
+                &event("Show - 04.mkv"),
+                &library,
+                &Aliases::default(),
+                &ignored
+            )
+            .link,
+            Link::Exact(library[0].id)
+        );
+    }
+
+    #[test]
+    fn ignoring_a_file_outranks_a_remembered_title() {
+        let library = library(&["Frieren: Beyond Journey's End"]);
+        let aliases = Aliases::of([("Show".to_owned(), library[0].id)]);
+        let event = event("Show - 03.mkv");
+        let ignored = Ignored::of([event.title.clone()]);
+        assert_eq!(
+            propose(&event, &library, &aliases, &ignored).link,
+            Link::Unmatched
+        );
     }
 
     #[test]

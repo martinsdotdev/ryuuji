@@ -22,7 +22,12 @@ const SELECT_ENTRY: &str = "SELECT id, title, status, progress, total, rewatchin
 
 const SELECT_WATCH: &str = "SELECT id, entry_id, episode, episode_end, progress_before, progress, \
                             raw_title, player, at, undone_at, parsed_title, confidence, reason, \
-                            recorded_at, added_at FROM history";
+                            recorded_at, added_at, kind FROM history";
+
+/// The `kind` of a row the set columns cannot tell apart. Every other row
+/// leaves it null and is read from its columns, as rows written before the
+/// column existed are.
+const IGNORED_KIND: &str = "ignored";
 
 /// Files SQLite may keep beside the database; they move with it.
 const SIDECAR_SUFFIXES: [&str; 3] = ["-journal", "-wal", "-shm"];
@@ -601,6 +606,99 @@ impl Store {
         Ok(aliases)
     }
 
+    /// Remembers not to track a file, and marks the watch that asked for it,
+    /// in one transaction so neither exists without the other. The watch's
+    /// own row takes the mark while it has not recorded and drops its
+    /// reason, which was about a match no longer being looked for; a watch
+    /// with no row yet gets one.
+    pub fn ignore_file(
+        &mut self,
+        watch: Option<HistoryId>,
+        proposal: &ProposedMatch,
+    ) -> Result<Watch, StoreError> {
+        let _span = info_span!("store.ignore_file", watch = ?watch).entered();
+        let tx = self.conn.transaction().map_err(query_failed)?;
+        let now = unix_now();
+        // Ignoring the same title again renews it, which is what saying so
+        // after a stop means.
+        tx.execute(
+            "INSERT OR REPLACE INTO ignored (raw_title, at, stopped_at) VALUES (?1, ?2, NULL)",
+            params![proposal.raw_title, now],
+        )
+        .map_err(query_failed)?;
+        let entry = proposal.link.entry().map(EntryId::as_i64);
+        let confidence = proposal.link.confidence().tag();
+        let id = match watch {
+            None => {
+                tx.execute(
+                    "INSERT INTO history (entry_id, episode, episode_end, raw_title, player, at, \
+                     parsed_title, confidence, kind) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    params![
+                        entry,
+                        proposal.episode.as_ref().map(|r| i64::from(*r.start())),
+                        proposal.episode.as_ref().map(|r| i64::from(*r.end())),
+                        proposal.raw_title,
+                        proposal.player,
+                        now,
+                        proposal.parsed_title,
+                        confidence,
+                        IGNORED_KIND,
+                    ],
+                )
+                .map_err(query_failed)?;
+                HistoryId(tx.last_insert_rowid())
+            }
+            Some(id) => {
+                let changed = tx
+                    .execute(
+                        "UPDATE history SET entry_id = ?1, confidence = ?2, reason = NULL, \
+                         kind = ?3 WHERE id = ?4 AND progress IS NULL",
+                        params![entry, confidence, IGNORED_KIND, id.0],
+                    )
+                    .map_err(query_failed)?;
+                if changed == 0 {
+                    return Err(StoreError::WatchClosed { id });
+                }
+                id
+            }
+        };
+        let watch = fetch_watch(&tx, id)?;
+        tx.commit().map_err(query_failed)?;
+        info!(watch = %id, "file ignored");
+        Ok(watch)
+    }
+
+    /// Stops ignoring a file. The row is marked rather than removed, so the
+    /// history rows that say the file was ignored still have what they
+    /// refer to, and ignoring it again is a fresh row.
+    pub fn stop_ignoring(&mut self, raw_title: &str) -> Result<(), StoreError> {
+        let _span = info_span!("store.stop_ignoring").entered();
+        self.conn
+            .execute(
+                "UPDATE ignored SET stopped_at = ?1 WHERE raw_title = ?2 AND stopped_at IS NULL",
+                params![unix_now(), raw_title],
+            )
+            .map_err(query_failed)?;
+        info!("no longer ignored");
+        Ok(())
+    }
+
+    /// Every file still being ignored, by the raw title a player reports.
+    pub fn ignored(&self) -> Result<Vec<String>, StoreError> {
+        let _span = info_span!("store.ignored").entered();
+        let mut stmt = self
+            .conn
+            .prepare("SELECT raw_title FROM ignored WHERE stopped_at IS NULL ORDER BY raw_title")
+            .map_err(query_failed)?;
+        let rows = stmt.query_map([], |row| row.get(0)).map_err(query_failed)?;
+        let ignored = rows
+            .map(|row| row.map_err(query_failed))
+            .collect::<Result<Vec<String>, _>>()?;
+        debug!(count = ignored.len(), "ignored files loaded");
+        Ok(ignored)
+    }
+
     #[cfg(test)]
     pub(crate) fn execute_raw(&self, sql: &str) {
         self.conn.execute(sql, []).unwrap();
@@ -842,6 +940,7 @@ struct RawWatch {
     reason: Option<String>,
     recorded_at: Option<i64>,
     added_at: Option<i64>,
+    kind: Option<String>,
 }
 
 impl RawWatch {
@@ -863,12 +962,13 @@ impl RawWatch {
             reason: row.get(12)?,
             recorded_at: row.get(13)?,
             added_at: row.get(14)?,
+            kind: row.get(15)?,
         })
     }
 
-    /// The outcome is read from which columns are set: the progress pair
-    /// means a recording, else a reason means a decline, else the added
-    /// mark alone.
+    /// The outcome is `kind` when it names one, else it is read from which
+    /// columns are set: the progress pair means a recording, else a reason
+    /// means a decline, else the added mark alone.
     fn parse(self) -> Result<Watch, StoreError> {
         let id = HistoryId(self.id);
         let invalid = |field| StoreError::InvalidHistoryRow { id, field };
@@ -880,30 +980,41 @@ impl RawWatch {
             .ok_or_else(|| invalid("link"))?;
         let episode =
             episode_range(self.episode, self.episode_end).map_err(|()| invalid("episode"))?;
-        let outcome = match (self.progress_before, self.progress, self.recorded_at) {
-            (Some(before), Some(progress), Some(recorded_at)) => {
-                if !matches!(link, Link::Exact(_)) {
-                    return Err(invalid("link"));
+        let outcome = match self.kind.as_deref() {
+            // An ignore is nothing being done, so a row claiming one
+            // alongside a write or a refusal is contradictory.
+            Some(IGNORED_KIND) => {
+                if self.progress.is_some() || self.reason.is_some() {
+                    return Err(invalid("kind"));
                 }
-                if episode.is_none() {
-                    return Err(invalid("episode"));
-                }
-                WatchOutcome::Recorded(Recorded {
-                    progress_before: count(before, "progress_before")?,
-                    progress: count(progress, "progress")?,
-                    at: time(recorded_at, "recorded_at")?,
-                    undone_at: self.undone_at.map(|at| time(at, "undone_at")).transpose()?,
-                })
+                WatchOutcome::Ignored
             }
-            (None, None, None) if self.undone_at.is_some() => return Err(invalid("undone_at")),
-            (None, None, None) => match (&self.reason, self.added_at) {
-                (Some(reason), _) => WatchOutcome::Declined(
-                    Decline::from_tag(reason).ok_or_else(|| invalid("reason"))?,
-                ),
-                (None, Some(_)) => WatchOutcome::Added,
-                (None, None) => return Err(invalid("outcome")),
+            Some(_) => return Err(invalid("kind")),
+            None => match (self.progress_before, self.progress, self.recorded_at) {
+                (Some(before), Some(progress), Some(recorded_at)) => {
+                    if !matches!(link, Link::Exact(_)) {
+                        return Err(invalid("link"));
+                    }
+                    if episode.is_none() {
+                        return Err(invalid("episode"));
+                    }
+                    WatchOutcome::Recorded(Recorded {
+                        progress_before: count(before, "progress_before")?,
+                        progress: count(progress, "progress")?,
+                        at: time(recorded_at, "recorded_at")?,
+                        undone_at: self.undone_at.map(|at| time(at, "undone_at")).transpose()?,
+                    })
+                }
+                (None, None, None) if self.undone_at.is_some() => return Err(invalid("undone_at")),
+                (None, None, None) => match (&self.reason, self.added_at) {
+                    (Some(reason), _) => WatchOutcome::Declined(
+                        Decline::from_tag(reason).ok_or_else(|| invalid("reason"))?,
+                    ),
+                    (None, Some(_)) => WatchOutcome::Added,
+                    (None, None) => return Err(invalid("outcome")),
+                },
+                _ => return Err(invalid("progress")),
             },
-            _ => return Err(invalid("progress")),
         };
         Ok(Watch {
             id,
@@ -1005,13 +1116,13 @@ mod tests {
     }
 
     #[test]
-    fn open_creates_the_database_at_schema_v7_without_recovery() {
+    fn open_creates_the_database_at_schema_v8_without_recovery() {
         let (_tmp, dir) = open_tmp();
         let store = open(&dir);
         assert!(dir.root().join("library.sqlite").is_file());
-        assert_eq!(schema_version(&store), SchemaVersion(7));
+        assert_eq!(schema_version(&store), SchemaVersion(8));
         drop(store);
-        assert_eq!(schema_version(&open(&dir)), SchemaVersion(7));
+        assert_eq!(schema_version(&open(&dir)), SchemaVersion(8));
     }
 
     #[test]
@@ -1038,7 +1149,7 @@ mod tests {
         let recovered = recovered.expect("recovery reported");
         assert_backup_name(&backup_name(&recovered));
         assert_eq!(fs::read(&recovered.backup).unwrap(), garbage);
-        assert_eq!(schema_version(&store), SchemaVersion(7));
+        assert_eq!(schema_version(&store), SchemaVersion(8));
         assert_eq!(store.entries().unwrap(), vec![]);
         drop(store);
 
@@ -1155,7 +1266,7 @@ mod tests {
         drop(conn);
 
         let store = open(&dir);
-        assert_eq!(schema_version(&store), SchemaVersion(7));
+        assert_eq!(schema_version(&store), SchemaVersion(8));
         let entries = store.entries().unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].title, "Show");
@@ -1185,7 +1296,7 @@ mod tests {
         drop(conn);
 
         let store = open(&dir);
-        assert_eq!(schema_version(&store), SchemaVersion(7));
+        assert_eq!(schema_version(&store), SchemaVersion(8));
         assert_eq!(store.last_match().unwrap(), Some(proposed("Show - 03.mkv")));
     }
 
@@ -1212,7 +1323,7 @@ mod tests {
         drop(conn);
 
         let store = open(&dir);
-        assert_eq!(schema_version(&store), SchemaVersion(7));
+        assert_eq!(schema_version(&store), SchemaVersion(8));
         assert_eq!(store.last_match().unwrap(), Some(proposed("Show - 03.mkv")));
     }
 
@@ -1246,7 +1357,7 @@ mod tests {
         drop(conn);
 
         let store = open(&dir);
-        assert_eq!(schema_version(&store), SchemaVersion(7));
+        assert_eq!(schema_version(&store), SchemaVersion(8));
         let entries = store.entries().unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].id, EntryId(7));
@@ -1287,7 +1398,7 @@ mod tests {
         drop(conn);
 
         let store = open(&dir);
-        assert_eq!(schema_version(&store), SchemaVersion(7));
+        assert_eq!(schema_version(&store), SchemaVersion(8));
         let at = |secs: u64| UNIX_EPOCH + Duration::from_secs(secs);
         let copied = |id: i64,
                       episode: RangeInclusive<u32>,
@@ -1345,7 +1456,7 @@ mod tests {
     }
 
     #[test]
-    fn v6_library_migrates_to_v7_with_no_remembered_titles() {
+    fn v6_library_migrates_to_v8_with_nothing_remembered_or_ignored() {
         let (_tmp, dir) = open_tmp();
         let conn = Connection::open(dir.library_db()).unwrap();
         for sql in [
@@ -1368,11 +1479,12 @@ mod tests {
         drop(conn);
 
         let store = open(&dir);
-        assert_eq!(schema_version(&store), SchemaVersion(7));
+        assert_eq!(schema_version(&store), SchemaVersion(8));
         let entries = store.entries().unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].id, EntryId(7));
         assert_eq!(store.aliases().unwrap(), vec![]);
+        assert!(store.ignored().unwrap().is_empty());
     }
 
     fn watching(id: EntryId, episode: RangeInclusive<u32>) -> NewRecording {
@@ -1429,6 +1541,60 @@ mod tests {
             }
         );
         assert_eq!(watches(&store), vec![second]);
+    }
+
+    #[test]
+    fn ignoring_a_file_writes_a_row_and_lists_it_until_stopped() {
+        let (_tmp, dir) = open_tmp();
+        let mut store = open(&dir);
+        let watch = store.ignore_file(None, &proposed("Show - 03.mkv")).unwrap();
+        assert_eq!(watch.outcome, WatchOutcome::Ignored);
+        assert_eq!(watch.raw_title, "Show - 03.mkv");
+        assert_eq!(watch.episode, Some(3..=3));
+        assert_eq!(store.ignored().unwrap(), vec!["Show - 03.mkv".to_owned()]);
+
+        store.stop_ignoring("Show - 03.mkv").unwrap();
+        assert!(store.ignored().unwrap().is_empty());
+        // Nothing here deletes: the row saying it was ignored stays put.
+        assert_eq!(watches(&store), vec![watch]);
+    }
+
+    #[test]
+    fn ignoring_fills_the_declined_row_rather_than_opening_a_second() {
+        let (_tmp, dir) = open_tmp();
+        let mut store = open(&dir);
+        let declined = store
+            .decline(None, &proposed("Show - 03.mkv"), Decline::NotExact)
+            .unwrap();
+        let ignored = store
+            .ignore_file(Some(declined.id), &proposed("Show - 03.mkv"))
+            .unwrap();
+        assert_eq!(ignored.id, declined.id);
+        assert_eq!(ignored.outcome, WatchOutcome::Ignored);
+        assert_eq!(watches(&store), vec![ignored]);
+    }
+
+    #[test]
+    fn ignoring_a_file_again_after_stopping_starts_it_over() {
+        let (_tmp, dir) = open_tmp();
+        let mut store = open(&dir);
+        store.ignore_file(None, &proposed("Show - 03.mkv")).unwrap();
+        store.stop_ignoring("Show - 03.mkv").unwrap();
+        assert!(store.ignored().unwrap().is_empty());
+        store.ignore_file(None, &proposed("Show - 03.mkv")).unwrap();
+        assert_eq!(store.ignored().unwrap(), vec!["Show - 03.mkv".to_owned()]);
+    }
+
+    #[test]
+    fn an_ignored_file_survives_reopen() {
+        let (_tmp, dir) = open_tmp();
+        let mut store = open(&dir);
+        store.ignore_file(None, &proposed("Show - 03.mkv")).unwrap();
+        drop(store);
+        assert_eq!(
+            open(&dir).ignored().unwrap(),
+            vec!["Show - 03.mkv".to_owned()]
+        );
     }
 
     #[test]
@@ -1780,6 +1946,10 @@ mod tests {
                 "UPDATE history SET reason = 'not-next', raw_title = NULL",
                 "raw_title",
             ),
+            ("UPDATE history SET raw_title = 'x', kind = 'bogus'", "kind"),
+            // An ignore is nothing being done, so one standing alongside a
+            // refusal is a row that cannot be read either way.
+            ("UPDATE history SET kind = 'ignored'", "kind"),
         ] {
             store.execute_raw(broken);
             assert!(

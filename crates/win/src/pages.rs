@@ -235,7 +235,8 @@ fn now_playing(props: &NowPlayingProps, cx: &mut RenderCx) -> Element {
                     RecordOutcome::Recorded(_)
                     | RecordOutcome::Counting
                     | RecordOutcome::Undone
-                    | RecordOutcome::Declined(_) => caption.into(),
+                    | RecordOutcome::Declined(_)
+                    | RecordOutcome::Ignored => caption.into(),
                 });
             }
             card_frame(vstack(lines).spacing(4.0)).into()
@@ -404,6 +405,9 @@ fn progress_text(progress: &WatchProgress, episode: Option<&RangeInclusive<u32>>
         (RecordOutcome::Undone, Some(episode)) => format!("Undid {episode}"),
         (RecordOutcome::Undone, None) => "Undone".to_owned(),
         (RecordOutcome::Declined(why), _) => why.label().to_owned(),
+        // No episode is named: nothing is being counted towards, so saying
+        // which one would suggest it still might be.
+        (RecordOutcome::Ignored, _) => "Ignored".to_owned(),
     }
 }
 

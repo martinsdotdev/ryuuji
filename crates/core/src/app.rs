@@ -27,6 +27,9 @@ pub struct Ryuuji {
     /// The titles the person has confirmed, read once at open. Matching
     /// consults them before its own gates.
     aliases: matching::Aliases,
+    /// The files the person said not to track, read once at open. Matching
+    /// stops at these before it reaches the library.
+    ignored: matching::Ignored,
 }
 
 impl Ryuuji {
@@ -52,6 +55,13 @@ impl Ryuuji {
                 tracing::warn!(error = %error_chain(&err), "remembered titles unreadable");
                 matching::Aliases::default()
             });
+        let ignored = store
+            .ignored()
+            .map(matching::Ignored::of)
+            .unwrap_or_else(|err| {
+                tracing::warn!(error = %error_chain(&err), "ignored files unreadable");
+                matching::Ignored::default()
+            });
         let notices = recovered
             .map(|recovered| Notice::LibraryReset {
                 backup: recovered.backup,
@@ -66,11 +76,15 @@ impl Ryuuji {
             aliases,
             state: AppState {
                 library,
+                ignored: last_match
+                    .as_ref()
+                    .is_some_and(|last| ignored.contains(&last.raw_title)),
                 last_match,
                 settings: loaded.settings,
                 notices,
                 ..AppState::default()
             },
+            ignored,
         })
     }
 
@@ -143,7 +157,8 @@ impl Ryuuji {
         // A viewing coming back is proposed again too: the last match is the
         // other player's by then, and the library may have changed meanwhile.
         if observed.switched {
-            let proposal = matching::propose(&event, &self.state.library, &self.aliases);
+            let proposal =
+                matching::propose(&event, &self.state.library, &self.aliases, &self.ignored);
             self.record_match(proposal);
         }
         self.state.watch_progress = observed.progress.map(|accrual| WatchProgress {
@@ -162,6 +177,12 @@ impl Ryuuji {
     fn record_outcome(&mut self, accrual: Accrual) -> RecordOutcome {
         if let Some(recorded) = accrual.recorded {
             return recorded;
+        }
+        // Said before the threshold as well as after it: there is nothing to
+        // count down to. A viewing that already recorded keeps saying so,
+        // since ignoring a file from now on does not unwrite an episode.
+        if self.state.ignored {
+            return RecordOutcome::Ignored;
         }
         if accrual.accrued < accrual.threshold {
             return RecordOutcome::Counting;
@@ -323,6 +344,11 @@ impl Ryuuji {
         if standing.link.names_entry() {
             return;
         }
+        // An ignored file is unmatched on purpose, so a library change must
+        // not quietly link it again.
+        if self.state.ignored {
+            return;
+        }
         match Link::from(matching::resolve(
             &standing.parsed_title,
             &self.state.library,
@@ -339,6 +365,7 @@ impl Ryuuji {
             "last match",
             self.store.save_last_match(&proposal),
         );
+        self.state.ignored = self.ignored.contains(&proposal.raw_title);
         self.state.last_match = Some(proposal);
     }
 
@@ -1144,7 +1171,7 @@ mod tests {
                     write.progress_before,
                     write.progress,
                 )),
-                WatchOutcome::Added | WatchOutcome::Declined(_) => None,
+                WatchOutcome::Added | WatchOutcome::Declined(_) | WatchOutcome::Ignored => None,
             })
             .collect()
     }
@@ -1155,9 +1182,47 @@ mod tests {
             .iter()
             .filter_map(|watch| match watch.outcome {
                 WatchOutcome::Declined(decline) => Some(decline),
-                WatchOutcome::Added | WatchOutcome::Recorded(_) => None,
+                WatchOutcome::Added | WatchOutcome::Recorded(_) | WatchOutcome::Ignored => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn an_ignored_file_is_read_off_disk_and_never_recorded() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::AddEntry(entry("Show")));
+        app.dispatch(Command::Playback(playing("Show - 01.mkv")));
+        let proposal = app.state().last_match.clone().expect("proposal recorded");
+        assert!(matches!(proposal.link, Link::Exact(_)));
+        app.store_mut().ignore_file(None, &proposal).unwrap();
+        drop(app);
+
+        // A fresh run knows nothing but what the store holds.
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::Playback(playing("Show - 01.mkv")));
+        assert!(app.state().ignored);
+        assert_eq!(outcome(&app), RecordOutcome::Ignored);
+
+        // Watching it right past the threshold still writes nothing.
+        app.dispatch(Command::Playback(later("Show - 01.mkv", 720)));
+        assert_eq!(outcome(&app), RecordOutcome::Ignored);
+        assert_eq!(app.state().library[0].progress, 0);
+        assert_eq!(stored_writes(&dir), vec![]);
+        assert_eq!(stored_declines(&dir), vec![]);
+        let watches = stored_watches(&dir);
+        assert_eq!(watches.len(), 1);
+        assert_eq!(watches[0].outcome, WatchOutcome::Ignored);
+
+        // The proposal is only remade on a switch, so the link the card
+        // shows stops naming the show from the next one. Saying so without
+        // waiting for a switch is the ignore command's job, not matching's.
+        app.dispatch(Command::Playback(playing("Other - 01.mkv")));
+        app.dispatch(Command::Playback(playing("Show - 01.mkv")));
+        assert_eq!(
+            app.state().last_match.as_ref().unwrap().link,
+            Link::Unmatched
+        );
     }
 
     #[test]
