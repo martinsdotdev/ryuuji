@@ -217,7 +217,7 @@ impl WatchSession {
         let viewing = self.viewing.as_ref()?;
         viewing
             .row
-            .filter(|_| viewing.logged != Some(Logged::Recorded))
+            .filter(|_| !matches!(viewing.logged, Some(Logged::Recorded | Logged::Ignored)))
     }
 
     pub(crate) fn logged(&self) -> Option<Logged> {

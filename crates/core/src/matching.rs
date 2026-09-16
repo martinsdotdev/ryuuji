@@ -294,6 +294,16 @@ impl Ignored {
     pub(crate) fn contains(&self, raw_title: &str) -> bool {
         self.0.contains(raw_title)
     }
+
+    /// Keeps the answer for the rest of this run; the store holds it for the
+    /// next one.
+    pub(crate) fn ignore(&mut self, raw_title: &str) {
+        self.0.insert(raw_title.to_owned());
+    }
+
+    pub(crate) fn stop(&mut self, raw_title: &str) {
+        self.0.remove(raw_title);
+    }
 }
 
 /// The matching decision for an already-parsed title: a remembered title

@@ -138,6 +138,8 @@ impl Ryuuji {
             Command::Playback(event) => self.observe_playback(event),
             Command::AddProposedToLibrary => self.add_proposed(),
             Command::ConfirmProposedMatch => self.confirm_proposed(),
+            Command::IgnoreFile => self.ignore_standing(),
+            Command::StopIgnoring => self.stop_ignoring_standing(),
             Command::UndoRecording(id) => self.undo_recording(id),
         }
     }
@@ -437,6 +439,59 @@ impl Ryuuji {
             link: Link::Exact(entry),
             ..last
         });
+        self.record_now();
+    }
+
+    /// Takes the person's word that this file should not be tracked: the
+    /// raw title is remembered, the viewing's row says so, and the proposal
+    /// stops naming a show at once. Waiting for the next playback event
+    /// would leave the card naming one, because a paused player sends none
+    /// and the proposal is only remade when detection switches.
+    fn ignore_standing(&mut self) {
+        let Some(last) = self
+            .state
+            .last_match
+            .clone()
+            .filter(|_| !self.state.ignored)
+        else {
+            return;
+        };
+        let outcome = self.store.ignore_file(self.session.open_row(), &last);
+        let Some(watch) = commit(&mut self.state.notices, "ignored file", outcome) else {
+            return;
+        };
+        self.ignored.ignore(&last.raw_title);
+        // The row is closed by `Logged::Ignored`, so a later decline or
+        // recording opens its own rather than writing over the ignore.
+        self.session.wrote(watch.id, Logged::Ignored);
+        tracing::info!(watch = watch.id.as_i64(), title = %last.raw_title, "file ignored");
+        self.record_match(ProposedMatch {
+            link: Link::Unmatched,
+            ..last
+        });
+        if let Some(progress) = self.state.watch_progress.as_mut() {
+            progress.outcome = RecordOutcome::Ignored;
+        }
+    }
+
+    /// The way back: the title is forgotten and the file is matched against
+    /// the library again without waiting for an event. The row saying it was
+    /// ignored stays, because nothing here deletes.
+    fn stop_ignoring_standing(&mut self) {
+        let Some(last) = self.state.last_match.clone().filter(|_| self.state.ignored) else {
+            return;
+        };
+        let outcome = self.store.stop_ignoring(&last.raw_title);
+        if commit(&mut self.state.notices, "ignored file", outcome).is_none() {
+            return;
+        }
+        self.ignored.stop(&last.raw_title);
+        self.state.ignored = false;
+        tracing::info!(title = %last.raw_title, "no longer ignored");
+        if let Some(progress) = self.state.watch_progress.as_mut() {
+            progress.outcome = RecordOutcome::Counting;
+        }
+        self.re_resolve();
         self.record_now();
     }
 
@@ -1185,6 +1240,120 @@ mod tests {
                 WatchOutcome::Added | WatchOutcome::Recorded(_) | WatchOutcome::Ignored => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn ignoring_the_standing_file_unlinks_it_and_stops_recording() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::AddEntry(entry("Show")));
+        let id = app.state().library[0].id;
+        app.dispatch(Command::Playback(playing("Show - 01.mkv")));
+        assert_eq!(
+            app.state().last_match.as_ref().unwrap().link,
+            Link::Exact(id)
+        );
+
+        app.dispatch(Command::IgnoreFile);
+        assert!(app.state().ignored);
+        assert_eq!(
+            app.state().last_match.as_ref().unwrap().link,
+            Link::Unmatched
+        );
+        assert_eq!(outcome(&app), RecordOutcome::Ignored);
+        let watches = stored_watches(&dir);
+        assert_eq!(watches.len(), 1);
+        assert_eq!(watches[0].outcome, WatchOutcome::Ignored);
+
+        app.dispatch(Command::Playback(later("Show - 01.mkv", 720)));
+        assert_eq!(outcome(&app), RecordOutcome::Ignored);
+        assert_eq!(app.state().library[0].progress, 0);
+        assert_eq!(stored_writes(&dir), vec![]);
+        assert_eq!(stored_watches(&dir).len(), 1);
+    }
+
+    #[test]
+    fn ignoring_fills_the_open_row_rather_than_opening_a_second() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        watch_past_threshold(&mut app, "Show - 03.mkv");
+        assert_eq!(stored_declines(&dir), vec![Decline::NotExact]);
+
+        app.dispatch(Command::IgnoreFile);
+        let watches = stored_watches(&dir);
+        assert_eq!(watches.len(), 1);
+        assert_eq!(watches[0].outcome, WatchOutcome::Ignored);
+        assert_eq!(stored_declines(&dir), vec![]);
+    }
+
+    #[test]
+    fn stopping_matches_the_file_again_and_keeps_the_ignored_row() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::AddEntry(entry("Show")));
+        let id = app.state().library[0].id;
+        app.dispatch(Command::Playback(playing("Show - 01.mkv")));
+        app.dispatch(Command::IgnoreFile);
+        drop(app);
+
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::Playback(playing("Show - 01.mkv")));
+        assert!(app.state().ignored);
+
+        app.dispatch(Command::StopIgnoring);
+        assert!(!app.state().ignored);
+        assert_eq!(
+            app.state().last_match.as_ref().unwrap().link,
+            Link::Exact(id)
+        );
+        let watches = stored_watches(&dir);
+        assert_eq!(watches.len(), 1);
+        assert_eq!(watches[0].outcome, WatchOutcome::Ignored);
+
+        // The ignore closed its row, so the recording opens its own.
+        app.dispatch(Command::Playback(later("Show - 01.mkv", 720)));
+        assert_eq!(app.state().library[0].progress, 1);
+        assert_eq!(stored_watches(&dir).len(), 2);
+    }
+
+    #[test]
+    fn ignoring_twice_or_with_nothing_playing_changes_nothing() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        let idle = app.state().clone();
+        app.dispatch(Command::IgnoreFile);
+        assert_eq!(app.state(), &idle);
+        app.dispatch(Command::StopIgnoring);
+        assert_eq!(app.state(), &idle);
+
+        app.dispatch(Command::Playback(playing("Show - 03.mkv")));
+        app.dispatch(Command::IgnoreFile);
+        let ignored = app.state().clone();
+        app.dispatch(Command::IgnoreFile);
+        assert_eq!(app.state(), &ignored);
+        assert_eq!(stored_watches(&dir).len(), 1);
+    }
+
+    #[test]
+    fn a_failed_ignore_leaves_one_notice_and_changes_nothing() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::AddEntry(entry("Show")));
+        let id = app.state().library[0].id;
+        app.dispatch(Command::Playback(playing("Show - 01.mkv")));
+        app.store_mut().execute_raw("DROP TABLE ignored");
+
+        app.dispatch(Command::IgnoreFile);
+        assert!(matches!(
+            app.state().notices.as_slice(),
+            [Notice::SaveFailed { .. }]
+        ));
+        assert!(!app.state().ignored);
+        assert_eq!(
+            app.state().last_match.as_ref().unwrap().link,
+            Link::Exact(id)
+        );
+        assert_eq!(stored_watches(&dir), vec![]);
     }
 
     #[test]

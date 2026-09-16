@@ -264,6 +264,14 @@ pub enum Command {
     /// the standing proposal as exact, and records at once when the viewing
     /// has already earned it.
     ConfirmProposedMatch,
+    /// Says not to track the standing file: remembers its raw title, marks
+    /// the viewing's history row, and unlinks the proposal at once, so the
+    /// card stops naming a show without waiting for the next event.
+    IgnoreFile,
+    /// The way back from [`Command::IgnoreFile`]: forgets the raw title and
+    /// matches the standing file against the library again. The history row
+    /// saying it was ignored stays, because nothing here deletes.
+    StopIgnoring,
 }
 
 /// Something the shell should surface to the user until dismissed.
