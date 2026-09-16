@@ -52,6 +52,7 @@ pub fn body(
                     .as_ref()
                     .map(|m| m.title_in(&state.library).to_owned()),
                 undo_applies: undo_applies(state),
+                ignored: state.ignored,
                 detection_down,
             },
         ),
@@ -179,6 +180,10 @@ struct NowPlayingProps {
     /// Whether the viewing's recording can still be undone, decided by the
     /// caller for the same reason.
     undo_applies: bool,
+    /// Whether this file is one the person said not to track. An ignored
+    /// file reads as unmatched, so without this the card would offer to add
+    /// the very show it was told to leave alone.
+    ignored: bool,
     detection_down: bool,
 }
 
@@ -249,6 +254,7 @@ fn now_playing(props: &NowPlayingProps, cx: &mut RenderCx) -> Element {
                 m,
                 props.title.as_deref().unwrap_or_else(|| m.shown_title()),
                 idle,
+                props.ignored,
                 now,
                 props.dispatch.clone(),
             ),
@@ -299,39 +305,58 @@ fn undo_applies(state: &AppState) -> bool {
         .any(|shown| shown.id == entry && shown.progress == *episode.end())
 }
 
+/// What the card says in place of the match facts once a file is ignored.
+/// The confidence label would read "No library entry", which is true and
+/// beside the point: nothing is being matched because nothing is meant to.
+const IGNORED_BODY: &str = "Ryuuji won't propose this file again, or any file whose title reads \
+                            the same. It keeps playing; nothing else changes.";
+
 fn proposal_card(
     m: &ProposedMatch,
     title: &str,
     idle: bool,
+    ignored: bool,
     now: SystemTime,
     dispatch: Dispatch<Command>,
 ) -> Element {
     let title = text_block(title).font_size(20.0).semibold().wrap();
-    let mut children: Vec<Element> =
-        vec![title.into(), caption(match_caption(m, idle, now)).into()];
+    let body = if ignored {
+        IGNORED_BODY.to_owned()
+    } else {
+        match_caption(m, idle, now)
+    };
+    let mut children: Vec<Element> = vec![title.into(), caption(body).into()];
     let rows = fact_rows(m);
     if !rows.is_empty() {
         children.push(facts_grid(&rows));
     }
-    match offer(m) {
-        Offer::Confirm(label) => children.push(
+    let buttons: Vec<Element> = offers(m, ignored)
+        .into_iter()
+        .map(|offer| {
+            let dispatch = dispatch.clone();
+            let (label, command) = match offer {
+                Offer::Confirm(label) => (label, Command::ConfirmProposedMatch),
+                Offer::Add => ("Add to library".to_owned(), Command::AddProposedToLibrary),
+                Offer::Ignore => ("Ignore this file".to_owned(), Command::IgnoreFile),
+                Offer::StopIgnoring => ("Stop ignoring".to_owned(), Command::StopIgnoring),
+            };
             button(label)
-                .on_click(move || dispatch.call(Command::ConfirmProposedMatch))
+                .on_click(move || dispatch.call(command.clone()))
+                .into()
+        })
+        .collect();
+    if !buttons.is_empty() {
+        children.push(
+            hstack(buttons)
+                .spacing(8.0)
                 .horizontal_alignment(HorizontalAlignment::Left)
                 .into(),
-        ),
-        Offer::Add => children.push(
-            button("Add to library")
-                .on_click(move || dispatch.call(Command::AddProposedToLibrary))
-                .horizontal_alignment(HorizontalAlignment::Left)
-                .into(),
-        ),
-        Offer::Nothing => {}
+        );
     }
     card_frame(vstack(children).spacing(4.0)).into()
 }
 
-/// What the proposal card offers under the facts.
+/// One thing the proposal card can offer under the facts.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Offer {
     /// A guess records nothing until the person says it names the right
@@ -339,18 +364,30 @@ enum Offer {
     Confirm(String),
     /// Nothing in the library matches, so the show can be added from here.
     Add,
-    /// The show is settled; the card states it rather than asking.
-    Nothing,
+    /// Stop proposing this file at all.
+    Ignore,
+    /// The way back, and the only thing an ignored file offers.
+    StopIgnoring,
 }
 
-fn offer(m: &ProposedMatch) -> Offer {
+/// The buttons the card shows, in the order they sit. An ignored file reads
+/// as unmatched, so it is answered before the link is: it offers the way
+/// back rather than offering to add the show it was told to leave alone. A
+/// settled show states itself and asks nothing.
+fn offers(m: &ProposedMatch, ignored: bool) -> Vec<Offer> {
+    if ignored {
+        return vec![Offer::StopIgnoring];
+    }
     match m.link {
-        Link::Likely(_) => Offer::Confirm(match m.episode.as_ref() {
-            Some(episode) => format!("Yes, record {}", episode_text(episode).to_lowercase()),
-            None => "Yes, this is the show".to_owned(),
-        }),
-        Link::Unmatched => Offer::Add,
-        Link::Exact(_) => Offer::Nothing,
+        Link::Likely(_) => vec![
+            Offer::Confirm(match m.episode.as_ref() {
+                Some(episode) => format!("Yes, record {}", episode_text(episode).to_lowercase()),
+                None => "Yes, this is the show".to_owned(),
+            }),
+            Offer::Ignore,
+        ],
+        Link::Unmatched => vec![Offer::Add, Offer::Ignore],
+        Link::Exact(_) => Vec::new(),
     }
 }
 
@@ -656,7 +693,7 @@ mod tests {
     }
 
     #[test]
-    fn the_card_asks_about_a_guess_and_offers_to_add_an_unmatched_show() {
+    fn the_card_asks_about_a_guess_offers_to_add_an_unmatched_show_and_can_ignore_either() {
         let (entry, _) = recorded_show();
         let guess = |episode| ProposedMatch {
             link: Link::Likely(entry.id),
@@ -664,25 +701,48 @@ mod tests {
             ..proposal()
         };
         assert_eq!(
-            offer(&guess(Some(1..=1))),
-            Offer::Confirm("Yes, record episode 1".to_owned())
+            offers(&guess(Some(1..=1)), false),
+            vec![
+                Offer::Confirm("Yes, record episode 1".to_owned()),
+                Offer::Ignore
+            ]
         );
         assert_eq!(
-            offer(&guess(Some(1..=12))),
-            Offer::Confirm("Yes, record episodes 1\u{2013}12".to_owned())
+            offers(&guess(Some(1..=12)), false),
+            vec![
+                Offer::Confirm("Yes, record episodes 1\u{2013}12".to_owned()),
+                Offer::Ignore
+            ]
         );
         assert_eq!(
-            offer(&guess(None)),
-            Offer::Confirm("Yes, this is the show".to_owned())
+            offers(&guess(None), false),
+            vec![
+                Offer::Confirm("Yes, this is the show".to_owned()),
+                Offer::Ignore
+            ]
         );
-        assert_eq!(offer(&proposal()), Offer::Add);
-        assert_eq!(
-            offer(&ProposedMatch {
-                link: Link::Exact(entry.id),
-                ..proposal()
-            }),
-            Offer::Nothing
-        );
+        assert_eq!(offers(&proposal(), false), vec![Offer::Add, Offer::Ignore]);
+        let exact = ProposedMatch {
+            link: Link::Exact(entry.id),
+            ..proposal()
+        };
+        assert_eq!(offers(&exact, false), vec![]);
+    }
+
+    #[test]
+    fn an_ignored_file_offers_only_the_way_back() {
+        let (entry, _) = recorded_show();
+        // Whatever the link says, because an ignored file is answered before
+        // the link is: it reads as unmatched, which would otherwise offer to
+        // add the show it was told to leave alone.
+        for link in [
+            Link::Unmatched,
+            Link::Likely(entry.id),
+            Link::Exact(entry.id),
+        ] {
+            let m = ProposedMatch { link, ..proposal() };
+            assert_eq!(offers(&m, true), vec![Offer::StopIgnoring], "{link:?}");
+        }
     }
 
     #[test]
@@ -747,6 +807,15 @@ mod tests {
             outcome: RecordOutcome::Undone,
             ..counting
         };
+        // An ignored file names no episode: nothing is being counted
+        // towards, so naming one would suggest it still might be.
+        let ignored = WatchProgress {
+            outcome: RecordOutcome::Ignored,
+            ..counting
+        };
+        assert_eq!(progress_text(&ignored, Some(&(3..=3))), "Ignored");
+        assert_eq!(progress_text(&ignored, None), "Ignored");
+
         assert_eq!(progress_text(&undone, Some(&(3..=3))), "Undid episode 3");
         assert_eq!(
             progress_text(&undone, Some(&(1..=12))),
