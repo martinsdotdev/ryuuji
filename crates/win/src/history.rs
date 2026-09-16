@@ -9,8 +9,8 @@ use std::rc::Rc;
 use std::time::SystemTime;
 
 use ryuuji_core::{
-    Command, HistoryId, HistoryPage, LibraryEntry, Link, Recorded, Ryuuji, TimeZone, Watch,
-    WatchOutcome, days, error_chain, time_of_day, week_start,
+    Command, EntryId, HistoryId, HistoryPage, LibraryEntry, Link, Recorded, Ryuuji, TimeZone,
+    Watch, WatchOutcome, days, error_chain, time_of_day, week_start,
 };
 use windows_reactor::*;
 
@@ -233,7 +233,18 @@ impl Row {
             WatchOutcome::Added => (Mark::Added, "Added to library".to_owned()),
             WatchOutcome::Ignored => (Mark::Ignored, "Ignored".to_owned()),
         };
-        let mut detail = vec![outcome];
+        // A moved row says where the episode went instead of what it wrote:
+        // the write was taken back, so restating it would read as though the
+        // episode still stood here. Only an undone recording can have gone
+        // anywhere, which is the invariant the store writes in one step.
+        let moved_to = watch
+            .moved_to
+            .filter(|_| mark == Mark::Undone)
+            .map(|entry| format!("Undone, moved to {}", show_named(entry, library)));
+        let mut detail = vec![moved_to.unwrap_or(outcome)];
+        if watch.moved_from.is_some() {
+            detail.push("moved here".to_owned());
+        }
         if watch.added_at.is_some() && watch.outcome != WatchOutcome::Added {
             detail.push("added to library".to_owned());
         }
@@ -258,6 +269,15 @@ impl Row {
             action,
         }
     }
+}
+
+/// The show as the library names it, falling back to its id for an entry
+/// the library no longer lists.
+fn show_named(entry: EntryId, library: &[LibraryEntry]) -> String {
+    library
+        .iter()
+        .find(|row| row.id == entry)
+        .map_or_else(|| format!("entry {entry}"), |row| row.title.clone())
 }
 
 /// The episode, then the show as the library names it, falling back to the
@@ -486,6 +506,17 @@ mod tests {
             .watch
             .id;
 
+        // A correction: the episode leaves one show and lands on another,
+        // both rows kept. Two shows of its own, so nothing above shifts.
+        let bocchi = store.add(show("Bocchi")).unwrap().id;
+        let kagurabachi = store.add(show("Kagurabachi")).unwrap().id;
+        let strayed = store
+            .record(recording(bocchi, 1, "Bocchi - 01.mkv"))
+            .unwrap()
+            .watch
+            .id;
+        let corrected = store.move_recording(strayed, kagurabachi).unwrap().watch.id;
+
         let library = store.entries().unwrap();
         let watches = store.history(None, 20).unwrap().watches;
         let rows: Vec<Row> = watches
@@ -564,6 +595,24 @@ mod tests {
                 "Episode 4 \u{b7} Other",
                 "Not recorded: not the next episode \u{b7} added to library \u{b7} mpv",
                 Action::Nothing
+            )
+        );
+        assert_eq!(
+            said(strayed),
+            (
+                Mark::Undone,
+                "Episode 1 \u{b7} Bocchi",
+                "Undone, moved to Kagurabachi \u{b7} mpv",
+                Action::Undone
+            )
+        );
+        assert_eq!(
+            said(corrected),
+            (
+                Mark::Recorded,
+                "Episode 1 \u{b7} Kagurabachi",
+                "Recorded 0 \u{2192} 1 \u{b7} moved here \u{b7} mpv",
+                Action::Undo
             )
         );
         let watch = watches.iter().find(|watch| watch.id == latest).unwrap();
