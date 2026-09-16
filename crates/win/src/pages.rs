@@ -16,7 +16,7 @@ use std::time::{Duration, SystemTime};
 use ryuuji_core::{
     AppState, Certainty, Command, DataDir, Detail, ElementKind, EntryId, LibraryEntry, Link,
     Notice, NowPlaying, Options, Page, ProposedMatch, RecordOutcome, Ryuuji, StoreError,
-    ThemePreference, WatchProgress, error_chain, normalize_title, parse,
+    ThemePreference, WatchProgress, WatchStatus, error_chain, normalize_title, parse,
 };
 use windows_reactor::*;
 
@@ -61,6 +61,35 @@ fn choices(library: &[LibraryEntry]) -> Vec<ShowChoice> {
     choices
 }
 
+/// One library row as the page draws it, worked out by the caller for the
+/// same reason as [`ShowChoice`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LibraryRow {
+    entry: EntryId,
+    title: String,
+    /// `Completed · 3/24 · rewatching`.
+    detail: String,
+    /// Whether a rewatch is under way, and `None` on a show that is not
+    /// finished: picking a finished show back up is the only thing the
+    /// switch is for, so it has nothing to say anywhere else.
+    rewatch: Option<bool>,
+}
+
+/// Every library row, in the order the store keeps them, which is the order
+/// the shows were added. Nothing about a rewatch is a reason to re-sort the
+/// library under the person while they are reading it.
+fn library_rows(library: &[LibraryEntry]) -> Vec<LibraryRow> {
+    library
+        .iter()
+        .map(|entry| LibraryRow {
+            entry: entry.id,
+            title: entry.title.clone(),
+            detail: status_line(entry),
+            rewatch: (entry.status == WatchStatus::Completed).then_some(entry.rewatching),
+        })
+        .collect()
+}
+
 /// Builds one page's body. Which page is the shell's decision, not this
 /// module's, so nothing here reads [`AppState::page`].
 pub fn body(
@@ -72,7 +101,13 @@ pub fn body(
     core: &Rc<RefCell<Ryuuji>>,
 ) -> Element {
     match page {
-        Page::Library => library(&state.library),
+        Page::Library => component(
+            library,
+            LibraryProps {
+                dispatch,
+                rows: library_rows(&state.library),
+            },
+        ),
         Page::NowPlaying => component(
             now_playing,
             NowPlayingProps {
@@ -173,29 +208,76 @@ fn notice(notices: &[Notice], dispatch: Dispatch<Command>) -> Element {
         .into()
 }
 
-fn library(entries: &[LibraryEntry]) -> Element {
-    if entries.is_empty() {
+/// What the Library page is handed. `dispatch` is fresh every render and
+/// compares by identity, so it comes first and the props compare stops
+/// there, as [`NowPlayingProps`] does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LibraryProps {
+    dispatch: Dispatch<Command>,
+    rows: Vec<LibraryRow>,
+}
+
+fn library(props: &LibraryProps, _cx: &mut RenderCx) -> Element {
+    if props.rows.is_empty() {
         return placeholder(
             "Your library is empty",
             "Shows you track will appear here. Add one from Now playing when an episode is detected.",
         );
     }
-    list_view(entries.to_vec(), |entry, _| {
-        vstack((
-            text_block(entry.title.clone()).semibold(),
-            text_block(status_line(entry)).foreground(ThemeRef::SecondaryText),
+    let dispatch = props.dispatch.clone();
+    list_view(props.rows.clone(), move |row: &LibraryRow, _| {
+        let main = vstack((
+            text_block(row.title.clone()).semibold(),
+            text_block(row.detail.clone()).foreground(ThemeRef::SecondaryText),
         ))
         .spacing(2.0)
+        .vertical_alignment(VerticalAlignment::Center)
+        .grid_column(0);
+        let action: Element = match row.rewatch {
+            Some(rewatching) => {
+                let dispatch = dispatch.clone();
+                let id = row.entry;
+                button(rewatch_label(rewatching))
+                    .on_click(move || {
+                        dispatch.call(Command::SetRewatching {
+                            id,
+                            rewatching: !rewatching,
+                        });
+                    })
+                    .vertical_alignment(VerticalAlignment::Center)
+                    .grid_column(1)
+                    .into()
+            }
+            None => Element::Empty,
+        };
+        grid(vec![main.into(), action]).columns([GridLength::STAR, GridLength::Auto])
     })
-    .with_key_selector(|entry| entry.id.to_string())
+    .with_key_selector(|row: &LibraryRow| row.entry.to_string())
     .into()
 }
 
+/// What the row offers a finished show: the way into a rewatch, or the way
+/// back out of one.
+fn rewatch_label(rewatching: bool) -> &'static str {
+    if rewatching {
+        "Stop rewatching"
+    } else {
+        "Rewatch"
+    }
+}
+
 fn status_line(entry: &LibraryEntry) -> String {
-    match entry.total {
+    let mut line = match entry.total {
         Some(total) => format!("{} · {}/{}", entry.status.label(), entry.progress, total),
         None => format!("{} · {}", entry.status.label(), entry.progress),
+    };
+    // Said on the row rather than in place of the status: the show is still
+    // completed, and the count underneath it is a rewatch rather than a
+    // finished show that somehow slipped back.
+    if entry.rewatching {
+        line.push_str(" · rewatching");
     }
+    line
 }
 
 /// What Now playing shows. A standing proposal is captioned with its age,
@@ -919,6 +1001,51 @@ mod tests {
             ..proposal()
         };
         assert_eq!(offers(&exact, false), vec![Offer::PickAnother]);
+    }
+
+    /// The seeded show shelved somewhere else; only the status, the numbers
+    /// and the flag matter here, and the shell cannot mint an entry id.
+    fn shelved(
+        entry: &LibraryEntry,
+        status: WatchStatus,
+        progress: u32,
+        total: Option<u32>,
+        rewatching: bool,
+    ) -> LibraryEntry {
+        LibraryEntry {
+            status,
+            progress,
+            total,
+            rewatching,
+            ..entry.clone()
+        }
+    }
+
+    #[test]
+    fn only_a_finished_show_is_offered_a_rewatch() {
+        let (entry, _) = recorded_show();
+        let rows = library_rows(&[
+            shelved(&entry, WatchStatus::Watching, 7, Some(28), false),
+            shelved(&entry, WatchStatus::Completed, 24, Some(24), false),
+            shelved(&entry, WatchStatus::Completed, 3, Some(24), true),
+            shelved(&entry, WatchStatus::Completed, 5, None, true),
+        ]);
+        // Picking a finished show back up is the only thing the switch is
+        // for, so a show still being watched is offered nothing.
+        assert_eq!(
+            rows.iter().map(|row| row.rewatch).collect::<Vec<_>>(),
+            vec![None, Some(false), Some(true), Some(true)]
+        );
+        assert_eq!(rows[0].detail, "Watching \u{b7} 7/28");
+        assert_eq!(rows[1].detail, "Completed \u{b7} 24/24");
+        assert_eq!(rows[2].detail, "Completed \u{b7} 3/24 \u{b7} rewatching");
+        assert_eq!(rows[3].detail, "Completed \u{b7} 5 \u{b7} rewatching");
+    }
+
+    #[test]
+    fn the_rewatch_button_says_which_way_it_goes() {
+        assert_eq!(rewatch_label(false), "Rewatch");
+        assert_eq!(rewatch_label(true), "Stop rewatching");
     }
 
     /// A library row with the same id as the seeded show; only the title
