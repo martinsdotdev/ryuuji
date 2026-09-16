@@ -14,8 +14,8 @@ use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 
 use ryuuji_core::{
-    AppState, Certainty, Command, DataDir, Detail, ElementKind, LibraryEntry, Notice, NowPlaying,
-    Options, Page, ProposedMatch, RecordOutcome, Ryuuji, StoreError, ThemePreference,
+    AppState, Certainty, Command, DataDir, Detail, ElementKind, LibraryEntry, Link, Notice,
+    NowPlaying, Options, Page, ProposedMatch, RecordOutcome, Ryuuji, StoreError, ThemePreference,
     WatchProgress, error_chain, parse,
 };
 use windows_reactor::*;
@@ -312,15 +312,45 @@ fn proposal_card(
     if !rows.is_empty() {
         children.push(facts_grid(&rows));
     }
-    if !m.link.names_entry() {
-        children.push(
+    match offer(m) {
+        Offer::Confirm(label) => children.push(
+            button(label)
+                .on_click(move || dispatch.call(Command::ConfirmProposedMatch))
+                .horizontal_alignment(HorizontalAlignment::Left)
+                .into(),
+        ),
+        Offer::Add => children.push(
             button("Add to library")
                 .on_click(move || dispatch.call(Command::AddProposedToLibrary))
                 .horizontal_alignment(HorizontalAlignment::Left)
                 .into(),
-        );
+        ),
+        Offer::Nothing => {}
     }
     card_frame(vstack(children).spacing(4.0)).into()
+}
+
+/// What the proposal card offers under the facts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Offer {
+    /// A guess records nothing until the person says it names the right
+    /// show, so the card asks, naming the episode at stake.
+    Confirm(String),
+    /// Nothing in the library matches, so the show can be added from here.
+    Add,
+    /// The show is settled; the card states it rather than asking.
+    Nothing,
+}
+
+fn offer(m: &ProposedMatch) -> Offer {
+    match m.link {
+        Link::Likely(_) => Offer::Confirm(match m.episode.as_ref() {
+            Some(episode) => format!("Yes, record {}", episode_text(episode).to_lowercase()),
+            None => "Yes, this is the show".to_owned(),
+        }),
+        Link::Unmatched => Offer::Add,
+        Link::Exact(_) => Offer::Nothing,
+    }
 }
 
 fn match_caption(m: &ProposedMatch, idle: bool, now: SystemTime) -> String {
@@ -619,6 +649,36 @@ mod tests {
 
     fn recorded_watch_id() -> ryuuji_core::HistoryId {
         recorded_show().1
+    }
+
+    #[test]
+    fn the_card_asks_about_a_guess_and_offers_to_add_an_unmatched_show() {
+        let (entry, _) = recorded_show();
+        let guess = |episode| ProposedMatch {
+            link: Link::Likely(entry.id),
+            episode,
+            ..proposal()
+        };
+        assert_eq!(
+            offer(&guess(Some(1..=1))),
+            Offer::Confirm("Yes, record episode 1".to_owned())
+        );
+        assert_eq!(
+            offer(&guess(Some(1..=12))),
+            Offer::Confirm("Yes, record episodes 1\u{2013}12".to_owned())
+        );
+        assert_eq!(
+            offer(&guess(None)),
+            Offer::Confirm("Yes, this is the show".to_owned())
+        );
+        assert_eq!(offer(&proposal()), Offer::Add);
+        assert_eq!(
+            offer(&ProposedMatch {
+                link: Link::Exact(entry.id),
+                ..proposal()
+            }),
+            Offer::Nothing
+        );
     }
 
     #[test]
