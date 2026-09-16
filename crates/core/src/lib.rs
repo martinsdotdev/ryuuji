@@ -274,6 +274,12 @@ pub enum Command {
     /// matches the standing file against the library again. The history row
     /// saying it was ignored stays, because nothing here deletes.
     StopIgnoring,
+    /// Says which show the standing file belongs to: remembers the title, so
+    /// later files of that release match it on their own, and relinks the
+    /// proposal. A viewing that already recorded has its episode moved onto
+    /// the chosen show, leaving both rows; one that has not runs the gates
+    /// at once, exactly as confirming a guess does.
+    PickShow(EntryId),
 }
 
 /// Something the shell should surface to the user until dismissed.

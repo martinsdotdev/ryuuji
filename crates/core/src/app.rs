@@ -4,7 +4,7 @@ use crate::settings::{self, SettingsError};
 use crate::watch::{Accrual, Logged, WatchSession};
 use crate::{
     Added, AppState, Command, DataDir, Decline, Diagnostics, EntryId, HistoryId, HistoryPage,
-    LibraryEntry, Link, NewEntry, NewRecording, Notice, NowPlaying, Opened, PlaybackEvent,
+    LibraryEntry, Link, Moved, NewEntry, NewRecording, Notice, NowPlaying, Opened, PlaybackEvent,
     ProposedMatch, RecordOutcome, Recording, Settings, Store, StoreError, ThemePreference,
     WatchProgress, WatchStatus, error_chain, matching,
 };
@@ -140,6 +140,7 @@ impl Ryuuji {
             Command::ConfirmProposedMatch => self.confirm_proposed(),
             Command::IgnoreFile => self.ignore_standing(),
             Command::StopIgnoring => self.stop_ignoring_standing(),
+            Command::PickShow(entry) => self.pick_show(entry),
             Command::UndoRecording(id) => self.undo_recording(id),
         }
     }
@@ -426,15 +427,112 @@ impl Ryuuji {
         else {
             return;
         };
+        if !self.remember(&last, entry) {
+            return;
+        }
+        tracing::info!(entry = entry.as_i64(), title = %last.parsed_title, "match confirmed");
+        self.settle_on(last, entry);
+    }
+
+    /// Says which show the standing file belongs to, whatever the matcher
+    /// decided. A viewing that has already recorded has its episode moved
+    /// onto the chosen show, leaving both rows; one that has not settles on
+    /// it and runs the gates, which is the same act as confirming a guess.
+    fn pick_show(&mut self, chosen: EntryId) {
+        let Some(last) = self
+            .state
+            .last_match
+            .clone()
+            .filter(|_| !self.state.ignored)
+        else {
+            return;
+        };
+        // Already this show: what makes a second press harmless, so the
+        // shell needs no guard of its own.
+        if last.link == Link::Exact(chosen) {
+            return;
+        }
+        if !self.state.library.iter().any(|entry| entry.id == chosen) {
+            return;
+        }
+        let standing = match self.state.watch_progress.map(|progress| progress.outcome) {
+            Some(RecordOutcome::Recorded(row)) => Some(row),
+            _ => None,
+        };
+        // Remembered only once the write has taken: a refused move must not
+        // leave the title naming a show the episode never reached, which
+        // would quietly send the rest of the release there.
+        let settled = match standing {
+            Some(row) => self.move_episode(row, chosen, last.clone()),
+            None => {
+                self.settle_on(last.clone(), chosen);
+                true
+            }
+        };
+        if settled {
+            self.remember(&last, chosen);
+        }
+    }
+
+    /// Moves an episode already written onto the chosen show. The gates do
+    /// not run here: they exist to stop the automatic write from guessing,
+    /// and this is a person correcting a fact that already exists, on a show
+    /// they chose while reading its progress. Refusing would either strand
+    /// the episode or call it declined while it sits on the wrong show.
+    fn move_episode(&mut self, row: HistoryId, chosen: EntryId, last: ProposedMatch) -> bool {
+        let outcome = self.store.move_recording(row, chosen);
+        // Not relinking on a failure: the card would name a show the episode
+        // did not move to.
+        let Some(Moved {
+            from, to, watch, ..
+        }) = commit(&mut self.state.notices, "moved episode", outcome)
+        else {
+            return false;
+        };
+        tracing::info!(
+            from = from.id.as_i64(),
+            to = to.id.as_i64(),
+            watch = watch.id.as_i64(),
+            "episode moved"
+        );
+        upsert(&mut self.state.library, from);
+        upsert(&mut self.state.library, to);
+        // The recording moved rather than went away, so the viewing stays
+        // recorded, against its new row.
+        self.session.mark_recorded(watch.id);
+        self.record_match(ProposedMatch {
+            link: Link::Exact(chosen),
+            ..last
+        });
+        if let Some(progress) = self.state.watch_progress.as_mut() {
+            progress.outcome = RecordOutcome::Recorded(watch.id);
+        }
+        true
+    }
+
+    /// Keeps the title as naming `entry`, so later files of that show match
+    /// it on their own, and says whether the pick may go on. A file the
+    /// parser read no title out of remembers nothing: the needle would be
+    /// empty, and matching answers Unmatched before it consults a remembered
+    /// title, so the row could never answer.
+    fn remember(&mut self, last: &ProposedMatch, entry: EntryId) -> bool {
         let needle = matching::normalize_title(&last.parsed_title);
+        if needle.is_empty() {
+            return true;
+        }
         let outcome = self
             .store
             .remember_title(&needle, &last.parsed_title, entry);
         if commit(&mut self.state.notices, "remembered title", outcome).is_none() {
-            return;
+            return false;
         }
         self.aliases.remember(&last.parsed_title, entry);
-        tracing::info!(entry = entry.as_i64(), title = %last.parsed_title, "match confirmed");
+        true
+    }
+
+    /// Relinks the standing proposal to `entry` and runs the gates at once,
+    /// rather than waiting for a playback event a paused player never sends.
+    fn settle_on(&mut self, last: ProposedMatch, entry: EntryId) {
         self.record_match(ProposedMatch {
             link: Link::Exact(entry),
             ..last
@@ -1240,6 +1338,187 @@ mod tests {
                 WatchOutcome::Added | WatchOutcome::Recorded(_) | WatchOutcome::Ignored => None,
             })
             .collect()
+    }
+
+    /// Two shows, the file matching the first, watched until it records.
+    /// Returns the wrong show, the right one, and the row it wrote.
+    fn recorded_against_the_wrong_show(dir: &DataDir) -> (Ryuuji, EntryId, EntryId, HistoryId) {
+        let mut app = Ryuuji::open(dir).unwrap();
+        app.dispatch(Command::AddEntry(entry("Show")));
+        app.dispatch(Command::AddEntry(entry("Other")));
+        let wrong = app.state().library[0].id;
+        let right = app.state().library[1].id;
+        watch_past_threshold(&mut app, "Show - 01.mkv");
+        let row = match outcome(&app) {
+            RecordOutcome::Recorded(row) => row,
+            other => panic!("not recorded: {other:?}"),
+        };
+        (app, wrong, right, row)
+    }
+
+    #[test]
+    fn picking_another_show_moves_the_recorded_episode_and_keeps_both_rows() {
+        let (_tmp, dir) = open_tmp();
+        let (mut app, wrong, right, first) = recorded_against_the_wrong_show(&dir);
+        assert_eq!(stored_progress(&dir, wrong), 1);
+
+        app.dispatch(Command::PickShow(right));
+        assert_eq!(stored_progress(&dir, wrong), 0);
+        assert_eq!(stored_progress(&dir, right), 1);
+        assert_eq!(app.state().library[0].progress, 0);
+        assert_eq!(app.state().library[1].progress, 1);
+        assert_eq!(
+            app.state().last_match.as_ref().unwrap().link,
+            Link::Exact(right)
+        );
+        assert!(app.state().notices.is_empty());
+
+        // The old row says where the episode went; the new one where it
+        // came from. Nothing deletes, so both stand.
+        let watches = stored_watches(&dir);
+        assert_eq!(watches.len(), 2);
+        assert_eq!(watches[0].id, first);
+        assert_eq!(watches[0].moved_to, Some(right));
+        assert!(recorded(&watches[0]).undone_at.is_some());
+        assert_eq!(watches[1].moved_from, Some(wrong));
+        assert_eq!(watches[1].link, Link::Exact(right));
+        assert_eq!(outcome(&app), RecordOutcome::Recorded(watches[1].id));
+        assert_eq!(stored_aliases(&dir), vec![("show".to_owned(), right)]);
+    }
+
+    #[test]
+    fn picking_before_the_recording_settles_on_the_chosen_show() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::AddEntry(entry("Show")));
+        app.dispatch(Command::AddEntry(entry("Other")));
+        let wrong = app.state().library[0].id;
+        let right = app.state().library[1].id;
+        app.dispatch(Command::Playback(playing("Show - 01.mkv")));
+        assert_eq!(outcome(&app), RecordOutcome::Counting);
+
+        app.dispatch(Command::PickShow(right));
+        assert_eq!(stored_watches(&dir), vec![]);
+        assert_eq!(
+            app.state().last_match.as_ref().unwrap().link,
+            Link::Exact(right)
+        );
+
+        // One row, written against the chosen show, not a second.
+        app.dispatch(Command::Playback(later("Show - 01.mkv", 720)));
+        assert_eq!(stored_progress(&dir, right), 1);
+        assert_eq!(stored_progress(&dir, wrong), 0);
+        assert_eq!(stored_watches(&dir).len(), 1);
+    }
+
+    #[test]
+    fn a_picked_show_matches_the_next_file_on_its_own() {
+        let (_tmp, dir) = open_tmp();
+        let (mut app, _, right, _) = recorded_against_the_wrong_show(&dir);
+        app.dispatch(Command::PickShow(right));
+        drop(app);
+
+        let mut app = Ryuuji::open(&dir).unwrap();
+        watch_past_threshold(&mut app, "Show - 02.mkv");
+        assert_eq!(stored_progress(&dir, right), 2);
+        assert_eq!(stored_declines(&dir), vec![]);
+    }
+
+    #[test]
+    fn picking_the_same_show_again_changes_nothing() {
+        let (_tmp, dir) = open_tmp();
+        let (mut app, _, right, _) = recorded_against_the_wrong_show(&dir);
+        app.dispatch(Command::PickShow(right));
+        let settled = app.state().clone();
+        let rows = stored_watches(&dir);
+
+        app.dispatch(Command::PickShow(right));
+        assert_eq!(app.state(), &settled);
+        assert_eq!(stored_watches(&dir), rows);
+    }
+
+    #[test]
+    fn picking_does_nothing_without_a_proposal_an_unknown_show_or_an_ignored_file() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::AddEntry(entry("Show")));
+        let id = app.state().library[0].id;
+        let idle = app.state().clone();
+        app.dispatch(Command::PickShow(id));
+        assert_eq!(app.state(), &idle);
+
+        app.dispatch(Command::Playback(playing("Show - 01.mkv")));
+        let playing_now = app.state().clone();
+        app.dispatch(Command::PickShow(EntryId(id.as_i64() + 100)));
+        assert_eq!(app.state(), &playing_now);
+
+        app.dispatch(Command::IgnoreFile);
+        let ignored = app.state().clone();
+        app.dispatch(Command::PickShow(id));
+        assert_eq!(app.state(), &ignored);
+    }
+
+    #[test]
+    fn a_failed_move_leaves_one_notice_and_the_episode_where_it_was() {
+        let (_tmp, dir) = open_tmp();
+        let (mut app, wrong, right, first) = recorded_against_the_wrong_show(&dir);
+        app.dispatch(Command::SetProgress {
+            id: wrong,
+            progress: 9,
+        });
+
+        app.dispatch(Command::PickShow(right));
+        assert!(matches!(
+            app.state().notices.as_slice(),
+            [Notice::SaveFailed { .. }]
+        ));
+        assert_eq!(stored_progress(&dir, right), 0);
+        assert_eq!(
+            app.state().last_match.as_ref().unwrap().link,
+            Link::Exact(wrong)
+        );
+        let watches = stored_watches(&dir);
+        assert_eq!(watches.len(), 1);
+        assert_eq!(watches[0].id, first);
+        assert!(recorded(&watches[0]).undone_at.is_none());
+        // The title is remembered only once the write takes, so a refused
+        // move leaves nothing pointing at the show it never reached.
+        assert_eq!(stored_aliases(&dir), vec![]);
+    }
+
+    #[test]
+    fn a_moved_viewing_says_its_new_row_as_it_plays_on() {
+        let (_tmp, dir) = open_tmp();
+        let (mut app, _, right, first) = recorded_against_the_wrong_show(&dir);
+        app.dispatch(Command::PickShow(right));
+        let moved = stored_watches(&dir)[1].id;
+        assert_eq!(outcome(&app), RecordOutcome::Recorded(moved));
+
+        // Every event recomputes the outcome from the session, so the
+        // session has to have followed the episode to its new row. Left on
+        // the old one, the card would offer Undo against a row already
+        // undone, and pressing it would fail.
+        app.dispatch(Command::Playback(later("Show - 01.mkv", 900)));
+        assert_eq!(outcome(&app), RecordOutcome::Recorded(moved));
+        assert_ne!(outcome(&app), RecordOutcome::Recorded(first));
+        assert_eq!(stored_watches(&dir).len(), 2);
+    }
+
+    #[test]
+    fn undo_after_a_move_takes_back_the_corrected_recording() {
+        let (_tmp, dir) = open_tmp();
+        let (mut app, _, right, _) = recorded_against_the_wrong_show(&dir);
+        app.dispatch(Command::PickShow(right));
+        let moved = stored_watches(&dir)[1].id;
+
+        // Undo takes back this recording, which leaves the episode recorded
+        // nowhere: the old row stays undone. Not "undo the correction".
+        app.dispatch(Command::UndoRecording(moved));
+        assert_eq!(stored_progress(&dir, right), 0);
+        assert_eq!(outcome(&app), RecordOutcome::Undone);
+        let watches = stored_watches(&dir);
+        assert_eq!(watches.len(), 2);
+        assert!(recorded(&watches[1]).undone_at.is_some());
     }
 
     #[test]
