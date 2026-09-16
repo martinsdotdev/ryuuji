@@ -3,7 +3,10 @@
 //! [`propose`] runs the filename parser over a raw player title and decides
 //! which library entry, if any, it names. The decision is a
 //! [`ProposedMatch`]: the shell shows it and the store keeps the latest one.
+//! A title the person has confirmed once is remembered in [`Aliases`] and
+//! settles the decision outright, ahead of every other gate.
 
+use std::collections::HashMap;
 use std::ops::RangeInclusive;
 use std::time::SystemTime;
 
@@ -247,11 +250,48 @@ impl From<Resolution> for Link {
     }
 }
 
-/// The matching decision for an already-parsed title.
-pub(crate) fn resolve(parsed_title: &str, library: &[LibraryEntry]) -> Resolution {
+/// The titles a person has confirmed, each folded the way [`resolve`]
+/// compares them. A remembered title settles the decision outright: the
+/// person said which show the file belongs to, so neither the similarity
+/// threshold nor the short-needle guard applies to it afterwards.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Aliases(HashMap<String, EntryId>);
+
+impl Aliases {
+    /// Folds every stored needle as it is read, so a row written under an
+    /// older normalisation still answers.
+    pub(crate) fn of(rows: impl IntoIterator<Item = (String, EntryId)>) -> Aliases {
+        Aliases(
+            rows.into_iter()
+                .map(|(needle, entry)| (normalize_title(&needle), entry))
+                .collect(),
+        )
+    }
+
+    fn entry(&self, needle: &str) -> Option<EntryId> {
+        self.0.get(needle).copied()
+    }
+}
+
+/// The matching decision for an already-parsed title: a remembered title
+/// first, then an entry whose title folds to the same thing, then the
+/// closest entry above the threshold.
+pub(crate) fn resolve(
+    parsed_title: &str,
+    library: &[LibraryEntry],
+    aliases: &Aliases,
+) -> Resolution {
     let needle = normalize_title(parsed_title);
     if needle.is_empty() {
         return Resolution::Unmatched;
+    }
+    // A remembered title outranks every gate below, but only while the
+    // library still holds what it names.
+    if let Some(entry) = aliases
+        .entry(&needle)
+        .filter(|id| library.iter().any(|entry| entry.id == *id))
+    {
+        return Resolution::Exact(entry);
     }
     if let Some(entry) = library
         .iter()
@@ -276,13 +316,17 @@ pub(crate) fn resolve(parsed_title: &str, library: &[LibraryEntry]) -> Resolutio
 }
 
 /// Parses one playback title and decides which library entry it names.
-pub fn propose(event: &PlaybackEvent, library: &[LibraryEntry]) -> ProposedMatch {
+pub(crate) fn propose(
+    event: &PlaybackEvent,
+    library: &[LibraryEntry],
+    aliases: &Aliases,
+) -> ProposedMatch {
     let reading = parse(&event.title, &Options::default());
     let parsed_title = reading
         .title()
         .map(|title| title.value.to_owned())
         .unwrap_or_default();
-    let resolution = resolve(&parsed_title, library);
+    let resolution = resolve(&parsed_title, library, aliases);
     let score = match resolution {
         Resolution::Likely { score, .. } => Some(score),
         Resolution::Exact(_) | Resolution::Unmatched => None,
@@ -387,7 +431,11 @@ mod tests {
     fn resolve_finds_an_exact_match_through_normalization() {
         let library = library(&["Frieren: Beyond Journey's End"]);
         assert_eq!(
-            resolve("Frieren - Beyond Journey's End", &library),
+            resolve(
+                "Frieren - Beyond Journey's End",
+                &library,
+                &Aliases::default()
+            ),
             Resolution::Exact(library[0].id)
         );
     }
@@ -395,7 +443,8 @@ mod tests {
     #[test]
     fn resolve_finds_a_likely_match_above_the_threshold() {
         let library = library(&["Frieren Beyond Journeys End"]);
-        let Resolution::Likely { entry, score } = resolve("Frieren Beyond Journey End", &library)
+        let Resolution::Likely { entry, score } =
+            resolve("Frieren Beyond Journey End", &library, &Aliases::default())
         else {
             panic!("expected a likely match");
         };
@@ -416,7 +465,7 @@ mod tests {
     fn resolve_prefers_the_first_entry_on_a_tie() {
         let library = library(&["abcdefgx", "abcdefgy"]);
         assert!(matches!(
-            resolve("abcdefgz", &library),
+            resolve("abcdefgz", &library, &Aliases::default()),
             Resolution::Likely { entry, .. } if entry == library[0].id
         ));
     }
@@ -424,20 +473,77 @@ mod tests {
     #[test]
     fn resolve_without_a_close_entry_is_unmatched() {
         let library = library(&["Frieren"]);
-        assert_eq!(resolve("Mushoku Tensei", &library), Resolution::Unmatched);
-        assert_eq!(resolve("", &library), Resolution::Unmatched);
+        let none = Aliases::default();
+        assert_eq!(
+            resolve("Mushoku Tensei", &library, &none),
+            Resolution::Unmatched
+        );
+        assert_eq!(resolve("", &library, &none), Resolution::Unmatched);
     }
 
     #[test]
     fn resolve_never_calls_a_short_needle_likely() {
         let library = library(&["abcz"]);
-        assert_eq!(resolve("abcd", &library), Resolution::Unmatched);
+        assert_eq!(
+            resolve("abcd", &library, &Aliases::default()),
+            Resolution::Unmatched
+        );
+    }
+
+    #[test]
+    fn a_remembered_title_settles_the_match() {
+        let library = library(&["Frieren: Beyond Journey's End"]);
+        let aliases = Aliases::of([("sousou no frieren".to_owned(), library[0].id)]);
+        assert_eq!(
+            resolve("Sousou no Frieren", &library, &aliases),
+            Resolution::Exact(library[0].id)
+        );
+        assert_eq!(
+            resolve("Sousou no Frieren", &library, &Aliases::default()),
+            Resolution::Unmatched
+        );
+    }
+
+    #[test]
+    fn a_remembered_title_beats_the_short_needle_guard() {
+        let library = library(&["Bocchi the Rock!"]);
+        let aliases = Aliases::of([("BTR".to_owned(), library[0].id)]);
+        assert_eq!(
+            resolve("BTR", &library, &aliases),
+            Resolution::Exact(library[0].id)
+        );
+        assert_eq!(
+            resolve("BTR", &library, &Aliases::default()),
+            Resolution::Unmatched
+        );
+    }
+
+    /// Nothing deletes an entry today, but a remembered title must not name
+    /// one the library does not hold, or the gates would run against it.
+    #[test]
+    fn a_remembered_entry_that_left_the_library_is_ignored() {
+        let library = library(&["Frieren"]);
+        let aliases = Aliases::of([("sousou no frieren".to_owned(), EntryId(99))]);
+        assert_eq!(
+            resolve("Sousou no Frieren", &library, &aliases),
+            Resolution::Unmatched
+        );
+    }
+
+    #[test]
+    fn stored_needles_are_folded_as_they_are_read() {
+        let library = library(&["Frieren: Beyond Journey's End"]);
+        let aliases = Aliases::of([("Sousou no Frieren".to_owned(), library[0].id)]);
+        assert_eq!(
+            resolve("sousou  no  frieren", &library, &aliases),
+            Resolution::Exact(library[0].id)
+        );
     }
 
     #[test]
     fn propose_carries_player_and_at() {
         let event = event("[Subs] Show - 03 (1080p).mkv");
-        let proposal = propose(&event, &[]);
+        let proposal = propose(&event, &[], &Aliases::default());
         assert_eq!(proposal.raw_title, event.title);
         assert_eq!(proposal.player, "mpv");
         assert_eq!(proposal.at, event.observed_at);
@@ -446,7 +552,11 @@ mod tests {
     #[test]
     fn title_in_prefers_the_entry_then_parsed_then_raw() {
         let library = library(&["Frieren: Beyond Journey's End"]);
-        let proposal = propose(&event("[Subs] Show - 03.mkv"), &library);
+        let proposal = propose(
+            &event("[Subs] Show - 03.mkv"),
+            &library,
+            &Aliases::default(),
+        );
         assert_eq!(proposal.shown_title(), "Show");
         assert_eq!(proposal.title_in(&library), "Show");
         let matched = ProposedMatch {
@@ -464,7 +574,7 @@ mod tests {
 
     #[test]
     fn propose_without_a_title_is_unmatched() {
-        let proposal = propose(&event(""), &library(&["Show"]));
+        let proposal = propose(&event(""), &library(&["Show"]), &Aliases::default());
         assert_eq!(proposal.parsed_title, "");
         assert_eq!(proposal.link, Link::Unmatched);
     }

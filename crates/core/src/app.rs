@@ -24,6 +24,9 @@ pub struct Ryuuji {
     store: Store,
     state: AppState,
     session: WatchSession,
+    /// The titles the person has confirmed, read once at open. Matching
+    /// consults them before its own gates.
+    aliases: matching::Aliases,
 }
 
 impl Ryuuji {
@@ -42,6 +45,13 @@ impl Ryuuji {
                 tracing::warn!(error = %error_chain(&err), "history unreadable");
                 None
             });
+        let aliases = store
+            .aliases()
+            .map(matching::Aliases::of)
+            .unwrap_or_else(|err| {
+                tracing::warn!(error = %error_chain(&err), "remembered titles unreadable");
+                matching::Aliases::default()
+            });
         let notices = recovered
             .map(|recovered| Notice::LibraryReset {
                 backup: recovered.backup,
@@ -53,6 +63,7 @@ impl Ryuuji {
             dir: dir.clone(),
             store,
             session: WatchSession::resume(last_match.as_ref(), newest.as_ref()),
+            aliases,
             state: AppState {
                 library,
                 last_match,
@@ -131,7 +142,7 @@ impl Ryuuji {
         // A viewing coming back is proposed again too: the last match is the
         // other player's by then, and the library may have changed meanwhile.
         if observed.switched {
-            let proposal = matching::propose(&event, &self.state.library);
+            let proposal = matching::propose(&event, &self.state.library, &self.aliases);
             self.record_match(proposal);
         }
         self.state.watch_progress = observed.progress.map(|accrual| WatchProgress {
@@ -314,6 +325,7 @@ impl Ryuuji {
         match Link::from(matching::resolve(
             &standing.parsed_title,
             &self.state.library,
+            &self.aliases,
         )) {
             Link::Unmatched => {}
             link => self.record_match(ProposedMatch { link, ..standing }),
