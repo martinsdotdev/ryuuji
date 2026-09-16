@@ -282,6 +282,7 @@ fn outcome_text(watch: &Watch) -> String {
         }) => format!("recorded {progress_before}\u{2192}{progress}"),
         WatchOutcome::Declined(decline) => decline.tag().to_owned(),
         WatchOutcome::Added => "added".to_owned(),
+        WatchOutcome::Ignored => "ignored".to_owned(),
     };
     if watch.added_at.is_some() && watch.outcome != WatchOutcome::Added {
         text.push_str(", added");
@@ -903,7 +904,7 @@ mod tests {
             "Library: {} ({len}, modified ",
             core.library.path.display()
         )));
-        assert!(text.contains("Schema version: 7\n"));
+        assert!(text.contains("Schema version: 8\n"));
         assert!(text.contains(&format!(
             "Settings: {} (missing)",
             core.settings.path.display()

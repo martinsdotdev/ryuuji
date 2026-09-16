@@ -86,6 +86,7 @@ pub(crate) enum Logged {
     Added,
     Declined(Decline),
     Recorded,
+    Ignored,
 }
 
 impl Logged {
@@ -94,6 +95,7 @@ impl Logged {
             WatchOutcome::Added => Logged::Added,
             WatchOutcome::Declined(decline) => Logged::Declined(decline),
             WatchOutcome::Recorded(_) => Logged::Recorded,
+            WatchOutcome::Ignored => Logged::Ignored,
         }
     }
 }

@@ -72,6 +72,10 @@ pub enum WatchOutcome {
     Added,
     Declined(Decline),
     Recorded(Recorded),
+    /// The person said not to track this file. Unlike a decline, no gate
+    /// refused it, so nothing about the library or the episode can change
+    /// it back; only saying to stop ignoring does.
+    Ignored,
 }
 
 /// The progress write a recorded watch made.
@@ -96,7 +100,7 @@ impl Watch {
     pub fn shown_at(&self) -> SystemTime {
         match self.outcome {
             WatchOutcome::Recorded(recorded) => recorded.at,
-            WatchOutcome::Added | WatchOutcome::Declined(_) => self.at,
+            WatchOutcome::Added | WatchOutcome::Declined(_) | WatchOutcome::Ignored => self.at,
         }
     }
 

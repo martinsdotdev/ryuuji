@@ -207,6 +207,10 @@ pub enum RecordOutcome {
     /// The threshold was met and the gates refused the write. Recomputed on
     /// every event, so a decline never outlives what caused it.
     Declined(Decline),
+    /// The file is on the ignore list, so no episode is counted towards and
+    /// the gates never run. Said before the threshold as well as after it,
+    /// because there is nothing to count down to.
+    Ignored,
 }
 
 tagged_enum! {
@@ -291,6 +295,11 @@ pub struct AppState {
     /// The latest playback title's proposal against the library. Survives
     /// restarts via the store.
     pub last_match: Option<ProposedMatch>,
+    /// Whether the file behind [`AppState::last_match`] is one the person
+    /// said not to track, so Now playing offers the way back instead of a
+    /// match. Read from the ignore list rather than stored on the proposal,
+    /// which is about the library.
+    pub ignored: bool,
     /// The standing viewing's countdown to a recorded episode and what came
     /// of it, so the shell can show both. `None` when nothing is being
     /// watched.
@@ -308,6 +317,7 @@ impl Default for AppState {
             library: Vec::new(),
             now_playing: NowPlaying::Idle,
             last_match: None,
+            ignored: false,
             watch_progress: None,
             settings: Settings::default(),
             notices: Vec::new(),

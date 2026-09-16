@@ -190,16 +190,18 @@ enum Mark {
     Declined,
     Added,
     Undone,
+    Ignored,
 }
 
 impl Mark {
-    /// Segoe Fluent Icons: CheckMark, Info, Add, Undo.
+    /// Segoe Fluent Icons: CheckMark, Info, Add, Undo, Blocked.
     fn glyph(self) -> &'static str {
         match self {
             Mark::Recorded => "\u{E73E}",
             Mark::Declined => "\u{E946}",
             Mark::Added => "\u{E710}",
             Mark::Undone => "\u{E7A7}",
+            Mark::Ignored => "\u{E733}",
         }
     }
 }
@@ -229,6 +231,7 @@ impl Row {
             ),
             WatchOutcome::Declined(decline) => (Mark::Declined, decline.label().to_owned()),
             WatchOutcome::Added => (Mark::Added, "Added to library".to_owned()),
+            WatchOutcome::Ignored => (Mark::Ignored, "Ignored".to_owned()),
         };
         let mut detail = vec![outcome];
         if watch.added_at.is_some() && watch.outcome != WatchOutcome::Added {
