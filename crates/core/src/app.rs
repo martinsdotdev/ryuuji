@@ -135,6 +135,7 @@ impl Ryuuji {
                 let outcome = self.store.set_status(id, status);
                 self.absorb(outcome);
             }
+            Command::SetRewatching { id, rewatching } => self.set_rewatching(id, rewatching),
             Command::Playback(event) => self.observe_playback(event),
             Command::AddProposedToLibrary => self.add_proposed(),
             Command::ConfirmProposedMatch => self.confirm_proposed(),
@@ -370,6 +371,18 @@ impl Ryuuji {
         );
         self.state.ignored = self.ignored.contains(&proposal.raw_title);
         self.state.last_match = Some(proposal);
+    }
+
+    /// Starts or stops watching a finished show again, running the gates at
+    /// once rather than waiting for a playback event. Nothing else would:
+    /// [`Ryuuji::re_resolve`] leaves a proposal that already names an entry
+    /// alone, which is every rewatch, so under a paused player the card would
+    /// go on saying the show is completed after being told otherwise.
+    fn set_rewatching(&mut self, id: EntryId, rewatching: bool) {
+        let outcome = self.store.set_rewatching(id, rewatching);
+        if self.absorb(outcome).is_some() {
+            self.record_now();
+        }
     }
 
     fn add_proposed(&mut self) {
@@ -1781,6 +1794,133 @@ mod tests {
         assert_eq!(stored_writes(&dir), vec![(1..=1, 0, 1)]);
         // The relaunch picked up the declined row, and the recording filled it.
         assert_eq!(stored_watches(&dir).len(), 1);
+    }
+
+    /// A show watched to its end and marked finished, as one stands before a
+    /// rewatch: at its total, so the gates refuse an episode twice over.
+    fn finished_show(app: &mut Ryuuji) -> EntryId {
+        app.dispatch(Command::AddEntry(entry("Show")));
+        let id = app.state().library[0].id;
+        app.dispatch(Command::SetProgress { id, progress: 12 });
+        app.dispatch(Command::SetStatus {
+            id,
+            status: WatchStatus::Completed,
+        });
+        id
+    }
+
+    #[test]
+    fn a_rewatch_records_the_standing_episode_at_once() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        let id = finished_show(&mut app);
+        watch_past_threshold(&mut app, "Show - 01.mkv");
+        assert_eq!(outcome(&app), RecordOutcome::Declined(Decline::Completed));
+
+        app.dispatch(Command::SetRewatching {
+            id,
+            rewatching: true,
+        });
+        // No playback event followed. A paused player sends none, so waiting
+        // for one would leave the card saying the show is completed after
+        // being told otherwise.
+        assert!(matches!(outcome(&app), RecordOutcome::Recorded(_)));
+        assert_eq!(app.state().library[0].progress, 1);
+        assert_eq!(stored_writes(&dir), vec![(1..=1, 0, 1)]);
+        // The declined row was filled rather than a second one opened.
+        assert_eq!(stored_watches(&dir).len(), 1);
+    }
+
+    #[test]
+    fn a_rewatch_records_its_later_episodes_on_their_own() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        let id = finished_show(&mut app);
+        app.dispatch(Command::SetRewatching {
+            id,
+            rewatching: true,
+        });
+        // Nothing is playing, so the switch writes the row and no more.
+        assert_eq!(app.state().library[0].progress, 0);
+        assert!(stored_watches(&dir).is_empty());
+
+        for (title, progress) in [
+            ("Show - 01.mkv", 1),
+            ("Show - 02.mkv", 2),
+            ("Show - 03.mkv", 3),
+        ] {
+            watch_past_threshold(&mut app, title);
+            assert_eq!(app.state().library[0].progress, progress, "{title}");
+        }
+        assert_eq!(
+            stored_writes(&dir),
+            vec![(1..=1, 0, 1), (2..=2, 1, 2), (3..=3, 2, 3)]
+        );
+    }
+
+    #[test]
+    fn stopping_a_rewatch_leaves_the_count_and_refuses_the_next_episode() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        let id = finished_show(&mut app);
+        app.dispatch(Command::SetRewatching {
+            id,
+            rewatching: true,
+        });
+        watch_past_threshold(&mut app, "Show - 01.mkv");
+        assert_eq!(app.state().library[0].progress, 1);
+
+        app.dispatch(Command::SetRewatching {
+            id,
+            rewatching: false,
+        });
+        // The episode was watched, so the count stays where it reached.
+        assert_eq!(app.state().library[0].progress, 1);
+        watch_past_threshold(&mut app, "Show - 02.mkv");
+        assert_eq!(app.state().library[0].progress, 1);
+        assert_eq!(outcome(&app), RecordOutcome::Declined(Decline::Completed));
+    }
+
+    #[test]
+    fn a_rewatch_leaves_an_earlier_recording_beyond_undo() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::AddEntry(entry("Show")));
+        let id = app.state().library[0].id;
+        watch_past_threshold(&mut app, "Show - 01.mkv");
+        let RecordOutcome::Recorded(row) = outcome(&app) else {
+            panic!("episode 1 did not record");
+        };
+        app.dispatch(Command::SetStatus {
+            id,
+            status: WatchStatus::Completed,
+        });
+        app.dispatch(Command::SetRewatching {
+            id,
+            rewatching: true,
+        });
+        assert_eq!(app.state().library[0].progress, 0);
+
+        // Undo puts back the progress the recording wrote, and only while the
+        // show still stands there. The rewatch moved it, so the rewatch holds
+        // and the refusal is a notice rather than a silent rollback.
+        app.dispatch(Command::UndoRecording(row));
+        assert_eq!(app.state().library[0].progress, 0);
+        assert_eq!(app.state().notices.len(), 1);
+    }
+
+    #[test]
+    fn a_failed_rewatch_write_leaves_one_notice() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::AddEntry(entry("Show")));
+        let before = app.state().library.clone();
+        app.dispatch(Command::SetRewatching {
+            id: EntryId(9999),
+            rewatching: true,
+        });
+        assert_eq!(app.state().notices.len(), 1);
+        assert_eq!(app.state().library, before);
     }
 
     #[test]
