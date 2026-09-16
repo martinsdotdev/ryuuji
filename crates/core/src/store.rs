@@ -268,6 +268,35 @@ impl Store {
         Ok(stored)
     }
 
+    /// Starts or stops watching a finished show again. Starting one puts the
+    /// count back to zero in the same transaction, because the gates read
+    /// progress as well as the flag: a finished show stands at its total, so
+    /// its next episode would be refused as not the next one however the flag
+    /// reads. Starting a rewatch already under way changes nothing, so a
+    /// second press cannot throw away the episodes it has counted.
+    pub fn set_rewatching(
+        &mut self,
+        id: EntryId,
+        rewatching: bool,
+    ) -> Result<LibraryEntry, StoreError> {
+        let _span = info_span!("store.set_rewatching", id = %id, rewatching).entered();
+        let tx = self.conn.transaction().map_err(query_failed)?;
+        let entry = fetch(&tx, id)?;
+        let stored = if entry.rewatching == rewatching {
+            entry
+        } else {
+            let flagged = set_column(&tx, id, "rewatching", rewatching)?;
+            if rewatching {
+                set_column(&tx, id, "progress", 0)?
+            } else {
+                flagged
+            }
+        };
+        tx.commit().map_err(query_failed)?;
+        info!(progress = stored.progress, "rewatching updated");
+        Ok(stored)
+    }
+
     fn update(
         &mut self,
         id: EntryId,
@@ -2271,6 +2300,76 @@ mod tests {
         assert!(again.rewatching);
         assert!(!fresh.rewatching);
         assert_eq!(store.entries().unwrap(), vec![again, fresh]);
+    }
+
+    /// A finished show as one stands before a rewatch: at its total, where
+    /// the gates refuse the next episode as not the next one.
+    fn finished(store: &mut Store, title: &str) -> LibraryEntry {
+        store
+            .add(NewEntry {
+                status: WatchStatus::Completed,
+                progress: 12,
+                total: Some(12),
+                ..entry(title)
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn starting_a_rewatch_zeroes_the_count_in_one_write() {
+        let (_tmp, dir) = open_tmp();
+        let mut store = open(&dir);
+        let done = finished(&mut store, "Show");
+        let again = store.set_rewatching(done.id, true).unwrap();
+        assert!(again.rewatching);
+        // The gates read progress as well as the flag, so a rewatch left at
+        // the total would still have its first episode refused.
+        assert_eq!(again.progress, 0);
+        assert_eq!(store.entries().unwrap(), vec![again]);
+    }
+
+    #[test]
+    fn starting_a_rewatch_already_under_way_changes_nothing() {
+        let (_tmp, dir) = open_tmp();
+        let mut store = open(&dir);
+        let done = finished(&mut store, "Show");
+        store.set_rewatching(done.id, true).unwrap();
+        let watched = store.set_progress(done.id, 3).unwrap();
+        // A second press must not throw away what the rewatch has counted.
+        assert_eq!(store.set_rewatching(done.id, true).unwrap(), watched);
+    }
+
+    #[test]
+    fn stopping_a_rewatch_leaves_the_count_where_it_reached() {
+        let (_tmp, dir) = open_tmp();
+        let mut store = open(&dir);
+        let done = finished(&mut store, "Show");
+        store.set_rewatching(done.id, true).unwrap();
+        store.set_progress(done.id, 3).unwrap();
+        let stopped = store.set_rewatching(done.id, false).unwrap();
+        assert!(!stopped.rewatching);
+        // Three episodes were watched, so three is the honest reading.
+        assert_eq!(stopped.progress, 3);
+    }
+
+    #[test]
+    fn a_rewatch_of_a_show_that_is_not_there_is_not_found() {
+        let (_tmp, dir) = open_tmp();
+        let mut store = open(&dir);
+        assert!(matches!(
+            store.set_rewatching(EntryId(9999), true),
+            Err(StoreError::NotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn a_rewatch_survives_a_reopen() {
+        let (_tmp, dir) = open_tmp();
+        let mut store = open(&dir);
+        let done = finished(&mut store, "Show");
+        let again = store.set_rewatching(done.id, true).unwrap();
+        drop(store);
+        assert_eq!(open(&dir).entries().unwrap(), vec![again]);
     }
 
     #[test]

@@ -250,6 +250,12 @@ pub enum Command {
         id: EntryId,
         status: WatchStatus,
     },
+    /// Starts or stops watching a finished show again. Starting one puts the
+    /// show's count back to zero, so its episodes record from the first.
+    SetRewatching {
+        id: EntryId,
+        rewatching: bool,
+    },
     SetTheme(ThemePreference),
     /// Drops the oldest notice.
     DismissNotice,
