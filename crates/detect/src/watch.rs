@@ -244,6 +244,10 @@ struct Publisher {
     dedup: Dedup,
     mirror: Mirror,
     sink: Sink,
+    /// When the current run of unreadable matched sessions began, and `None`
+    /// while every matched session reads. It lives here because only the
+    /// loop sees one refresh after another.
+    unreadable_since: Option<SystemTime>,
 }
 
 impl Publisher {
@@ -266,7 +270,12 @@ impl Publisher {
             );
         }
         self.mirror.publish(rows);
-        let observation = observe(&watched, unreadable, now, &reading.front);
+        self.unreadable_since = match (unreadable, self.unreadable_since) {
+            (0, _) => None,
+            (_, started @ Some(_)) => started,
+            (_, None) => Some(now),
+        };
+        let observation = observe(&watched, self.unreadable_since, now, &reading.front);
         if let Some(event) = self.dedup.admit(observation, now) {
             debug!(
                 player = event.player,
@@ -308,6 +317,7 @@ impl Spawn {
             dedup: Dedup::default(),
             mirror: self.mirror,
             sink: self.sink,
+            unreadable_since: None,
         };
         let mut mailbox = Mailbox { rx: self.rx };
         let mut wake = Wake {
@@ -338,7 +348,7 @@ mod tests {
 
     use super::*;
     use crate::players::Player;
-    use crate::session::{Front, Matched, Seen, SessionSnapshot, SessionState};
+    use crate::session::{Front, Matched, SETTLE, Seen, SessionSnapshot, SessionState};
 
     fn new_mailbox() -> (Sender<Msg>, Mailbox) {
         let (tx, rx) = channel();
@@ -365,6 +375,38 @@ mod tests {
         }
     }
 
+    /// A paused browser tab, optionally beside a player whose session cannot
+    /// be read yet, which is what a launch looks like.
+    fn paused_tab<'a>(
+        brave: &'a Player,
+        mpv: &'a Player,
+        title: &str,
+        unreadable: bool,
+    ) -> Reading<'a> {
+        let mut sessions = vec![Seen {
+            app_id: "brave.exe".to_owned(),
+            status: "Paused".to_owned(),
+            tracking: Tracking::Watched(Matched {
+                player: brave,
+                snapshot: SessionSnapshot {
+                    title: title.to_owned(),
+                    ..snapshot(SessionState::Paused)
+                },
+            }),
+        }];
+        if unreadable {
+            sessions.push(Seen {
+                app_id: "mpv.exe".to_owned(),
+                status: "Opened".to_owned(),
+                tracking: Tracking::Unreadable(mpv),
+            });
+        }
+        Reading {
+            front: Front::Unknown,
+            sessions,
+        }
+    }
+
     fn now() -> SystemTime {
         SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)
     }
@@ -373,6 +415,7 @@ mod tests {
         let (tx, rx) = channel();
         let publisher = Publisher {
             dedup: Dedup::default(),
+            unreadable_since: None,
             mirror: Mirror::default(),
             sink: Box::new(move |event| {
                 let _ = tx.send(event);
@@ -556,5 +599,42 @@ mod tests {
         assert_eq!(pace, Pace::Idle);
         assert_eq!(events.try_recv().unwrap().status, PlaybackStatus::Stopped);
         assert!(publisher.mirror.read().is_empty());
+    }
+
+    #[test]
+    fn a_paused_player_beside_an_unreadable_session_is_held_back_then_reported() {
+        let mpv = player("mpv");
+        let brave = player("brave");
+        let (mut publisher, events) = publisher();
+
+        let pace = publisher.publish(paused_tab(&brave, &mpv, "Video", true), now());
+        assert_eq!(pace, Pace::Poll(POLL), "the second look has to happen");
+        assert!(events.try_recv().is_err(), "the tab was reported at once");
+
+        let pace = publisher.publish(paused_tab(&brave, &mpv, "Video", true), now() + SETTLE);
+        assert_eq!(pace, Pace::Poll(POLL));
+        assert_eq!(events.try_recv().unwrap().player, "brave");
+    }
+
+    #[test]
+    fn the_hold_starts_over_when_every_matched_session_reads_again() {
+        let mpv = player("mpv");
+        let brave = player("brave");
+        let (mut publisher, events) = publisher();
+        publisher.publish(paused_tab(&brave, &mpv, "Video", true), now());
+        publisher.publish(paused_tab(&brave, &mpv, "Video", true), now() + SETTLE);
+        events.try_recv().unwrap();
+
+        let pace = publisher.publish(paused_tab(&brave, &mpv, "Video", false), now() + SETTLE);
+        assert_eq!(pace, Pace::Idle);
+        assert!(events.try_recv().is_err(), "the same tab was sunk twice");
+
+        // A different title, so dedup cannot hide what the hold did.
+        let pace = publisher.publish(
+            paused_tab(&brave, &mpv, "Another video", true),
+            now() + SETTLE,
+        );
+        assert_eq!(pace, Pace::Poll(POLL));
+        assert!(events.try_recv().is_err(), "the hold did not start over");
     }
 }

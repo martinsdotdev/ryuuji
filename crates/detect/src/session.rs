@@ -189,22 +189,45 @@ pub(crate) enum Observation {
     Seen(PlaybackEvent),
 }
 
-/// `unreadable` counts matched sessions whose media or timeline could not be
-/// read this refresh. They keep the observation out of `Absent`, since a
-/// session that exists but is not ready has not vanished.
+/// How long a session that is merely paused waits while another matched
+/// session is still unreadable. A player publishes its media properties
+/// within about two seconds of starting, measured on 2026-09-15, and the
+/// wait is only observable at poll boundaries, so this is that measurement
+/// and one poll over.
+pub(crate) const SETTLE: Duration = Duration::from_secs(3);
+
+/// `unreadable_since` is when the current run of matched sessions whose
+/// media or timeline could not be read began, and `None` when every matched
+/// session read this refresh. Such a session keeps the observation out of
+/// `Absent`, since one that exists but is not ready has not vanished, and
+/// for [`SETTLE`] it also holds back a session that is merely paused: at
+/// launch a player's session is unreadable for a moment while a paused
+/// browser tab reads fine, and reporting the tab first shows it as what is
+/// playing. A playing session is reported whatever is unreadable.
 pub(crate) fn observe(
     matched: &[Matched<'_>],
-    unreadable: usize,
+    unreadable_since: Option<SystemTime>,
     now: SystemTime,
     front: &Front,
 ) -> Observation {
     match choose(matched) {
+        Some(chosen)
+            if chosen.snapshot.state != SessionState::Playing
+                && settling(unreadable_since, now) =>
+        {
+            Observation::Transitional
+        }
         Some(chosen) => {
             normalize(chosen, now, front).map_or(Observation::Transitional, Observation::Seen)
         }
-        None if unreadable > 0 => Observation::Transitional,
+        None if unreadable_since.is_some() => Observation::Transitional,
         None => Observation::Absent,
     }
+}
+
+/// Whether the unreadable run is young enough to keep waiting on.
+fn settling(since: Option<SystemTime>, now: SystemTime) -> bool {
+    since.is_some_and(|since| now.duration_since(since).unwrap_or_default() < SETTLE)
 }
 
 /// Drops observations equal to the last one in every field except
@@ -575,7 +598,7 @@ mod tests {
     #[test]
     fn unreadable_matched_session_is_transitional_not_absent() {
         assert!(matches!(
-            observe(&[], 1, now(), &Front::Unknown),
+            observe(&[], Some(now()), now(), &Front::Unknown),
             Observation::Transitional
         ));
         let mpv = player("mpv");
@@ -584,7 +607,7 @@ mod tests {
             snapshot: snapshot(SessionState::Playing),
         }];
         assert!(matches!(
-            observe(&matched, 1, now(), &Front::Unknown),
+            observe(&matched, Some(now()), now(), &Front::Unknown),
             Observation::Seen(_)
         ));
     }
@@ -592,8 +615,48 @@ mod tests {
     #[test]
     fn no_sessions_is_absent() {
         assert!(matches!(
-            observe(&[], 0, now(), &Front::Unknown),
+            observe(&[], None, now(), &Front::Unknown),
             Observation::Absent
+        ));
+    }
+
+    #[test]
+    fn a_paused_candidate_waits_while_a_matched_session_is_still_unreadable() {
+        let mpv = player("mpv");
+        let matched = [Matched {
+            player: &mpv,
+            snapshot: snapshot(SessionState::Paused),
+        }];
+        assert!(matches!(
+            observe(&matched, Some(now()), now(), &Front::Unknown),
+            Observation::Transitional
+        ));
+    }
+
+    #[test]
+    fn a_paused_candidate_is_reported_once_the_settling_window_has_passed() {
+        let mpv = player("mpv");
+        let matched = [Matched {
+            player: &mpv,
+            snapshot: snapshot(SessionState::Paused),
+        }];
+        assert!(matches!(
+            observe(&matched, Some(now() - SETTLE), now(), &Front::Unknown),
+            Observation::Seen(_)
+        ));
+    }
+
+    #[test]
+    fn a_playing_candidate_is_reported_however_long_a_session_has_been_unreadable() {
+        let mpv = player("mpv");
+        let matched = [Matched {
+            player: &mpv,
+            snapshot: snapshot(SessionState::Playing),
+        }];
+        let hour = Duration::from_secs(3_600);
+        assert!(matches!(
+            observe(&matched, Some(now() - hour), now(), &Front::Unknown),
+            Observation::Seen(_)
         ));
     }
 
