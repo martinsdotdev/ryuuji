@@ -30,7 +30,7 @@ pub use history::{
 };
 // The zone history reads its local days in; a shell passes the system's.
 pub use jiff::tz::TimeZone;
-pub use matching::{Confidence, Link, ProposedMatch, normalize_title, propose, similarity};
+pub use matching::{Confidence, Link, ProposedMatch, normalize_title, similarity};
 pub use playback::{PlaybackEvent, PlaybackSource, PlaybackStatus};
 // Shells depend on this crate alone, so the parser reaches them through here.
 pub use ryuuji_parse::{Certainty, ElementKind, Options, parse};

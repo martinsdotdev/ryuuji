@@ -562,6 +562,45 @@ impl Store {
             .transpose()
     }
 
+    /// Remembers that a title names `entry`, so matching settles on it from
+    /// now on. `needle` is the folded form matching compares, and
+    /// `parsed_title` what was read; writing the same needle again replaces
+    /// the row, which is how a wrong confirmation is corrected.
+    pub fn remember_title(
+        &mut self,
+        needle: &str,
+        parsed_title: &str,
+        entry: EntryId,
+    ) -> Result<(), StoreError> {
+        let _span = info_span!("store.remember_title", entry = %entry).entered();
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO aliases (needle, parsed_title, entry_id, at) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![needle, parsed_title, entry.0, unix_now()],
+            )
+            .map_err(query_failed)?;
+        info!("title remembered");
+        Ok(())
+    }
+
+    /// Every remembered title with the entry it names.
+    pub fn aliases(&self) -> Result<Vec<(String, EntryId)>, StoreError> {
+        let _span = info_span!("store.aliases").entered();
+        let mut stmt = self
+            .conn
+            .prepare("SELECT needle, entry_id FROM aliases ORDER BY needle")
+            .map_err(query_failed)?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, EntryId(row.get(1)?))))
+            .map_err(query_failed)?;
+        let aliases = rows
+            .map(|row| row.map_err(query_failed))
+            .collect::<Result<Vec<_>, _>>()?;
+        debug!(count = aliases.len(), "aliases loaded");
+        Ok(aliases)
+    }
+
     #[cfg(test)]
     pub(crate) fn execute_raw(&self, sql: &str) {
         self.conn.execute(sql, []).unwrap();
@@ -966,13 +1005,13 @@ mod tests {
     }
 
     #[test]
-    fn open_creates_the_database_at_schema_v6_without_recovery() {
+    fn open_creates_the_database_at_schema_v7_without_recovery() {
         let (_tmp, dir) = open_tmp();
         let store = open(&dir);
         assert!(dir.root().join("library.sqlite").is_file());
-        assert_eq!(schema_version(&store), SchemaVersion(6));
+        assert_eq!(schema_version(&store), SchemaVersion(7));
         drop(store);
-        assert_eq!(schema_version(&open(&dir)), SchemaVersion(6));
+        assert_eq!(schema_version(&open(&dir)), SchemaVersion(7));
     }
 
     #[test]
@@ -999,7 +1038,7 @@ mod tests {
         let recovered = recovered.expect("recovery reported");
         assert_backup_name(&backup_name(&recovered));
         assert_eq!(fs::read(&recovered.backup).unwrap(), garbage);
-        assert_eq!(schema_version(&store), SchemaVersion(6));
+        assert_eq!(schema_version(&store), SchemaVersion(7));
         assert_eq!(store.entries().unwrap(), vec![]);
         drop(store);
 
@@ -1101,7 +1140,7 @@ mod tests {
     }
 
     #[test]
-    fn v1_library_migrates_to_v6_and_keeps_entries() {
+    fn v1_library_migrates_to_v7_and_keeps_entries() {
         let (_tmp, dir) = open_tmp();
         let conn = Connection::open(dir.library_db()).unwrap();
         conn.execute_batch(include_str!("../migrations/01-entries/up.sql"))
@@ -1116,7 +1155,7 @@ mod tests {
         drop(conn);
 
         let store = open(&dir);
-        assert_eq!(schema_version(&store), SchemaVersion(6));
+        assert_eq!(schema_version(&store), SchemaVersion(7));
         let entries = store.entries().unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].title, "Show");
@@ -1146,7 +1185,7 @@ mod tests {
         drop(conn);
 
         let store = open(&dir);
-        assert_eq!(schema_version(&store), SchemaVersion(6));
+        assert_eq!(schema_version(&store), SchemaVersion(7));
         assert_eq!(store.last_match().unwrap(), Some(proposed("Show - 03.mkv")));
     }
 
@@ -1173,12 +1212,12 @@ mod tests {
         drop(conn);
 
         let store = open(&dir);
-        assert_eq!(schema_version(&store), SchemaVersion(6));
+        assert_eq!(schema_version(&store), SchemaVersion(7));
         assert_eq!(store.last_match().unwrap(), Some(proposed("Show - 03.mkv")));
     }
 
     #[test]
-    fn v4_library_migrates_to_v6_with_an_empty_history() {
+    fn v4_library_migrates_to_v7_with_an_empty_history() {
         let (_tmp, dir) = open_tmp();
         let conn = Connection::open(dir.library_db()).unwrap();
         for sql in [
@@ -1207,7 +1246,7 @@ mod tests {
         drop(conn);
 
         let store = open(&dir);
-        assert_eq!(schema_version(&store), SchemaVersion(6));
+        assert_eq!(schema_version(&store), SchemaVersion(7));
         let entries = store.entries().unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].id, EntryId(7));
@@ -1248,7 +1287,7 @@ mod tests {
         drop(conn);
 
         let store = open(&dir);
-        assert_eq!(schema_version(&store), SchemaVersion(6));
+        assert_eq!(schema_version(&store), SchemaVersion(7));
         let at = |secs: u64| UNIX_EPOCH + Duration::from_secs(secs);
         let copied = |id: i64,
                       episode: RangeInclusive<u32>,
@@ -1303,6 +1342,37 @@ mod tests {
             .collect();
         assert!(names.iter().any(|name| name == "history_by_entry"));
         assert!(!names.iter().any(|name| name.starts_with("watch_events")));
+    }
+
+    #[test]
+    fn v6_library_migrates_to_v7_with_no_remembered_titles() {
+        let (_tmp, dir) = open_tmp();
+        let conn = Connection::open(dir.library_db()).unwrap();
+        for sql in [
+            include_str!("../migrations/01-entries/up.sql"),
+            include_str!("../migrations/02-last_match/up.sql"),
+            include_str!("../migrations/03-drop_outcome/up.sql"),
+            include_str!("../migrations/04-episode_range_and_rewatching/up.sql"),
+            include_str!("../migrations/05-watch_events/up.sql"),
+            include_str!("../migrations/06-history/up.sql"),
+        ] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO entries (id, title, status, progress, total, updated_at) \
+             VALUES (7, 'Show', 'watching', 3, 12, 0)",
+            [],
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 6).unwrap();
+        drop(conn);
+
+        let store = open(&dir);
+        assert_eq!(schema_version(&store), SchemaVersion(7));
+        let entries = store.entries().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, EntryId(7));
+        assert_eq!(store.aliases().unwrap(), vec![]);
     }
 
     fn watching(id: EntryId, episode: RangeInclusive<u32>) -> NewRecording {
@@ -1785,6 +1855,45 @@ mod tests {
     fn last_match_is_none_until_saved() {
         let (_tmp, dir) = open_tmp();
         assert_eq!(open(&dir).last_match().unwrap(), None);
+    }
+
+    #[test]
+    fn a_remembered_title_round_trips_and_survives_reopen() {
+        let (_tmp, dir) = open_tmp();
+        let mut store = open(&dir);
+        let id = store
+            .add(entry("Frieren: Beyond Journey's End"))
+            .unwrap()
+            .id;
+        assert_eq!(store.aliases().unwrap(), vec![]);
+
+        store
+            .remember_title("sousou no frieren", "Sousou no Frieren", id)
+            .unwrap();
+        let remembered = vec![("sousou no frieren".to_owned(), id)];
+        assert_eq!(store.aliases().unwrap(), remembered);
+        drop(store);
+        assert_eq!(open(&dir).aliases().unwrap(), remembered);
+    }
+
+    #[test]
+    fn remembering_the_same_title_again_replaces_the_row() {
+        let (_tmp, dir) = open_tmp();
+        let mut store = open(&dir);
+        let first = store.add(entry("First")).unwrap().id;
+        let second = store.add(entry("Second")).unwrap().id;
+
+        store.remember_title("show", "Show", first).unwrap();
+        store.remember_title("show", "Show", second).unwrap();
+        assert_eq!(store.aliases().unwrap(), vec![("show".to_owned(), second)]);
+    }
+
+    #[test]
+    fn a_remembered_title_for_an_unknown_entry_is_rejected_by_the_foreign_key() {
+        let (_tmp, dir) = open_tmp();
+        let mut store = open(&dir);
+        assert!(store.remember_title("show", "Show", EntryId(999)).is_err());
+        assert_eq!(store.aliases().unwrap(), vec![]);
     }
 
     #[test]
