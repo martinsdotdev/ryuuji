@@ -14,9 +14,9 @@ use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 
 use ryuuji_core::{
-    AppState, Certainty, Command, DataDir, Detail, ElementKind, LibraryEntry, Link, Notice,
-    NowPlaying, Options, Page, ProposedMatch, RecordOutcome, Ryuuji, StoreError, ThemePreference,
-    WatchProgress, error_chain, parse,
+    AppState, Certainty, Command, DataDir, Detail, ElementKind, EntryId, LibraryEntry, Link,
+    Notice, NowPlaying, Options, Page, ProposedMatch, RecordOutcome, Ryuuji, StoreError,
+    ThemePreference, WatchProgress, error_chain, normalize_title, parse,
 };
 use windows_reactor::*;
 
@@ -27,6 +27,39 @@ use crate::ui::{
 };
 
 const PAGE_PADDING: f64 = 24.0;
+
+/// How many shows a library needs before the picker offers a search box.
+/// Below this the whole list is on screen, so a field to narrow it would be
+/// one more thing to read for nothing.
+const SEARCH_FROM: usize = 12;
+
+/// One library row the picker can offer, worked out by the caller so the
+/// page still never reasons about the library itself.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ShowChoice {
+    entry: EntryId,
+    title: String,
+    /// `7 / 28`, or `7` on a show whose length is unknown.
+    progress: String,
+}
+
+/// Every show that could be picked, by title, so the order does not shift
+/// under the person as their progress changes.
+fn choices(library: &[LibraryEntry]) -> Vec<ShowChoice> {
+    let mut choices: Vec<ShowChoice> = library
+        .iter()
+        .map(|entry| ShowChoice {
+            entry: entry.id,
+            title: entry.title.clone(),
+            progress: match entry.total {
+                Some(total) => format!("{} / {total}", entry.progress),
+                None => entry.progress.to_string(),
+            },
+        })
+        .collect();
+    choices.sort_by(|a, b| a.title.cmp(&b.title));
+    choices
+}
 
 /// Builds one page's body. Which page is the shell's decision, not this
 /// module's, so nothing here reads [`AppState::page`].
@@ -53,6 +86,7 @@ pub fn body(
                     .map(|m| m.title_in(&state.library).to_owned()),
                 undo_applies: undo_applies(state),
                 ignored: state.ignored,
+                shows: choices(&state.library),
                 detection_down,
             },
         ),
@@ -184,6 +218,9 @@ struct NowPlayingProps {
     /// file reads as unmatched, so without this the card would offer to add
     /// the very show it was told to leave alone.
     ignored: bool,
+    /// The shows the picker can offer, resolved by the caller for the same
+    /// reason as `title`.
+    shows: Vec<ShowChoice>,
     detection_down: bool,
 }
 
@@ -250,13 +287,20 @@ fn now_playing(props: &NowPlayingProps, cx: &mut RenderCx) -> Element {
     match &props.last_match {
         Some(m) => vstack((
             top,
-            proposal_card(
-                m,
-                props.title.as_deref().unwrap_or_else(|| m.shown_title()),
-                idle,
-                props.ignored,
-                now,
-                props.dispatch.clone(),
+            component(
+                proposal_card,
+                ProposalProps {
+                    dispatch: props.dispatch.clone(),
+                    m: m.clone(),
+                    title: props
+                        .title
+                        .clone()
+                        .unwrap_or_else(|| m.shown_title().to_owned()),
+                    idle,
+                    ignored: props.ignored,
+                    shows: props.shows.clone(),
+                    now,
+                },
             ),
         ))
         .spacing(8.0)
@@ -311,38 +355,70 @@ fn undo_applies(state: &AppState) -> bool {
 const IGNORED_BODY: &str = "Ryuuji won't propose this file again, or any file whose title reads \
                             the same. It keeps playing; nothing else changes.";
 
-fn proposal_card(
-    m: &ProposedMatch,
-    title: &str,
+/// What the proposal card is handed. `dispatch` is fresh every render and
+/// compares by identity, so it comes first and the props compare stops
+/// there, as [`NowPlayingProps`] does. The card is a component of its own
+/// because the picker's state belongs with the card that draws it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ProposalProps {
+    dispatch: Dispatch<Command>,
+    m: ProposedMatch,
+    title: String,
     idle: bool,
     ignored: bool,
+    shows: Vec<ShowChoice>,
     now: SystemTime,
-    dispatch: Dispatch<Command>,
-) -> Element {
-    let title = text_block(title).font_size(20.0).semibold().wrap();
-    let body = if ignored {
+}
+
+fn proposal_card(props: &ProposalProps, cx: &mut RenderCx) -> Element {
+    let (picking, set_picking) = cx.use_state(false);
+    let (query, set_query) = cx.use_state(String::new());
+    let (chosen, set_chosen) = cx.use_state(None::<EntryId>);
+
+    let m = &props.m;
+    let title = text_block(props.title.clone())
+        .font_size(20.0)
+        .semibold()
+        .wrap();
+    let body = if props.ignored {
         IGNORED_BODY.to_owned()
     } else {
-        match_caption(m, idle, now)
+        match_caption(m, props.idle, props.now)
     };
     let mut children: Vec<Element> = vec![title.into(), caption(body).into()];
     let rows = fact_rows(m);
     if !rows.is_empty() {
         children.push(facts_grid(&rows));
     }
-    let buttons: Vec<Element> = offers(m, ignored)
+    let buttons: Vec<Element> = offers(m, props.ignored)
         .into_iter()
-        .map(|offer| {
-            let dispatch = dispatch.clone();
-            let (label, command) = match offer {
-                Offer::Confirm(label) => (label, Command::ConfirmProposedMatch),
-                Offer::Add => ("Add to library".to_owned(), Command::AddProposedToLibrary),
-                Offer::Ignore => ("Ignore this file".to_owned(), Command::IgnoreFile),
-                Offer::StopIgnoring => ("Stop ignoring".to_owned(), Command::StopIgnoring),
-            };
-            button(label)
-                .on_click(move || dispatch.call(command.clone()))
-                .into()
+        .map(|offer| match offer {
+            // The only offer that opens something rather than deciding
+            // something, so it moves local state instead of dispatching.
+            Offer::PickAnother => {
+                let set_picking = set_picking.clone();
+                button("Pick another show")
+                    .on_click(move || set_picking.call(true))
+                    .into()
+            }
+            Offer::Confirm(label) => {
+                dispatching(&props.dispatch, label, Command::ConfirmProposedMatch)
+            }
+            Offer::Add => dispatching(
+                &props.dispatch,
+                "Add to library".to_owned(),
+                Command::AddProposedToLibrary,
+            ),
+            Offer::Ignore => dispatching(
+                &props.dispatch,
+                "Ignore this file".to_owned(),
+                Command::IgnoreFile,
+            ),
+            Offer::StopIgnoring => dispatching(
+                &props.dispatch,
+                "Stop ignoring".to_owned(),
+                Command::StopIgnoring,
+            ),
         })
         .collect();
     if !buttons.is_empty() {
@@ -353,7 +429,108 @@ fn proposal_card(
                 .into(),
         );
     }
+    if picking {
+        let shown = matching_shows(&props.shows, &query);
+        let selected = selected_index(&shown, chosen);
+        let mut section: Vec<Element> = vec![caption("Pick another show").into()];
+        if props.shows.len() >= SEARCH_FROM {
+            section.push(
+                auto_suggest_box(query.clone())
+                    .placeholder_text("Search your library")
+                    .on_text_changed(set_query.clone())
+                    .into(),
+            );
+        }
+        let picked = shown.clone();
+        let set_row = set_chosen.clone();
+        section.push(
+            list_view(shown, |show: &ShowChoice, _| {
+                hstack((
+                    text_block(show.title.clone()).wrap(),
+                    text_block(show.progress.clone()).foreground(ThemeRef::SecondaryText),
+                ))
+                .spacing(16.0)
+            })
+            .with_key_selector(|show: &ShowChoice| show.entry.to_string())
+            .selection_mode(SelectionMode::Single)
+            .selected_index(selected)
+            .on_selection_changed(move |index: i32| {
+                set_row.call(
+                    usize::try_from(index)
+                        .ok()
+                        .and_then(|index| picked.get(index))
+                        .map(|show| show.entry),
+                );
+            })
+            .height(200.0)
+            .into(),
+        );
+        section.push(caption("Only shows already in your library.").into());
+        let close = {
+            let set_picking = set_picking.clone();
+            let set_query = set_query.clone();
+            let set_chosen = set_chosen.clone();
+            move || {
+                set_picking.call(false);
+                set_query.call(String::new());
+                set_chosen.call(None);
+            }
+        };
+        let use_it = {
+            let dispatch = props.dispatch.clone();
+            let close = close.clone();
+            move || {
+                if let Some(entry) = chosen {
+                    dispatch.call(Command::PickShow(entry));
+                }
+                close();
+            }
+        };
+        section.push(
+            hstack((
+                button("Use this show").on_click(use_it),
+                button("Cancel").on_click(close),
+            ))
+            .spacing(8.0)
+            .horizontal_alignment(HorizontalAlignment::Left)
+            .into(),
+        );
+        children.push(vstack(section).spacing(8.0).into());
+    }
     card_frame(vstack(children).spacing(4.0)).into()
+}
+
+/// A card button that hands one command to the core and nothing else.
+fn dispatching(dispatch: &Dispatch<Command>, label: String, command: Command) -> Element {
+    let dispatch = dispatch.clone();
+    button(label)
+        .on_click(move || dispatch.call(command.clone()))
+        .into()
+}
+
+/// Where the chosen show sits among the rows on screen, or -1 when it is not
+/// among them. The choice is held by id and looked up here, never held as a
+/// position: filtering moves rows under an index, so a kept index would
+/// quietly select a different show and correct the episode onto one the
+/// person never picked.
+fn selected_index(shown: &[ShowChoice], chosen: Option<EntryId>) -> i32 {
+    shown
+        .iter()
+        .position(|show| Some(show.entry) == chosen)
+        .and_then(|index| i32::try_from(index).ok())
+        .unwrap_or(-1)
+}
+
+/// The shows a query narrows to, folded the way matching compares titles, so
+/// `frieren beyond journeys end` finds `Frieren: Beyond Journey's End`. An
+/// empty query folds to nothing and keeps every show.
+fn matching_shows(shows: &[ShowChoice], query: &str) -> Vec<ShowChoice> {
+    let needle = normalize_title(query);
+    shows
+        .iter()
+        .filter(|show| normalize_title(&show.title).contains(&needle))
+        .cloned()
+        .collect()
 }
 
 /// One thing the proposal card can offer under the facts.
@@ -364,6 +541,8 @@ enum Offer {
     Confirm(String),
     /// Nothing in the library matches, so the show can be added from here.
     Add,
+    /// Name the show yourself, whatever the matcher decided.
+    PickAnother,
     /// Stop proposing this file at all.
     Ignore,
     /// The way back, and the only thing an ignored file offers.
@@ -372,8 +551,10 @@ enum Offer {
 
 /// The buttons the card shows, in the order they sit. An ignored file reads
 /// as unmatched, so it is answered before the link is: it offers the way
-/// back rather than offering to add the show it was told to leave alone. A
-/// settled show states itself and asks nothing.
+/// back rather than offering to add the show it was told to leave alone.
+/// Everything else can be named by hand, a settled show included -- two
+/// shows whose titles fold alike match exactly and wrongly, and that is the
+/// case with nothing else to offer.
 fn offers(m: &ProposedMatch, ignored: bool) -> Vec<Offer> {
     if ignored {
         return vec![Offer::StopIgnoring];
@@ -384,10 +565,11 @@ fn offers(m: &ProposedMatch, ignored: bool) -> Vec<Offer> {
                 Some(episode) => format!("Yes, record {}", episode_text(episode).to_lowercase()),
                 None => "Yes, this is the show".to_owned(),
             }),
+            Offer::PickAnother,
             Offer::Ignore,
         ],
         Link::Unmatched => vec![Offer::Add, Offer::Ignore],
-        Link::Exact(_) => Vec::new(),
+        Link::Exact(_) => vec![Offer::PickAnother],
     }
 }
 
@@ -704,6 +886,7 @@ mod tests {
             offers(&guess(Some(1..=1)), false),
             vec![
                 Offer::Confirm("Yes, record episode 1".to_owned()),
+                Offer::PickAnother,
                 Offer::Ignore
             ]
         );
@@ -711,6 +894,7 @@ mod tests {
             offers(&guess(Some(1..=12)), false),
             vec![
                 Offer::Confirm("Yes, record episodes 1\u{2013}12".to_owned()),
+                Offer::PickAnother,
                 Offer::Ignore
             ]
         );
@@ -718,15 +902,127 @@ mod tests {
             offers(&guess(None), false),
             vec![
                 Offer::Confirm("Yes, this is the show".to_owned()),
+                Offer::PickAnother,
                 Offer::Ignore
             ]
         );
         assert_eq!(offers(&proposal(), false), vec![Offer::Add, Offer::Ignore]);
+        // A settled show used to offer nothing, which left the commonest
+        // wrong match -- two titles that fold alike -- with no way out.
         let exact = ProposedMatch {
             link: Link::Exact(entry.id),
             ..proposal()
         };
-        assert_eq!(offers(&exact, false), vec![]);
+        assert_eq!(offers(&exact, false), vec![Offer::PickAnother]);
+    }
+
+    /// A library row with the same id as the seeded show; only the title
+    /// and the numbers matter here, and the shell cannot mint an entry id.
+    fn choice(
+        entry: &LibraryEntry,
+        title: &str,
+        progress: u32,
+        total: Option<u32>,
+    ) -> LibraryEntry {
+        LibraryEntry {
+            title: title.to_owned(),
+            progress,
+            total,
+            ..entry.clone()
+        }
+    }
+
+    #[test]
+    fn the_picker_lists_shows_by_title_with_their_progress() {
+        let (entry, _) = recorded_show();
+        let shows = choices(&[
+            choice(&entry, "Vinland Saga", 2, Some(24)),
+            choice(&entry, "Frieren", 7, None),
+        ]);
+        assert_eq!(
+            shows
+                .iter()
+                .map(|show| show.title.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Frieren", "Vinland Saga"]
+        );
+        assert_eq!(shows[0].progress, "7");
+        assert_eq!(shows[1].progress, "2 / 24");
+    }
+
+    /// Two library rows with ids of their own. The shell cannot mint an
+    /// entry id, so they come from a real store.
+    fn two_shows() -> (LibraryEntry, LibraryEntry) {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = DataDir::at(tmp.path()).unwrap();
+        let Opened { mut store, .. } = Store::open(&dir).unwrap();
+        let first = store
+            .add(NewEntry {
+                title: "Frieren".to_owned(),
+                status: WatchStatus::Watching,
+                progress: 7,
+                total: Some(28),
+                rewatching: false,
+            })
+            .unwrap();
+        let second = store
+            .add(NewEntry {
+                title: "Vinland Saga".to_owned(),
+                status: WatchStatus::Watching,
+                progress: 2,
+                total: Some(24),
+                rewatching: false,
+            })
+            .unwrap();
+        (first, second)
+    }
+
+    #[test]
+    fn the_picker_follows_the_chosen_show_rather_than_its_position() {
+        let (frieren, vinland) = two_shows();
+        let shows = choices(&[frieren.clone(), vinland.clone()]);
+        assert_eq!(selected_index(&shows, None), -1);
+        assert_eq!(selected_index(&shows, Some(frieren.id)), 0);
+        assert_eq!(selected_index(&shows, Some(vinland.id)), 1);
+
+        // Narrowing drops the first row, so the chosen show moves from the
+        // second position to the first. Held as a position it would still
+        // read 1, which is now either another show or nothing at all.
+        let narrowed = matching_shows(&shows, "vinland");
+        assert_eq!(narrowed.len(), 1);
+        assert_eq!(selected_index(&narrowed, Some(vinland.id)), 0);
+        assert_eq!(selected_index(&narrowed, Some(frieren.id)), -1);
+    }
+
+    #[test]
+    fn the_picker_narrows_on_a_folded_title_and_keeps_everything_when_empty() {
+        let (entry, _) = recorded_show();
+        let shows = choices(&[
+            choice(&entry, "Frieren: Beyond Journey's End", 7, Some(28)),
+            choice(&entry, "Vinland Saga Season 2", 2, Some(24)),
+        ]);
+        let titles = |query| {
+            matching_shows(&shows, query)
+                .iter()
+                .map(|show| show.title.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(matching_shows(&shows, "").len(), 2);
+        assert_eq!(titles("frieren beyond"), ["Frieren: Beyond Journey's End"]);
+        // Punctuation folds away, so the colon need not be typed.
+        assert_eq!(
+            titles("frieren beyond journey"),
+            ["Frieren: Beyond Journey's End"]
+        );
+        // An apostrophe folds to a space rather than closing the word up, so
+        // `Journey's` reads as two words: typing the contraction whole finds
+        // nothing. The same fold decides every match in the app, so the
+        // picker agrees with the matcher rather than being kinder than it.
+        assert!(titles("journeys").is_empty());
+        assert_eq!(titles("journey"), ["Frieren: Beyond Journey's End"]);
+        // A season phrase folds to its bare number, both sides alike.
+        assert_eq!(titles("vinland saga 2"), ["Vinland Saga Season 2"]);
+        assert!(matching_shows(&shows, "bleach").is_empty());
     }
 
     #[test]
