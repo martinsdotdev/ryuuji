@@ -123,6 +123,7 @@ impl Ryuuji {
             }
             Command::Playback(event) => self.observe_playback(event),
             Command::AddProposedToLibrary => self.add_proposed(),
+            Command::ConfirmProposedMatch => self.confirm_proposed(),
             Command::UndoRecording(id) => self.undo_recording(id),
         }
     }
@@ -378,6 +379,66 @@ impl Ryuuji {
             watch = watch.id.as_i64(),
             "proposal added to library"
         );
+    }
+
+    /// Takes the person's word that the guess names the right show: the
+    /// title is remembered, so later files of that show match on their own,
+    /// and the standing proposal becomes exact. Only a guess can be
+    /// confirmed, so a second click changes nothing.
+    fn confirm_proposed(&mut self) {
+        let Some((last, entry)) = self
+            .state
+            .last_match
+            .clone()
+            .and_then(|last| match last.link {
+                Link::Likely(entry) => Some((last, entry)),
+                Link::Exact(_) | Link::Unmatched => None,
+            })
+        else {
+            return;
+        };
+        let needle = matching::normalize_title(&last.parsed_title);
+        let outcome = self
+            .store
+            .remember_title(&needle, &last.parsed_title, entry);
+        if commit(&mut self.state.notices, "remembered title", outcome).is_none() {
+            return;
+        }
+        self.aliases.remember(&last.parsed_title, entry);
+        tracing::info!(entry = entry.as_i64(), title = %last.parsed_title, "match confirmed");
+        self.record_match(ProposedMatch {
+            link: Link::Exact(entry),
+            ..last
+        });
+        self.record_now();
+    }
+
+    /// Runs the gates against the standing viewing without waiting for a
+    /// playback event. Confirming under a paused player would otherwise
+    /// leave the card saying the episode was not recorded, since detection
+    /// sends nothing until playback moves.
+    fn record_now(&mut self) {
+        let Some(progress) = self.state.watch_progress else {
+            return;
+        };
+        if progress.accrued < progress.threshold
+            || matches!(
+                progress.outcome,
+                RecordOutcome::Recorded(_) | RecordOutcome::Undone
+            )
+        {
+            return;
+        }
+        let outcome = match self.earned() {
+            Ok(write) => self.record(write),
+            Err(decline) => {
+                self.log_decline(decline);
+                RecordOutcome::Declined(decline)
+            }
+        };
+        if let Some(progress) = self.state.watch_progress.as_mut() {
+            progress.outcome = outcome;
+        }
     }
 
     #[cfg(test)]
@@ -1825,5 +1886,123 @@ mod tests {
         assert_eq!(outcome(&app), RecordOutcome::Undone);
         assert_eq!(app.state().library[0].progress, 0);
         assert_eq!(stored_watches(&dir).len(), 1);
+    }
+
+    /// The library title and the file's differ by one letter, which is what
+    /// the matcher calls a guess.
+    fn guessing(app: &mut Ryuuji) {
+        app.dispatch(Command::AddEntry(entry("Frieren Beyond Journeys End")));
+    }
+
+    fn stored_aliases(dir: &DataDir) -> Vec<(String, EntryId)> {
+        Store::open(dir).unwrap().store.aliases().unwrap()
+    }
+
+    #[test]
+    fn confirming_a_guess_records_it_into_the_declined_row() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        guessing(&mut app);
+        let id = app.state().library[0].id;
+        watch_past_threshold(&mut app, "Frieren Beyond Journey End - 01.mkv");
+        assert_eq!(outcome(&app), RecordOutcome::Declined(Decline::NotExact));
+        let declined = stored_watches(&dir);
+        assert_eq!(declined.len(), 1);
+
+        app.dispatch(Command::ConfirmProposedMatch);
+        assert_eq!(app.state().library[0].progress, 1);
+        assert_eq!(
+            app.state().last_match.as_ref().unwrap().link,
+            Link::Exact(id)
+        );
+        let watches = stored_watches(&dir);
+        assert_eq!(watches.len(), 1);
+        assert_eq!(watches[0].id, declined[0].id);
+        assert_eq!(watches[0].link, Link::Exact(id));
+        assert_eq!(outcome(&app), RecordOutcome::Recorded(watches[0].id));
+        assert_eq!(stored_writes(&dir), vec![(1..=1, 0, 1)]);
+        assert_eq!(stored_aliases(&dir).len(), 1);
+        assert!(app.state().notices.is_empty());
+    }
+
+    #[test]
+    fn confirming_short_of_the_threshold_records_nothing_and_keeps_counting() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        guessing(&mut app);
+        app.dispatch(Command::Playback(playing(
+            "Frieren Beyond Journey End - 01.mkv",
+        )));
+
+        app.dispatch(Command::ConfirmProposedMatch);
+        assert_eq!(outcome(&app), RecordOutcome::Counting);
+        assert_eq!(app.state().library[0].progress, 0);
+        assert_eq!(stored_watches(&dir), vec![]);
+
+        app.dispatch(Command::Playback(later(
+            "Frieren Beyond Journey End - 01.mkv",
+            720,
+        )));
+        assert_eq!(app.state().library[0].progress, 1);
+        assert_eq!(stored_writes(&dir), vec![(1..=1, 0, 1)]);
+    }
+
+    #[test]
+    fn a_confirmed_title_records_on_its_own_next_time() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        guessing(&mut app);
+        watch_past_threshold(&mut app, "Frieren Beyond Journey End - 01.mkv");
+        app.dispatch(Command::ConfirmProposedMatch);
+        assert_eq!(app.state().library[0].progress, 1);
+        drop(app);
+
+        let mut app = Ryuuji::open(&dir).unwrap();
+        watch_past_threshold(&mut app, "Frieren Beyond Journey End - 02.mkv");
+        assert_eq!(app.state().library[0].progress, 2);
+        assert_eq!(stored_declines(&dir), vec![]);
+        assert_eq!(stored_writes(&dir), vec![(1..=1, 0, 1), (2..=2, 1, 2)]);
+    }
+
+    #[test]
+    fn confirming_does_nothing_without_a_guess() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::Playback(playing("Show - 01.mkv")));
+        app.dispatch(Command::ConfirmProposedMatch);
+        assert!(app.state().library.is_empty());
+        assert_eq!(stored_aliases(&dir), vec![]);
+
+        app.dispatch(Command::AddEntry(entry("Show")));
+        let id = app.state().library[0].id;
+        assert_eq!(
+            app.state().last_match.as_ref().unwrap().link,
+            Link::Exact(id)
+        );
+        app.dispatch(Command::ConfirmProposedMatch);
+        assert_eq!(stored_aliases(&dir), vec![]);
+        assert!(app.state().notices.is_empty());
+    }
+
+    #[test]
+    fn a_failed_remember_leaves_one_notice_and_no_relink() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        guessing(&mut app);
+        let id = app.state().library[0].id;
+        watch_past_threshold(&mut app, "Frieren Beyond Journey End - 01.mkv");
+        app.store_mut().execute_raw("DROP TABLE aliases");
+
+        app.dispatch(Command::ConfirmProposedMatch);
+        assert!(matches!(
+            app.state().notices.as_slice(),
+            [Notice::SaveFailed { .. }]
+        ));
+        assert_eq!(
+            app.state().last_match.as_ref().unwrap().link,
+            Link::Likely(id)
+        );
+        assert_eq!(app.state().library[0].progress, 0);
+        assert_eq!(stored_writes(&dir), vec![]);
     }
 }

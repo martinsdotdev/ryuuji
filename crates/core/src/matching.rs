@@ -268,6 +268,12 @@ impl Aliases {
         )
     }
 
+    /// Keeps `parsed_title` as naming `entry` for the rest of this run; the
+    /// store holds the same answer for the next one.
+    pub(crate) fn remember(&mut self, parsed_title: &str, entry: EntryId) {
+        self.0.insert(normalize_title(parsed_title), entry);
+    }
+
     fn entry(&self, needle: &str) -> Option<EntryId> {
         self.0.get(needle).copied()
     }

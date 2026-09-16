@@ -256,6 +256,10 @@ pub enum Command {
     /// it was before the write, while the entry still stands where the
     /// recording left it.
     UndoRecording(HistoryId),
+    /// Says the guessed show is the right one: remembers the title, relinks
+    /// the standing proposal as exact, and records at once when the viewing
+    /// has already earned it.
+    ConfirmProposedMatch,
 }
 
 /// Something the shell should surface to the user until dismissed.
