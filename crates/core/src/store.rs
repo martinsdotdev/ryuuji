@@ -22,7 +22,7 @@ const SELECT_ENTRY: &str = "SELECT id, title, status, progress, total, rewatchin
 
 const SELECT_WATCH: &str = "SELECT id, entry_id, episode, episode_end, progress_before, progress, \
                             raw_title, player, at, undone_at, parsed_title, confidence, reason, \
-                            recorded_at, added_at, kind FROM history";
+                            recorded_at, added_at, kind, moved_to, moved_from FROM history";
 
 /// The `kind` of a row the set columns cannot tell apart. Every other row
 /// leaves it null and is read from its columns, as rows written before the
@@ -164,6 +164,20 @@ pub struct Recording {
     pub watch: Watch,
 }
 
+/// A correction as stored: both shows and both rows, after the same
+/// transaction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Moved {
+    /// The show the episode came off, with its progress put back.
+    pub from: LibraryEntry,
+    /// The show it landed on, with the episode written.
+    pub to: LibraryEntry,
+    /// The old row, now undone and naming where the episode went.
+    pub undone: Watch,
+    /// The new row, naming where the episode came from.
+    pub watch: Watch,
+}
+
 /// An entry added from a watch and that watch's row carrying the mark, both
 /// as stored after the same transaction.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -277,34 +291,13 @@ impl Store {
         )
         .entered();
         let tx = self.conn.transaction().map_err(query_failed)?;
-        let before = fetch(&tx, recording.entry)?;
-        let entry = set_column(&tx, recording.entry, "progress", *recording.episode.end())?;
-        let columns = params![
-            recording.entry.0,
-            recording.episode.start(),
-            recording.episode.end(),
-            before.progress,
-            entry.progress,
-            recording.raw_title,
-            recording.player,
-            unix_now(),
-            recording.parsed_title,
-            Confidence::Exact.tag(),
-        ];
-        let id = match recording.watch {
-            None => {
-                tx.execute(
-                    "INSERT INTO history (entry_id, episode, episode_end, progress_before, \
-                     progress, raw_title, player, at, parsed_title, confidence, recorded_at) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?8)",
-                    columns,
-                )
-                .map_err(query_failed)?;
-                HistoryId(tx.last_insert_rowid())
-            }
+        let (entry, id) = match recording.watch {
+            None => write_recording(&tx, &recording, None)?,
             // The row keeps the `at` it was opened with; the reason goes,
             // since the recording is what the watch came to.
             Some(id) => {
+                let before = fetch(&tx, recording.entry)?;
+                let entry = set_column(&tx, recording.entry, "progress", *recording.episode.end())?;
                 let changed = tx
                     .execute(
                         &format!(
@@ -314,13 +307,24 @@ impl Store {
                              reason = NULL WHERE id = {} AND progress IS NULL",
                             id.0
                         ),
-                        columns,
+                        params![
+                            recording.entry.0,
+                            recording.episode.start(),
+                            recording.episode.end(),
+                            before.progress,
+                            entry.progress,
+                            recording.raw_title,
+                            recording.player,
+                            unix_now(),
+                            recording.parsed_title,
+                            Confidence::Exact.tag(),
+                        ],
                     )
                     .map_err(query_failed)?;
                 if changed == 0 {
                     return Err(StoreError::WatchClosed { id });
                 }
-                id
+                (entry, id)
             }
         };
         let watch = fetch_watch(&tx, id)?;
@@ -469,6 +473,64 @@ impl Store {
         tx.commit().map_err(query_failed)?;
         info!(entry = %entry.id, progress = entry.progress, "progress restored");
         Ok(Recording { entry, watch })
+    }
+
+    /// Takes back the recording in `from` and writes the same episode
+    /// against `to`, in one transaction, so the episode is never off one
+    /// show without having landed on the other. Both rows stay: the old one
+    /// marked undone and naming where the episode went, the new one naming
+    /// where it came from, because nothing here deletes and because a
+    /// recorded row is never rewritten. Everything but the show is read off
+    /// the old row, so a correction cannot describe a different file than
+    /// the one it corrects. Refused on the same terms as [`Store::undo`]: a
+    /// row that is not a standing recording, or an entry that has moved
+    /// past what that recording wrote.
+    pub fn move_recording(&mut self, from: HistoryId, to: EntryId) -> Result<Moved, StoreError> {
+        let _span = info_span!("store.move_recording", watch = %from, entry = %to).entered();
+        let tx = self.conn.transaction().map_err(query_failed)?;
+        let old = find_watch(&tx, from)?.ok_or(StoreError::NothingToUndo { id: from })?;
+        let (source, recorded, episode) = match (old.outcome, old.link.entry(), old.episode.clone())
+        {
+            (WatchOutcome::Recorded(write), Some(entry), Some(episode))
+                if write.undone_at.is_none() =>
+            {
+                (entry, write, episode)
+            }
+            _ => return Err(StoreError::NothingToUndo { id: from }),
+        };
+        if fetch(&tx, source)?.progress != recorded.progress {
+            return Err(StoreError::MovedOn { id: from });
+        }
+        tx.execute(
+            "UPDATE history SET undone_at = ?1, moved_to = ?2 WHERE id = ?3",
+            params![unix_now(), to.0, from.0],
+        )
+        .map_err(query_failed)?;
+        set_column(&tx, source, "progress", recorded.progress_before)?;
+        let (landed, id) = write_recording(
+            &tx,
+            &NewRecording {
+                watch: None,
+                entry: to,
+                episode,
+                raw_title: old.raw_title.clone(),
+                parsed_title: old.parsed_title.clone(),
+                player: old.player.clone(),
+            },
+            Some(source),
+        )?;
+        // Read back rather than reuse the restored value, so moving an
+        // episode between two rows of the same show still reports where
+        // that show ended up.
+        let moved = Moved {
+            from: fetch(&tx, source)?,
+            to: landed,
+            undone: fetch_watch(&tx, from)?,
+            watch: fetch_watch(&tx, id)?,
+        };
+        tx.commit().map_err(query_failed)?;
+        info!(from = %from, watch = %id, entry = %to, "recording moved");
+        Ok(moved)
     }
 
     /// Up to `limit` watches, newest first, for one entry or all of them.
@@ -941,6 +1003,8 @@ struct RawWatch {
     recorded_at: Option<i64>,
     added_at: Option<i64>,
     kind: Option<String>,
+    moved_to: Option<i64>,
+    moved_from: Option<i64>,
 }
 
 impl RawWatch {
@@ -963,6 +1027,8 @@ impl RawWatch {
             recorded_at: row.get(13)?,
             added_at: row.get(14)?,
             kind: row.get(15)?,
+            moved_to: row.get(16)?,
+            moved_from: row.get(17)?,
         })
     }
 
@@ -1026,8 +1092,46 @@ impl RawWatch {
             link,
             outcome,
             added_at: self.added_at.map(|at| time(at, "added_at")).transpose()?,
+            // Annotations: neither ever stands alone, so neither reaches the
+            // outcome ladder above.
+            moved_to: self.moved_to.map(EntryId),
+            moved_from: self.moved_from.map(EntryId),
         })
     }
+}
+
+/// Moves an entry's progress to the episode and opens the row that says so.
+/// `moved_from` names the show a correction took the episode off, which only
+/// [`Store::move_recording`] sets; an ordinary recording leaves it null.
+/// Both writers come through here, so there is one insert into `history` to
+/// keep in step with the columns rather than two drifting apart.
+fn write_recording(
+    conn: &Connection,
+    recording: &NewRecording,
+    moved_from: Option<EntryId>,
+) -> Result<(LibraryEntry, HistoryId), StoreError> {
+    let before = fetch(conn, recording.entry)?;
+    let entry = set_column(conn, recording.entry, "progress", *recording.episode.end())?;
+    conn.execute(
+        "INSERT INTO history (entry_id, episode, episode_end, progress_before, progress, \
+         raw_title, player, at, parsed_title, confidence, recorded_at, moved_from) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?8, ?11)",
+        params![
+            recording.entry.0,
+            recording.episode.start(),
+            recording.episode.end(),
+            before.progress,
+            entry.progress,
+            recording.raw_title,
+            recording.player,
+            unix_now(),
+            recording.parsed_title,
+            Confidence::Exact.tag(),
+            moved_from.map(EntryId::as_i64),
+        ],
+    )
+    .map_err(query_failed)?;
+    Ok((entry, HistoryId(conn.last_insert_rowid())))
 }
 
 /// The two episode columns read as one value: both NULL is no episode, both
@@ -1116,13 +1220,13 @@ mod tests {
     }
 
     #[test]
-    fn open_creates_the_database_at_schema_v8_without_recovery() {
+    fn open_creates_the_database_at_schema_v9_without_recovery() {
         let (_tmp, dir) = open_tmp();
         let store = open(&dir);
         assert!(dir.root().join("library.sqlite").is_file());
-        assert_eq!(schema_version(&store), SchemaVersion(8));
+        assert_eq!(schema_version(&store), SchemaVersion(9));
         drop(store);
-        assert_eq!(schema_version(&open(&dir)), SchemaVersion(8));
+        assert_eq!(schema_version(&open(&dir)), SchemaVersion(9));
     }
 
     #[test]
@@ -1149,7 +1253,7 @@ mod tests {
         let recovered = recovered.expect("recovery reported");
         assert_backup_name(&backup_name(&recovered));
         assert_eq!(fs::read(&recovered.backup).unwrap(), garbage);
-        assert_eq!(schema_version(&store), SchemaVersion(8));
+        assert_eq!(schema_version(&store), SchemaVersion(9));
         assert_eq!(store.entries().unwrap(), vec![]);
         drop(store);
 
@@ -1251,7 +1355,7 @@ mod tests {
     }
 
     #[test]
-    fn v1_library_migrates_to_v7_and_keeps_entries() {
+    fn v1_library_migrates_and_keeps_entries() {
         let (_tmp, dir) = open_tmp();
         let conn = Connection::open(dir.library_db()).unwrap();
         conn.execute_batch(include_str!("../migrations/01-entries/up.sql"))
@@ -1266,7 +1370,7 @@ mod tests {
         drop(conn);
 
         let store = open(&dir);
-        assert_eq!(schema_version(&store), SchemaVersion(8));
+        assert_eq!(schema_version(&store), SchemaVersion(9));
         let entries = store.entries().unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].title, "Show");
@@ -1296,7 +1400,7 @@ mod tests {
         drop(conn);
 
         let store = open(&dir);
-        assert_eq!(schema_version(&store), SchemaVersion(8));
+        assert_eq!(schema_version(&store), SchemaVersion(9));
         assert_eq!(store.last_match().unwrap(), Some(proposed("Show - 03.mkv")));
     }
 
@@ -1323,12 +1427,12 @@ mod tests {
         drop(conn);
 
         let store = open(&dir);
-        assert_eq!(schema_version(&store), SchemaVersion(8));
+        assert_eq!(schema_version(&store), SchemaVersion(9));
         assert_eq!(store.last_match().unwrap(), Some(proposed("Show - 03.mkv")));
     }
 
     #[test]
-    fn v4_library_migrates_to_v7_with_an_empty_history() {
+    fn v4_library_migrates_with_an_empty_history() {
         let (_tmp, dir) = open_tmp();
         let conn = Connection::open(dir.library_db()).unwrap();
         for sql in [
@@ -1357,7 +1461,7 @@ mod tests {
         drop(conn);
 
         let store = open(&dir);
-        assert_eq!(schema_version(&store), SchemaVersion(8));
+        assert_eq!(schema_version(&store), SchemaVersion(9));
         let entries = store.entries().unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].id, EntryId(7));
@@ -1398,7 +1502,7 @@ mod tests {
         drop(conn);
 
         let store = open(&dir);
-        assert_eq!(schema_version(&store), SchemaVersion(8));
+        assert_eq!(schema_version(&store), SchemaVersion(9));
         let at = |secs: u64| UNIX_EPOCH + Duration::from_secs(secs);
         let copied = |id: i64,
                       episode: RangeInclusive<u32>,
@@ -1422,6 +1526,8 @@ mod tests {
                 undone_at,
             }),
             added_at: None,
+            moved_to: None,
+            moved_from: None,
         };
         assert_eq!(
             store.history(None, 10).unwrap(),
@@ -1456,7 +1562,7 @@ mod tests {
     }
 
     #[test]
-    fn v6_library_migrates_to_v8_with_nothing_remembered_or_ignored() {
+    fn v6_library_migrates_with_nothing_remembered_or_ignored() {
         let (_tmp, dir) = open_tmp();
         let conn = Connection::open(dir.library_db()).unwrap();
         for sql in [
@@ -1479,12 +1585,55 @@ mod tests {
         drop(conn);
 
         let store = open(&dir);
-        assert_eq!(schema_version(&store), SchemaVersion(8));
+        assert_eq!(schema_version(&store), SchemaVersion(9));
         let entries = store.entries().unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].id, EntryId(7));
         assert_eq!(store.aliases().unwrap(), vec![]);
         assert!(store.ignored().unwrap().is_empty());
+    }
+
+    #[test]
+    fn v8_library_migrates_to_v9_with_nothing_moved() {
+        let (_tmp, dir) = open_tmp();
+        let conn = Connection::open(dir.library_db()).unwrap();
+        for sql in [
+            include_str!("../migrations/01-entries/up.sql"),
+            include_str!("../migrations/02-last_match/up.sql"),
+            include_str!("../migrations/03-drop_outcome/up.sql"),
+            include_str!("../migrations/04-episode_range_and_rewatching/up.sql"),
+            include_str!("../migrations/05-watch_events/up.sql"),
+            include_str!("../migrations/06-history/up.sql"),
+            include_str!("../migrations/07-aliases/up.sql"),
+            include_str!("../migrations/08-ignored/up.sql"),
+        ] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO entries (id, title, status, progress, total, updated_at) \
+             VALUES (7, 'Show', 'watching', 1, 12, 0)",
+            [],
+        )
+        .unwrap();
+        // A recording written before the columns existed still reads.
+        conn.execute(
+            "INSERT INTO history (id, entry_id, episode, episode_end, progress_before, progress, \
+             raw_title, player, at, parsed_title, confidence, recorded_at) \
+             VALUES (1, 7, 1, 1, 0, 1, 'Show - 01.mkv', 'mpv', 100, 'Show', 'exact', 100)",
+            [],
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 8).unwrap();
+        drop(conn);
+
+        let store = open(&dir);
+        assert_eq!(schema_version(&store), SchemaVersion(9));
+        assert_eq!(store.entries().unwrap().len(), 1);
+        let watches = watches(&store);
+        assert_eq!(watches.len(), 1);
+        assert_eq!(watches[0].moved_to, None);
+        assert_eq!(watches[0].moved_from, None);
+        assert_eq!(recorded(&watches[0]).progress, 1);
     }
 
     fn watching(id: EntryId, episode: RangeInclusive<u32>) -> NewRecording {
@@ -1869,6 +2018,117 @@ mod tests {
         ));
         assert_eq!(store.entries().unwrap(), vec![moved_on]);
         assert_eq!(watches(&store), vec![undone.watch]);
+    }
+
+    #[test]
+    fn moving_a_recording_takes_it_off_one_show_and_writes_it_against_another() {
+        let (_tmp, dir) = open_tmp();
+        let mut store = open(&dir);
+        let wrong = store.add(entry("Wrong")).unwrap().id;
+        let right = store.add(entry("Right")).unwrap().id;
+        let first = store.record(watching(wrong, 1..=1)).unwrap().watch;
+
+        let moved = store.move_recording(first.id, right).unwrap();
+        assert_eq!((moved.from.id, moved.from.progress), (wrong, 0));
+        assert_eq!((moved.to.id, moved.to.progress), (right, 1));
+
+        // The old row says where the episode went, and is undone.
+        assert_eq!(moved.undone.id, first.id);
+        assert_eq!(moved.undone.moved_to, Some(right));
+        assert_eq!(moved.undone.moved_from, None);
+        assert!(recorded(&moved.undone).undone_at.is_some());
+
+        // The new row says where it came from, and describes the same file.
+        assert_eq!(moved.watch.moved_from, Some(wrong));
+        assert_eq!(moved.watch.moved_to, None);
+        assert_eq!(moved.watch.link, Link::Exact(right));
+        assert_eq!(moved.watch.episode, first.episode);
+        assert_eq!(moved.watch.raw_title, first.raw_title);
+        assert_eq!(moved.watch.parsed_title, first.parsed_title);
+        assert_eq!(moved.watch.player, first.player);
+        let write = recorded(&moved.watch);
+        assert_eq!((write.progress_before, write.progress), (0, 1));
+        assert_eq!(write.undone_at, None);
+
+        assert_eq!(watches(&store), vec![moved.watch, moved.undone]);
+    }
+
+    #[test]
+    fn moving_refuses_anything_but_a_recording_the_entry_still_stands_at() {
+        let (_tmp, dir) = open_tmp();
+        let mut store = open(&dir);
+        let wrong = store.add(entry("Wrong")).unwrap().id;
+        let right = store.add(entry("Right")).unwrap().id;
+
+        let declined = store
+            .decline(None, &proposed("Show - 03.mkv"), Decline::NotExact)
+            .unwrap();
+        assert!(matches!(
+            store.move_recording(declined.id, right),
+            Err(StoreError::NothingToUndo { id }) if id == declined.id
+        ));
+
+        let undone = store.record(watching(wrong, 1..=1)).unwrap().watch.id;
+        store.undo(undone).unwrap();
+        assert!(matches!(
+            store.move_recording(undone, right),
+            Err(StoreError::NothingToUndo { id }) if id == undone
+        ));
+
+        let standing = store.record(watching(wrong, 1..=1)).unwrap().watch.id;
+        store.set_progress(wrong, 5).unwrap();
+        assert!(matches!(
+            store.move_recording(standing, right),
+            Err(StoreError::MovedOn { id }) if id == standing
+        ));
+        // The refusals changed nothing: the chosen show never moved.
+        assert_eq!(store.entries().unwrap()[1].progress, 0);
+    }
+
+    #[test]
+    fn moving_onto_an_unknown_show_leaves_the_recording_standing() {
+        let (_tmp, dir) = open_tmp();
+        let mut store = open(&dir);
+        let id = store.add(entry("Show")).unwrap().id;
+        let before = store.record(watching(id, 1..=1)).unwrap();
+
+        // The row is marked undone before the chosen show is read, so this
+        // proves the whole correction rolls back rather than half-applying.
+        assert!(
+            store
+                .move_recording(before.watch.id, EntryId(id.as_i64() + 100))
+                .is_err()
+        );
+        assert_eq!(store.entries().unwrap(), vec![before.entry]);
+        assert_eq!(watches(&store), vec![before.watch]);
+    }
+
+    #[test]
+    fn a_moved_pair_survives_reopen() {
+        let (_tmp, dir) = open_tmp();
+        let mut store = open(&dir);
+        let wrong = store.add(entry("Wrong")).unwrap().id;
+        let right = store.add(entry("Right")).unwrap().id;
+        let first = store.record(watching(wrong, 1..=1)).unwrap().watch;
+        let moved = store.move_recording(first.id, right).unwrap();
+        drop(store);
+
+        let store = open(&dir);
+        assert_eq!(watches(&store), vec![moved.watch, moved.undone]);
+        assert_eq!(store.entries().unwrap(), vec![moved.from, moved.to]);
+    }
+
+    #[test]
+    fn episodes_recorded_since_counts_a_moved_episode_once() {
+        let (_tmp, dir) = open_tmp();
+        let mut store = open(&dir);
+        let wrong = store.add(entry("Wrong")).unwrap().id;
+        let right = store.add(entry("Right")).unwrap().id;
+        let first = store.record(watching(wrong, 1..=1)).unwrap().watch;
+        assert_eq!(store.episodes_recorded_since(UNIX_EPOCH).unwrap(), 1);
+
+        store.move_recording(first.id, right).unwrap();
+        assert_eq!(store.episodes_recorded_since(UNIX_EPOCH).unwrap(), 1);
     }
 
     #[test]
