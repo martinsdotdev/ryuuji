@@ -445,11 +445,7 @@ fn proposal_card(props: &ProposalProps, cx: &mut RenderCx) -> Element {
         let set_row = set_chosen.clone();
         section.push(
             list_view(shown, |show: &ShowChoice, _| {
-                hstack((
-                    text_block(show.title.clone()).wrap(),
-                    text_block(show.progress.clone()).foreground(ThemeRef::SecondaryText),
-                ))
-                .spacing(16.0)
+                text_block(row_label(show)).wrap()
             })
             .with_key_selector(|show: &ShowChoice| show.entry.to_string())
             .selection_mode(SelectionMode::Single)
@@ -506,6 +502,15 @@ fn dispatching(dispatch: &Dispatch<Command>, label: String, command: Command) ->
     button(label)
         .on_click(move || dispatch.call(command.clone()))
         .into()
+}
+
+/// What a picker row announces. WinUI names a list row after its content,
+/// and a row built of two text blocks falls back to its position, so a
+/// screen reader would read "1" rather than the show it is about to correct
+/// an episode onto. Naming it outright says the show and where it stands,
+/// in the order the row reads.
+fn row_label(show: &ShowChoice) -> String {
+    format!("{}, {}", show.title, show.progress)
 }
 
 /// Where the chosen show sits among the rows on screen, or -1 when it is not
@@ -975,6 +980,17 @@ mod tests {
             })
             .unwrap();
         (first, second)
+    }
+
+    #[test]
+    fn a_picker_row_announces_the_show_rather_than_its_position() {
+        let (entry, _) = recorded_show();
+        let shows = choices(&[
+            choice(&entry, "Frieren", 7, Some(28)),
+            choice(&entry, "Vinland Saga", 2, None),
+        ]);
+        assert_eq!(row_label(&shows[0]), "Frieren, 7 / 28");
+        assert_eq!(row_label(&shows[1]), "Vinland Saga, 2");
     }
 
     #[test]
