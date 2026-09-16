@@ -190,8 +190,8 @@ impl Ryuuji {
     /// Logs a refusal in the viewing's row, once per change of reason, and
     /// only for a title that named an episode: a clip or a file with no
     /// number is not a watch worth a row. A viewing whose row has recorded
-    /// logs nothing more, which is the relaunch case, where the range gate
-    /// refuses the episode that was just written.
+    /// logs nothing more, which is the relaunch-after-undo case: the row
+    /// still says Recorded while the gates run again.
     fn log_decline(&mut self, decline: Decline) {
         let logged = Logged::Declined(decline);
         if self
@@ -1415,10 +1415,11 @@ mod tests {
         assert_eq!(outcome(&app), RecordOutcome::Recorded(watches[1].id));
     }
 
-    /// `recorded` lives in memory only. On relaunch `resume` seeds the key
-    /// from the persisted match so the title is not re-proposed, and the
-    /// accrual starts over; what stops a second write is the range gate,
-    /// since `progress + 1` is no longer in `1..=1`.
+    /// On relaunch `resume` seeds the key from the persisted match so the
+    /// title is not re-proposed, and brings back the recording the newest
+    /// row still holds, so the viewing reads as recorded rather than running
+    /// the gates and refusing the episode it wrote. The accrual starts over,
+    /// and reaching the threshold again writes nothing.
     #[test]
     fn a_relaunch_under_the_same_title_does_not_record_again() {
         let (_tmp, dir) = open_tmp();
@@ -1436,7 +1437,10 @@ mod tests {
         app.dispatch(Command::Playback(later("Show - 01.mkv", 2_720)));
         assert_eq!(app.state().last_match, proposed);
         assert!(app.state().watch_progress.unwrap().accrued >= Duration::from_secs(710));
-        assert_eq!(outcome(&app), RecordOutcome::Declined(Decline::NotNext));
+        assert_eq!(
+            outcome(&app),
+            RecordOutcome::Recorded(stored_watches(&dir)[0].id)
+        );
         assert_eq!(app.state().library[0].progress, 1);
         assert_eq!(stored_progress(&dir, id), 1);
         assert_eq!(stored_writes(&dir), vec![(1..=1, 0, 1)]);
@@ -1688,7 +1692,7 @@ mod tests {
         app.dispatch(Command::Playback(elsewhere(2_000)));
         app.dispatch(Command::Playback(later("Show - 01.mkv", 2_001)));
         app.dispatch(Command::Playback(later("Show - 01.mkv", 2_721)));
-        assert_eq!(outcome(&app), RecordOutcome::Declined(Decline::NotNext));
+        assert_eq!(outcome(&app), RecordOutcome::Recorded(watch));
         let watches = stored_watches(&dir);
         assert_eq!(watches.len(), 1);
         assert_eq!(watches[0].id, watch);
@@ -1710,10 +1714,33 @@ mod tests {
         app.dispatch(Command::Playback(elsewhere(2_010)));
         app.dispatch(Command::Playback(later("Show - 01.mkv", 2_011)));
         app.dispatch(Command::Playback(later("Show - 01.mkv", 2_731)));
-        assert_eq!(outcome(&app), RecordOutcome::Declined(Decline::NotNext));
+        assert_eq!(outcome(&app), RecordOutcome::Recorded(watch));
         let watches = stored_watches(&dir);
         assert_eq!(watches.len(), 1);
         assert_eq!(watches[0].id, watch);
+    }
+
+    /// The relaunch reads as recorded from its first event, so Undo is
+    /// offered again and puts the progress back.
+    #[test]
+    fn undo_after_a_relaunch_restores_the_progress() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        let watch = record_first_episode(&mut app, &dir);
+        drop(app);
+
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::Playback(later("Show - 01.mkv", 2_000)));
+        assert_eq!(outcome(&app), RecordOutcome::Recorded(watch));
+
+        app.dispatch(Command::UndoRecording(watch));
+        assert_eq!(app.state().library[0].progress, 0);
+        assert_eq!(stored_progress(&dir, app.state().library[0].id), 0);
+        assert_eq!(outcome(&app), RecordOutcome::Undone);
+        let watches = stored_watches(&dir);
+        assert_eq!(watches.len(), 1);
+        assert!(recorded(&watches[0]).undone_at.is_some());
+        assert!(app.state().notices.is_empty());
     }
 
     /// Switching to another player and back after Add to library, with the

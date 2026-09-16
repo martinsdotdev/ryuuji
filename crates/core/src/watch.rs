@@ -126,9 +126,13 @@ impl WatchSession {
     /// Picks up the viewing the persisted match describes, so a relaunch
     /// under a still-open player does not propose the same title again.
     /// When the newest history row belongs to that viewing it is picked up
-    /// too, so the relaunch does not log the same watch a second time. Like
-    /// any viewing it is set aside when detection reports another player
-    /// first, as it does at launch, and comes back with its player.
+    /// too, so the relaunch does not log the same watch a second time. A
+    /// recording that row still holds comes back with it, so the viewing
+    /// reads as recorded instead of running the gates again and refusing the
+    /// episode it just wrote; one already undone does not, so watching the
+    /// file again records it afresh. Like any viewing it is set aside when
+    /// detection reports another player first, as it does at launch, and
+    /// comes back with its player.
     pub(crate) fn resume(
         last_match: Option<&ProposedMatch>,
         newest: Option<&Watch>,
@@ -139,6 +143,12 @@ impl WatchSession {
             Viewing {
                 row: newest.map(|watch| watch.id),
                 logged: newest.map(|watch| Logged::of(watch.outcome)),
+                recorded: newest.and_then(|watch| match watch.outcome {
+                    WatchOutcome::Recorded(write) if write.undone_at.is_none() => {
+                        Some(RecordOutcome::Recorded(watch.id))
+                    }
+                    _ => None,
+                }),
                 ..Viewing::new(key)
             }
         });
@@ -305,7 +315,7 @@ impl Cursor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Link, PlaybackSource};
+    use crate::{Link, PlaybackSource, Recorded};
 
     fn at(secs: u64) -> SystemTime {
         SystemTime::UNIX_EPOCH + Duration::from_secs(secs)
@@ -520,6 +530,40 @@ mod tests {
             WatchSession::resume(None, Some(&declined)),
             WatchSession::default()
         );
+    }
+
+    fn recorded_row(undone_at: Option<SystemTime>) -> Watch {
+        newest_row(
+            "Show - 03.mkv",
+            WatchOutcome::Recorded(Recorded {
+                progress_before: 2,
+                progress: 3,
+                at: at(800),
+                undone_at,
+            }),
+        )
+    }
+
+    #[test]
+    fn resume_picks_up_a_standing_recording() {
+        let mut session = WatchSession::resume(Some(&persisted_match()), Some(&recorded_row(None)));
+        let observed = session.observe(&playing("Show - 03.mkv"));
+        assert!(!observed.switched);
+        assert_eq!(
+            observed.progress.unwrap().recorded,
+            Some(RecordOutcome::Recorded(HistoryId(7)))
+        );
+        assert_eq!(session.open_row(), None);
+        assert_eq!(session.logged(), Some(Logged::Recorded));
+    }
+
+    #[test]
+    fn resume_ignores_an_undone_recording() {
+        let undone = recorded_row(Some(at(900)));
+        let mut session = WatchSession::resume(Some(&persisted_match()), Some(&undone));
+        let observed = session.observe(&playing("Show - 03.mkv"));
+        assert_eq!(observed.progress.unwrap().recorded, None);
+        assert_eq!(session.logged(), Some(Logged::Recorded));
     }
 
     #[test]
