@@ -151,9 +151,14 @@ pub(crate) fn normalize(
         SessionState::Paused => PlaybackStatus::Paused,
         SessionState::Settling => return None,
     };
+    let title = if private_placeholder(&snapshot.title, &matched.player.name) {
+        String::new()
+    } else {
+        snapshot.title.clone()
+    };
     Some(PlaybackEvent {
         player: matched.player.name.clone(),
-        title: snapshot.title.clone(),
+        title,
         status,
         position: advanced_position(snapshot, now).saturating_sub(snapshot.start),
         duration: snapshot.end.saturating_sub(snapshot.start),
@@ -161,6 +166,20 @@ pub(crate) fn normalize(
         source: PlaybackSource::Detected,
         foreground: front.of(matched.player),
     })
+}
+
+/// A browser hides a private window's title behind a placeholder: Chromium
+/// publishes `A site is playing media`, Gecko its own name and the same
+/// phrase. Reading one as no title at all is what keeps a private window out
+/// of the library, since a blank title shows as `Detecting` and starts no
+/// viewing. Both strings are English and both browsers localize them, and a
+/// media session says nothing about which locale wrote it, so a private
+/// window in another language still reads as a title.
+fn private_placeholder(title: &str, player: &str) -> bool {
+    title
+        .trim()
+        .strip_suffix(" is playing media")
+        .is_some_and(|name| name == "A site" || name.eq_ignore_ascii_case(player))
 }
 
 /// Chromium writes a tab's timeline only when playback starts, pauses or
@@ -415,6 +434,44 @@ mod tests {
             snapshot: snapshot(SessionState::Settling),
         };
         assert_eq!(normalize(&matched, now(), &Front::Unknown), None);
+    }
+
+    /// The title a private window publishes instead of the page's own.
+    fn titled(player: &Player, title: &str) -> Option<PlaybackEvent> {
+        let matched = Matched {
+            player,
+            snapshot: SessionSnapshot {
+                title: title.to_owned(),
+                ..snapshot(SessionState::Playing)
+            },
+        };
+        normalize(&matched, now(), &Front::Unknown)
+    }
+
+    #[test]
+    fn a_private_window_placeholder_reads_as_no_title() {
+        let (brave, librewolf) = (player("Brave"), player("LibreWolf"));
+        for (player, title) in [
+            (&brave, "A site is playing media"),
+            (&librewolf, "A site is playing media"),
+            (&librewolf, "LibreWolf is playing media"),
+            (&librewolf, "librewolf is playing media"),
+        ] {
+            let event = titled(player, title).unwrap();
+            assert!(event.title.is_empty(), "{title:?} under {}", player.name);
+        }
+    }
+
+    #[test]
+    fn a_title_that_only_resembles_a_placeholder_survives() {
+        let brave = player("Brave");
+        for title in [
+            "LibreWolf is playing media",
+            "Frieren is playing media in the woods",
+            "Episode 3",
+        ] {
+            assert_eq!(titled(&brave, title).unwrap().title, title);
+        }
     }
 
     #[test]
