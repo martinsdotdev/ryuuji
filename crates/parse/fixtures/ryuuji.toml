@@ -1256,3 +1256,28 @@ episode_number = "episode_version"
 # corner brackets as part of a title ("「K」 Image Blu-ray ..."), a
 # fullwidth-bracketed count ("【Golden Time】[24（END）]"), and the three
 # newest corpus entries that expect no file_extension for a .mkv name.
+
+# Browser tab titles, measured 2026-09-17 from live media sessions. A session
+# publishes the page's own declared title, so what arrives is the uploader's
+# phrasing rather than a release name: no group, no extension, and words the
+# uploader chose sitting where a title is expected. These cases pin what
+# Ryuuji reads today. "Full Movie |" still lands inside anime_title, which no
+# library entry can match, and that is the shape a rule has to take off.
+# A private window never reaches the parser at all: its placeholder is read as
+# no title in crates/detect/src/session.rs.
+
+[[case]]
+name = "a youtube title keeps the uploader's words in the anime title"
+input = "Full Movie | Attack on Titan Part 1 - Guren no Yumiya - (English Sub)"
+
+[case.elements]
+anime_title = "Full Movie | Attack on Titan Part 1 - Guren no Yumiya"
+anime_type = "Movie"
+language = "English"
+subtitles = "Sub"
+
+[case.by]
+anime_title = "title"
+anime_type = "terms"
+language = "terms"
+subtitles = "terms"
