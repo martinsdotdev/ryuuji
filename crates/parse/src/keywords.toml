@@ -1,5 +1,18 @@
 # Keywords are matched against upper-cased tokens.
 
+# What a site or a browser writes on the end of a name it did not choose.
+# None of it is part of the name, and only a browser's title ever carries
+# any of it. Cut whole before tokenizing, so no rule has to know they exist.
+suffix = [
+    " - Watch on Crunchyroll",
+    " | Netflix Official Site",
+    " - Audio playing",
+    " - Audio muted",
+    " - Bstation",
+    " - BiliBili",
+    " - YouTube",
+]
+
 [[keyword]]
 kind = "anime_season_prefix"
 identifiable = false

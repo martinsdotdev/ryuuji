@@ -33,6 +33,8 @@ fn parse_until(input: &str, options: &Options, until: Option<RuleName>) -> Readi
     let mut elements = Elements::default();
     let mut text = input.to_owned();
 
+    remove_suffixes(&mut text, table.suffixes());
+
     if options.parse_file_extension
         && let Some(dot) = text.rfind('.')
     {
@@ -77,6 +79,21 @@ fn parse_until(input: &str, options: &Options, until: Option<RuleName>) -> Readi
     engine::run(tape, elements, options, until)
 }
 
+/// Cuts what a site or a browser wrote on the end of a name it did not
+/// choose. Repeated until none matches, because they stack: a page titled
+/// `… - BiliBili` reaches a media session as `… - BiliBili - YouTube` when
+/// the site is embedded. Cutting from the end alone needs no span mapping,
+/// since every byte that survives keeps its offset.
+fn remove_suffixes(text: &mut String, suffixes: &[String]) {
+    while let Some(cut) = suffixes
+        .iter()
+        .find_map(|suffix| text.strip_suffix(suffix.as_str()))
+        .map(str::to_owned)
+    {
+        *text = cut;
+    }
+}
+
 /// Removes every ignored string from `text`. When one was found, returns the
 /// byte offset in the caller's input of every byte of the shortened text and
 /// of its end, so token spans can be mapped back; spans need no mapping
@@ -101,6 +118,7 @@ fn remove_ignored(text: &mut String, ignored: &[String]) -> Option<Vec<usize>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keyword::KeywordTable;
 
     fn elements(input: &str, options: &Options) -> Elements {
         parse(input, options).elements().clone()
@@ -129,6 +147,33 @@ mod tests {
         let elements = elements("Toradora!.xyz", &Options::default());
         assert_eq!(elements.get(ElementKind::FileExtension), None);
         assert_eq!(elements.get(ElementKind::FileName), Some("Toradora!.xyz"));
+    }
+
+    #[test]
+    fn a_site_suffix_is_not_part_of_the_name() {
+        let elements = elements("Mermaid Melody - Episode 1 - BiliBili", &Options::default());
+        assert_eq!(
+            elements.get(ElementKind::AnimeTitle),
+            Some("Mermaid Melody")
+        );
+        assert_eq!(
+            elements.get(ElementKind::FileName),
+            Some("Mermaid Melody - Episode 1")
+        );
+    }
+
+    #[test]
+    fn stacked_suffixes_are_all_cut() {
+        let mut text = "Show - BiliBili - YouTube".to_owned();
+        remove_suffixes(&mut text, KeywordTable::builtin().suffixes());
+        assert_eq!(text, "Show");
+    }
+
+    #[test]
+    fn a_name_that_merely_ends_alike_is_left_alone() {
+        let mut text = "Watching YouTube".to_owned();
+        remove_suffixes(&mut text, KeywordTable::builtin().suffixes());
+        assert_eq!(text, "Watching YouTube");
     }
 
     #[test]

@@ -24,6 +24,7 @@ pub(crate) struct Keyword {
 pub(crate) struct KeywordTable {
     by_text: HashMap<String, Vec<Keyword>>,
     preidentified: Vec<(String, ElementKind)>,
+    suffixes: Vec<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -47,6 +48,8 @@ struct Document {
     keyword: Vec<KeywordGroup>,
     #[serde(default)]
     preidentified: Vec<PreidentifiedEntry>,
+    #[serde(default)]
+    suffix: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -124,9 +127,17 @@ impl KeywordTable {
             }
             preidentified.push((entry.text, kind));
         }
+        for suffix in &document.suffix {
+            if suffix.is_empty() {
+                return Err(TableError::EmptyValue {
+                    kind: "suffix".to_owned(),
+                });
+            }
+        }
         Ok(KeywordTable {
             by_text,
             preidentified,
+            suffixes: document.suffix,
         })
     }
 
@@ -150,6 +161,12 @@ impl KeywordTable {
 
     pub(crate) fn preidentified(&self) -> &[(String, ElementKind)] {
         &self.preidentified
+    }
+
+    /// What a site or a browser writes on the end of a name it did not
+    /// choose, which is never part of the name.
+    pub(crate) fn suffixes(&self) -> &[String] {
+        &self.suffixes
     }
 }
 
