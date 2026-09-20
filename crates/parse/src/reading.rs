@@ -4,6 +4,7 @@ use std::ops::RangeInclusive;
 
 use crate::element::{ElementKind, Elements, Fact, Span};
 use crate::engine::RuleName;
+use crate::keyword::KeywordTable;
 use crate::options::Options;
 use crate::string::leading_number;
 
@@ -194,6 +195,24 @@ impl Reading {
             .map(text_claim)
     }
 
+    /// The word that says the name is something beside an episode: a
+    /// preview, an opening, a trailer. These are the anime types the table
+    /// lists as unable to stand for a show's type on their own, and a name
+    /// carrying one may still name a real show and a real episode number, so
+    /// a caller that records episodes has to ask.
+    pub fn extra(&self) -> Option<Claim<&str>> {
+        self.elements
+            .facts()
+            .iter()
+            .filter(|fact| fact.kind == ElementKind::AnimeType)
+            .find(|fact| {
+                KeywordTable::builtin()
+                    .find(ElementKind::AnimeType, &fact.value.to_uppercase())
+                    .is_some_and(|keyword| !keyword.valid)
+            })
+            .map(text_claim)
+    }
+
     /// The weakest certainty among the typed readers that found a value,
     /// so one guess makes the whole reading a guess. `None` when none did.
     pub fn certainty(&self) -> Option<Certainty> {
@@ -296,6 +315,29 @@ mod tests {
             (ElementKind::AnimeSeason, "3"),
         ]);
         assert_eq!(reading.season().map(|s| s.value), Some(2));
+    }
+
+    #[test]
+    fn extra_is_a_type_that_cannot_stand_for_a_show() {
+        for word in ["Preview", "PV", "OP", "NCED"] {
+            let reading = reading(&[(ElementKind::AnimeType, word)]);
+            assert_eq!(reading.extra().map(|e| e.value), Some(word));
+        }
+        let after_a_real_type = reading(&[
+            (ElementKind::AnimeType, "TV"),
+            (ElementKind::AnimeType, "Preview"),
+        ]);
+        assert_eq!(after_a_real_type.extra().map(|e| e.value), Some("Preview"));
+    }
+
+    #[test]
+    fn a_type_a_show_can_be_is_not_an_extra() {
+        for word in ["Movie", "OVA", "Special", "TV"] {
+            let reading = reading(&[(ElementKind::AnimeType, word)]);
+            assert_eq!(reading.extra(), None, "{word}");
+        }
+        let elsewhere = reading(&[(ElementKind::AnimeTitle, "Preview")]);
+        assert_eq!(elsewhere.extra(), None);
     }
 
     #[test]
