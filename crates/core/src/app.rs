@@ -1686,6 +1686,36 @@ mod tests {
         assert_eq!(stored_aliases(&dir), vec![("show".to_owned(), right)]);
     }
 
+    // A browser's title matches nothing far more often than a file's does,
+    // and picking is the only way to say which show it is. The alias is keyed
+    // on the parsed title, so one pick settles every later episode of that
+    // show without another.
+    #[test]
+    fn picking_a_show_for_an_unmatched_name_settles_the_next_episode_too() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::AddEntry(entry("Frieren: Beyond Journey's End")));
+        let id = app.state().library[0].id;
+
+        app.dispatch(Command::Playback(playing("Sousou no Frieren - 01.mkv")));
+        assert_eq!(
+            app.state().last_match.as_ref().unwrap().link,
+            Link::Unmatched
+        );
+
+        app.dispatch(Command::PickShow(id));
+        assert_eq!(
+            app.state().last_match.as_ref().unwrap().link,
+            Link::Exact(id)
+        );
+
+        app.dispatch(Command::Playback(playing("Sousou no Frieren - 02.mkv")));
+        assert_eq!(
+            app.state().last_match.as_ref().unwrap().link,
+            Link::Exact(id)
+        );
+    }
+
     #[test]
     fn picking_before_the_recording_settles_on_the_chosen_show() {
         let (_tmp, dir) = open_tmp();
