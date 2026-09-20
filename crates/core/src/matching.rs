@@ -82,6 +82,7 @@ pub fn normalize_title(title: &str) -> String {
     let cleaned: String = title
         .replace('&', " and ")
         .chars()
+        .map(fold_width)
         .flat_map(|c| {
             if c.is_alphanumeric() {
                 c.to_lowercase().collect::<Vec<char>>()
@@ -123,6 +124,22 @@ pub fn normalize_title(title: &str) -> String {
         }
     }
     out.join(" ")
+}
+
+/// The full-width form of an ASCII character, folded back to it. Japanese
+/// channels write a title in them (`ＴＶアニメ「Ｄｒ．ＳＴＯＮＥ」`), and a
+/// full-width `Ｄ` is a letter like any other, so without this it lowercases
+/// to `ｄ` and matches no library entry.
+///
+/// Folded only here, in the copy matching compares, and never in the title a
+/// person is shown: the Unicode guidance on width variants (UAX #15) is that
+/// a compatibility fold belongs to comparison, not to stored text.
+fn fold_width(c: char) -> char {
+    match c {
+        '\u{3000}' => ' ',
+        '\u{FF01}'..='\u{FF5E}' => char::from_u32(c as u32 - 0xFEE0).unwrap_or(c),
+        _ => c,
+    }
 }
 
 fn rewrite_roman(token: &str) -> &str {
@@ -482,7 +499,30 @@ mod tests {
         assert_eq!(normalize_title("葬送のフリーレン"), "葬送のフリーレン");
         assert_eq!(normalize_title("《幼女戰記 2》"), "幼女戰記 2");
         assert_eq!(normalize_title("Pokémon"), "pokémon");
-        assert_eq!(normalize_title("ＴＶアニメ"), "ｔｖアニメ");
+        assert_eq!(normalize_title("ＴＶアニメ"), "tvアニメ");
+    }
+
+    // A full-width letter is a letter, so it survived the fold and then
+    // matched nothing: "Ｄｒ．ＳＴＯＮＥ" lowercased to "ｄｒ ｓｔｏｎｅ".
+    #[test]
+    fn a_full_width_title_folds_onto_its_ascii_entry() {
+        assert_eq!(
+            normalize_title("Ｄｒ．ＳＴＯＮＥ"),
+            normalize_title("Dr. STONE")
+        );
+        assert_eq!(normalize_title("第１話"), normalize_title("第1話"));
+        assert_eq!(
+            normalize_title("冒険大陸　アニアキングダム"),
+            normalize_title("冒険大陸 アニアキングダム")
+        );
+    }
+
+    #[test]
+    fn a_zero_width_character_is_not_part_of_the_title() {
+        assert_eq!(
+            normalize_title("Detective Conan: \u{200b}Private Eye"),
+            normalize_title("Detective Conan: Private Eye")
+        );
     }
 
     #[test]
