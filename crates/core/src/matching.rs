@@ -61,6 +61,15 @@ impl ProposedMatch {
     }
 }
 
+/// Whether the name is for something beside an episode: a preview, a
+/// trailer, an opening. Read off the raw title rather than carried on the
+/// proposal, because it is a fact about the name and not about which show
+/// the name turned out to match, and Now playing already re-reads the raw
+/// title for the same reason.
+pub fn is_extra(raw_title: &str) -> bool {
+    parse(raw_title, &Options::default()).extra().is_some()
+}
+
 /// Folds a title to the loose form matching compares: lowercase
 /// alphanumeric tokens, `&` spelled out, a leading "the" dropped, roman
 /// numerals and season phrasings reduced to the bare number.

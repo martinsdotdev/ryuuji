@@ -221,10 +221,15 @@ pub enum RecordOutcome {
 
 tagged_enum! {
     /// Why a viewing past its threshold wrote nothing, in the order the
-    /// gates run: the match first, then the entry. Tags are stored in the
-    /// history table's `reason` column.
+    /// gates run: the name first, then the match, then the entry. Tags are
+    /// stored in the history table's `reason` column.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum Decline {
+        /// The name says it is a preview, a trailer, an opening. Such a name
+        /// carries a real show and often a real episode number, so it is
+        /// refused before the match is even considered: it is true of the
+        /// name whichever show it turns out to be about.
+        NotEpisode => "not-episode", "Not recorded: not an episode",
         NotExact => "not-exact", "Not recorded: no exact match",
         Completed => "completed", "Not recorded: show is completed",
         NoEpisode => "no-episode", "Not recorded: no episode number",
