@@ -1,0 +1,1398 @@
+# Titles a browser publishes while an episode plays, gathered 2026-09-19.
+#
+# A media session carries the page's own declared title, so these are prose an
+# uploader or a site wrote, not a release name: no group, no extension, and
+# words chosen to sell a video sitting where a title is expected. Every string
+# here was copied byte for byte from a YouTube feed, a watch page or a site's
+# own <title>; the search-snippet ones the gathering turned up are left out,
+# because a search engine rewrites what it shows.
+#
+# This corpus is a rising baseline, like anitomy.json: a case pins what Ryuuji
+# *should* read, not what it reads today, and the shapes out of reach of a
+# parser that sees only a title stay failing here as documentation of where
+# the ceiling is. Every case is loose, so a case says only what it means to
+# pin. `extra = true` marks a name that is not an episode at all -- a preview,
+# a trailer, an opening -- which is the half that stops a watched trailer
+# recording an episode it happens to name.
+
+# --- YouTube, official channels: full episodes and movies ------------------
+
+[[case]]
+name = "muse asia: season in the series, episode and language tag"
+input = "Mushoku Tensei: Jobless Reincarnation Season 3 - Episode 01 [English Sub]"
+strict = false
+
+[case.elements]
+anime_title = "Mushoku Tensei: Jobless Reincarnation"
+anime_season = "3"
+episode_number = "01"
+
+[[case]]
+name = "muse asia: series, episode, language tag"
+input = "BLACK TORCH - Episode 12 [English Sub]"
+strict = false
+
+[case.elements]
+anime_title = "BLACK TORCH"
+episode_number = "12"
+
+[[case]]
+name = "muse asia: absolute episode beside the season and episode it is"
+input = "Fairy Tail - Episode 004 (S1E04) [English Dub]"
+strict = false
+
+[case.elements]
+anime_title = "Fairy Tail"
+anime_season = "1"
+episode_number = "04"
+episode_number_alt = "004"
+
+[[case]]
+name = "muse asia: absolute 25 is season 2 episode 11"
+input = "Ascendance of a Bookworm - Episode 25 (S2E11) [English Sub]"
+strict = false
+
+[case.elements]
+anime_title = "Ascendance of a Bookworm"
+anime_season = "2"
+episode_number = "11"
+episode_number_alt = "25"
+
+[[case]]
+name = "muse asia: a bar separates the series from the episode"
+input = "Welcome To Demon School! Iruma-kun Season 4 | Episode 23 [English Sub]"
+strict = false
+
+[case.elements]
+anime_title = "Welcome To Demon School! Iruma-kun"
+anime_season = "4"
+episode_number = "23"
+
+[[case]]
+name = "muse asia: absolute 93 is season 4 episode 21"
+input = "That Time I Got Reincarnated as a Slime - Episode 93 (S4E21) [English Sub]"
+strict = false
+
+[case.elements]
+anime_title = "That Time I Got Reincarnated as a Slime"
+anime_season = "4"
+episode_number = "21"
+episode_number_alt = "93"
+
+[[case]]
+name = "muse asia: a ninety second upload is still a whole episode"
+input = "Rilakkuma - Episode 25 [English Sub]"
+strict = false
+
+[case.elements]
+anime_title = "Rilakkuma"
+episode_number = "25"
+
+[[case]]
+name = "muse india: a channel tail after the language tag"
+input = "The World's Finest Assassin Gets Reincarnated in Another World - EP 01 [Hindi dub] | Muse IN"
+strict = false
+
+[case.elements]
+anime_title = "The World's Finest Assassin Gets Reincarnated in Another World"
+episode_number = "01"
+
+[[case]]
+name = "muse india: the same series at episode twelve"
+input = "The World's Finest Assassin Gets Reincarnated in Another World - EP 12 [Hindi dub] | Muse IN"
+strict = false
+
+[case.elements]
+anime_title = "The World's Finest Assassin Gets Reincarnated in Another World"
+episode_number = "12"
+
+[[case]]
+name = "muse india: a third bar segment is advertising"
+input = "HUNTER×HUNTER - Episode 001 [Hindi Dub] | Muse IN | HxH Shirts now available at Celio!"
+strict = false
+
+[case.elements]
+anime_title = "HUNTER×HUNTER"
+episode_number = "001"
+
+[[case]]
+name = "muse india: the language tag leads the name"
+input = "[Hindi dub] DAN DA DAN - Episode 01 | Muse IN"
+strict = false
+
+[case.elements]
+anime_title = "DAN DA DAN"
+episode_number = "01"
+
+[[case]]
+name = "muse india: series, episode, language tag, channel tail"
+input = "Tokyo Revengers - Episode 01 [Hindi dub] | Muse IN"
+strict = false
+
+[case.elements]
+anime_title = "Tokyo Revengers"
+episode_number = "01"
+
+[[case]]
+name = "muse philippines: a full-width bar before the channel tail"
+input = "Rilakkuma - Episode 25 [EN Sub]｜Muse PH"
+strict = false
+
+[case.elements]
+anime_title = "Rilakkuma"
+episode_number = "25"
+
+[[case]]
+name = "muse philippines: a series ending in an exclamation"
+input = "Draw This, Then Die! - Episode 11 [EN Sub]｜Muse PH"
+strict = false
+
+[case.elements]
+anime_title = "Draw This, Then Die!"
+episode_number = "11"
+
+[[case]]
+name = "muse philippines: absolute episode and full-width channel tail"
+input = "That Time I Got Reincarnated as a Slime - Episode 93 (S4E21) [EN Sub]｜Muse PH"
+strict = false
+
+[case.elements]
+anime_title = "That Time I Got Reincarnated as a Slime"
+anime_season = "4"
+episode_number = "21"
+episode_number_alt = "93"
+
+[[case]]
+name = "muse philippines: a double space after the dash"
+input = "Date A Live III -  Episode 12 [EN Sub]｜Muse PH"
+strict = false
+
+[case.elements]
+anime_title = "Date A Live III"
+episode_number = "12"
+
+[[case]]
+name = "ani-one: the series is quoted and the episode is a number sign"
+input = "《黒貓與魔女的教室》 #24 (繁中字幕 | 日語原聲)【Ani-One Asia】"
+strict = false
+
+[case.elements]
+anime_title = "黒貓與魔女的教室"
+episode_number = "24"
+
+[[case]]
+name = "ani-one: no space before the number sign"
+input = "《黒貓與魔女的教室》#1 (繁中字幕 | 日語原聲)【Ani-One Asia】"
+strict = false
+
+[case.elements]
+anime_title = "黒貓與魔女的教室"
+episode_number = "1"
+
+[[case]]
+name = "ani-one: a series mixing latin and han"
+input = "《MAO摩緒》#25 (繁中字幕 | 日語原聲)【Ani-One Asia】"
+strict = false
+
+[case.elements]
+anime_title = "MAO摩緒"
+episode_number = "25"
+
+[[case]]
+name = "ani-one: a shortened channel tag"
+input = "《遊戲王ARC-V》#85 (繁中字幕 | 日語原聲)【Ani-One】"
+strict = false
+
+[case.elements]
+anime_title = "遊戲王ARC-V"
+episode_number = "85"
+
+[[case]]
+name = "ani-one: the season is a han phrase inside the series"
+input = "《文豪野犬 汪！第二季》#12 (繁中字幕 | 日語原聲)【Ani-One Asia】"
+strict = false
+
+[case.elements]
+anime_title = "文豪野犬 汪！第二季"
+episode_number = "12"
+
+[[case]]
+name = "ani-one: a bare number ends the series"
+input = "《幼女戰記 2》#11 (繁中字幕 | 日語原聲)【Ani-One Asia】"
+strict = false
+
+[case.elements]
+anime_title = "幼女戰記 2"
+episode_number = "11"
+
+[[case]]
+name = "ani-one: a roman numeral and a dash-wrapped subtitle in the series"
+input = "《Clevatess II-魔獸之王與虛假的勇者傳承-》#11 (繁中字幕 | 日語原聲)【Ani-One Asia】"
+strict = false
+
+[case.elements]
+anime_title = "Clevatess II-魔獸之王與虛假的勇者傳承-"
+episode_number = "11"
+
+[[case]]
+name = "ani-one: a spin-off quoted after its parent series"
+input = "《怪獸8號》原創短篇動畫《鳴海的平日》#3 (繁中字幕 | 日語原聲)【Ani-One Asia】"
+strict = false
+
+[case.elements]
+anime_title = "鳴海的平日"
+episode_number = "3"
+
+[[case]]
+name = "ani-one ultra: a latin series in han quotes"
+input = "《OVERLORD》#1 (繁中字幕 | 日語原聲)【Ani-One ULTRA】"
+strict = false
+
+[case.elements]
+anime_title = "OVERLORD"
+episode_number = "1"
+
+[[case]]
+name = "ani-one ultra: the series is itself bracketed"
+input = "《【我推的孩子】》#1 (繁中字幕 | 日語原聲)【Ani-One Asia ULTRA】"
+strict = false
+
+[case.elements]
+anime_title = "【我推的孩子】"
+episode_number = "1"
+
+[[case]]
+name = "ani-one ultra: a latin series and a long channel tag"
+input = "《Gachiakuta》#1 (繁中字幕 | 日語原聲)【Ani-One Asia ULTRA】"
+strict = false
+
+[case.elements]
+anime_title = "Gachiakuta"
+episode_number = "1"
+
+[[case]]
+name = "crunchyroll channel: series, episode word, episode title after a bar"
+input = "JUJUTSU KAISEN Episode 1 | Ryomen Sukuna"
+strict = false
+
+[case.elements]
+anime_title = "JUJUTSU KAISEN"
+episode_number = "1"
+
+[[case]]
+name = "crunchyroll channel: a series ending in a question mark and no episode title"
+input = "May I Ask For One Final Thing? Episode 1 SUB/DUB"
+strict = false
+
+[case.elements]
+anime_title = "May I Ask For One Final Thing?"
+episode_number = "1"
+
+[[case]]
+name = "crunchyroll channel: a sub and dub tag before the episode title"
+input = "Tomb Raider King Episode 1 SUB/DUB | Once Again from the End"
+strict = false
+
+[case.elements]
+anime_title = "Tomb Raider King"
+episode_number = "1"
+
+[[case]]
+name = "crunchyroll channel: a one word episode title"
+input = "Gachiakuta Episode 1 SUB/DUB | The Sphere"
+strict = false
+
+[case.elements]
+anime_title = "Gachiakuta"
+episode_number = "1"
+
+[[case]]
+name = "crunchyroll channel: the episode title repeats the series"
+input = "Go For It, Nakamura-kun!! Episode 1 SUB/DUB | Go For It, Nakamura-kun!!"
+strict = false
+
+[case.elements]
+anime_title = "Go For It, Nakamura-kun!!"
+episode_number = "1"
+
+[[case]]
+name = "crunchyroll channel: an english dub tag before the episode title"
+input = "Wise Man's Grandchild Episode 1 English Dub | A Baby In The Woods Goes To The Capital"
+strict = false
+
+[case.elements]
+anime_title = "Wise Man's Grandchild"
+episode_number = "1"
+
+[[case]]
+name = "crunchyroll channel: the episode title ends in a part number"
+input = "Raven of the Inner Palace Episode 1 English Dub | The Jade Earring, Part 1"
+strict = false
+
+[case.elements]
+anime_title = "Raven of the Inner Palace"
+episode_number = "1"
+
+[[case]]
+name = "crunchyroll channel: a one word episode title after a dub tag"
+input = "Tokyo Revengers Episode 1 English Dub | Reborn"
+strict = false
+
+[case.elements]
+anime_title = "Tokyo Revengers"
+episode_number = "1"
+
+[[case]]
+name = "crunchyroll channel: a dash-wrapped subtitle and a cut name in the series"
+input = "Re:ZERO -Starting Life in Another World- Director's Cut Episode 1 English Dub"
+strict = false
+
+[case.elements]
+anime_title = "Re:ZERO -Starting Life in Another World- Director's Cut"
+episode_number = "1"
+
+[[case]]
+name = "crunchyroll channel: the episode title repeats the series again"
+input = "The Quintessential Quintuplets Episode 1 | The Quintessential Quintuplets"
+strict = false
+
+[case.elements]
+anime_title = "The Quintessential Quintuplets"
+episode_number = "1"
+
+[[case]]
+name = "crunchyroll channel: an apostrophe in the series"
+input = "Shikimori's Not Just a Cutie Episode 1 English Dub | My Girlfriend is Super Cute"
+strict = false
+
+[case.elements]
+anime_title = "Shikimori's Not Just a Cutie"
+episode_number = "1"
+
+[[case]]
+name = "crunchyroll channel: a hyphenated honorific in the series"
+input = "Masamune-kun's Revenge Episode 1 English Dub | The Boy Who Was Called Pig's Foot"
+strict = false
+
+[case.elements]
+anime_title = "Masamune-kun's Revenge"
+episode_number = "1"
+
+[[case]]
+name = "crunchyroll channel: a short series and a short episode title"
+input = "To Your Eternity Episode 1 English Dub | The Last One"
+strict = false
+
+[case.elements]
+anime_title = "To Your Eternity"
+episode_number = "1"
+
+[[case]]
+name = "crunchyroll channel: a bare dub token ends the name"
+input = "RILAKKUMA Episode 25 DUB"
+strict = false
+
+[case.elements]
+anime_title = "RILAKKUMA"
+episode_number = "25"
+
+[[case]]
+name = "crunchyroll channel: a bare sub token ends the name"
+input = "RILAKKUMA Episode 25 SUB"
+strict = false
+
+[case.elements]
+anime_title = "RILAKKUMA"
+episode_number = "25"
+
+[[case]]
+name = "toho: full-width latin, a quoted series and a han episode word"
+input = "ＴＶアニメ 「Ｄｒ．ＳＴＯＮＥ」 第1話“ＳＴＯＮＥ ＷＯＲＬＤ”"
+strict = false
+
+[case.elements]
+anime_title = "Dr.STONE"
+episode_number = "1"
+
+[[case]]
+name = "gundam: the episode comes before the series"
+input = "第1話｜機動戦士ガンダム【ガンチャン】"
+strict = false
+
+[case.elements]
+anime_title = "機動戦士ガンダム"
+episode_number = "1"
+
+[[case]]
+name = "gundam: a greek zeta opens the series"
+input = "第1話｜Ζガンダム【ガンチャン】"
+strict = false
+
+[case.elements]
+anime_title = "Ζガンダム"
+episode_number = "1"
+
+[[case]]
+name = "gundam: a latin letter ends the series"
+input = "第31話｜ガンダムX【ガンチャン】"
+strict = false
+
+[case.elements]
+anime_title = "ガンダムX"
+episode_number = "31"
+
+[[case]]
+name = "gundam: doubled greek zeta in the series"
+input = "第13話｜ガンダムΖΖ【ガンチャン】"
+strict = false
+
+[case.elements]
+anime_title = "ガンダムΖΖ"
+episode_number = "13"
+
+[[case]]
+name = "gundam: latin initials open a kana series"
+input = "第12話｜SDガンダム三国伝【ガンチャン】"
+strict = false
+
+[case.elements]
+anime_title = "SDガンダム三国伝"
+episode_number = "12"
+
+[[case]]
+name = "gundam: a channel numbers its episodes by phase"
+input = "PHASE-25｜SEED DESTINY【ガンチャン】"
+strict = false
+
+[case.elements]
+anime_title = "SEED DESTINY"
+episode_number = "25"
+
+[[case]]
+name = "gundam: a single latin letter opens the series"
+input = "第41話｜Vガンダム【ガンチャン】"
+strict = false
+
+[case.elements]
+anime_title = "Vガンダム"
+episode_number = "41"
+
+[[case]]
+name = "gundam intl: no spaces around the episode word"
+input = "After War Gundam X -Episode1(w/subtitles)"
+strict = false
+
+[case.elements]
+anime_title = "After War Gundam X"
+episode_number = "1"
+
+[[case]]
+name = "gundam intl: a quoted episode title and a glued language tag"
+input = "Mobile Suit Gundam the Witch from Mercury #1 \"The Witch and the Bride\"(EN dub)"
+strict = false
+
+[case.elements]
+anime_title = "Mobile Suit Gundam the Witch from Mercury"
+episode_number = "1"
+
+[[case]]
+name = "gundam intl: eight subtitle languages listed in one tag"
+input = "Mobile Suit Gundam the Witch from Mercury #1 \"The Witch and the Bride\"(EN,CN,HK,TW,KR,TH,ID,VN sub)"
+strict = false
+
+[case.elements]
+anime_title = "Mobile Suit Gundam the Witch from Mercury"
+episode_number = "1"
+
+[[case]]
+name = "gundam intl: the episode is a word, not a number"
+input = "Mobile Suit Gundam the Witch from Mercury - 『PROLOGUE』（EN dub）"
+strict = false
+
+[case.elements]
+anime_title = "Mobile Suit Gundam the Witch from Mercury"
+
+[[case]]
+name = "gundam intl: a movie with a roman numeral codepoint"
+input = "Mobile Suit Gundam MOVIE-Mobile Suit Gundam Ⅰ (w/subtitles)"
+strict = false
+
+[case.elements]
+anime_title = "Mobile Suit Gundam"
+
+[[case]]
+name = "tms: a movie with no episode number"
+input = "Detective Conan: The Eleventh Striker | English Sub Full Movie"
+strict = false
+
+[case.elements]
+anime_title = "Detective Conan: The Eleventh Striker"
+
+[[case]]
+name = "tms: a zero width space sits inside the series"
+input = "Detective Conan: ​Private Eye in the Distant Sea | English Sub Full Movie"
+strict = false
+
+[case.elements]
+anime_title = "Detective Conan: Private Eye in the Distant Sea"
+
+[[case]]
+name = "tms: a channel numbers its episodes by ride"
+input = "Cardfight!! Vanguard - Ride 01 Vanguard of Destiny! | English Dub HD Remaster"
+strict = false
+
+[case.elements]
+anime_title = "Cardfight!! Vanguard"
+episode_number = "01"
+
+[[case]]
+name = "tms: a ride number in the double digits"
+input = "Cardfight!! Vanguard - Ride 19 Showdown! Nova Grappler! | English Dub HD Remaster"
+strict = false
+
+[case.elements]
+anime_title = "Cardfight!! Vanguard"
+episode_number = "19"
+
+[[case]]
+name = "tms: two episode segments split by a slash"
+input = "The Gutsy Frog - EP01 The Birth of \"PYONKICHI\" / Flat-frog's Life is Tough | English Sub"
+strict = false
+
+[case.elements]
+anime_title = "The Gutsy Frog"
+episode_number = "01"
+
+[[case]]
+name = "aniplex: a bar then an availability window"
+input = "アニメ「リラックマ」#25|※2週間限定配信【10/3(土)23:59まで】"
+strict = false
+
+[case.elements]
+anime_title = "リラックマ"
+episode_number = "25"
+
+[[case]]
+name = "tv tokyo: an official tag, a dash-wrapped english subtitle, a quoted episode title"
+input = "【公式】BIRDIE WING -Golf Girls' Story- 第1話「レインボーバレット」"
+strict = false
+
+[case.elements]
+anime_title = "BIRDIE WING -Golf Girls' Story-"
+episode_number = "1"
+
+# --- YouTube, the same channels: names that are not episodes ---------------
+#
+# These carry a real series and often a real episode number, so nothing but
+# `extra` separates them from the section above. A case with no elements pins
+# only that.
+
+[[case]]
+name = "muse asia: a highlight clip naming its series"
+input = "KAIJU BATTLE INCOMING《KAIJU GIRL CARAMELISE》 Anime Highlight"
+strict = false
+extra = true
+
+[case.elements]
+
+[[case]]
+name = "muse asia: another highlight clip"
+input = "The past《The World's Strongest Rearguard》 Anime Highlight"
+strict = false
+extra = true
+
+[case.elements]
+
+[[case]]
+name = "muse asia: a numbered teaser"
+input = "《Firefly Wedding》 - Teaser PV1"
+strict = false
+extra = true
+
+[case.elements]
+
+[[case]]
+name = "muse asia: an ending theme promo carrying a season"
+input = "《A Returner's Magic Should be Special Season 2》 - Ending Theme PV"
+strict = false
+extra = true
+
+[case.elements]
+
+[[case]]
+name = "muse asia: a short"
+input = "《Mushoku Tensei: Jobless Reincarnation Season 3》 #shorts"
+strict = false
+extra = true
+
+[case.elements]
+
+[[case]]
+name = "muse asia: a short of a long series name"
+input = "《The 100 Girlfriends Who Really, Really, Really, Really, REALLY Love You》 #shorts"
+strict = false
+extra = true
+
+[case.elements]
+
+[[case]]
+name = "muse asia: a preview that names the episode it previews"
+input = "《Mushoku Tensei: Jobless Reincarnation Season 3》 - Preview of Episode 01"
+strict = false
+extra = true
+
+[case.elements]
+
+[[case]]
+name = "muse asia: a teaser"
+input = "《Mushoku Tensei: Jobless Reincarnation Season 3》 - Teaser PV"
+strict = false
+extra = true
+
+[case.elements]
+
+[[case]]
+name = "muse asia: a whole season in one upload is a batch, not an extra"
+input = "【Complete Series】Made in Abyss (S1)"
+strict = false
+
+[case.elements]
+anime_title = "Made in Abyss"
+anime_season = "1"
+
+[[case]]
+name = "muse asia: a compilation whose part number is a cour"
+input = "【Complete Series】JoJo’s Bizarre Adventure Season 3 (Diamond is Unbreakable) Part 2"
+strict = false
+
+[case.elements]
+anime_title = "JoJo’s Bizarre Adventure"
+anime_season = "3"
+
+[[case]]
+name = "muse philippines: a preview carrying a real episode number"
+input = "Daemons of the Shadow Realm - EP24 Preview"
+strict = false
+extra = true
+
+[case.elements]
+anime_title = "Daemons of the Shadow Realm"
+episode_number = "24"
+
+[[case]]
+name = "muse philippines: a preview with the episode word spelled out"
+input = "Grow Up Show - Episode 12 Preview"
+strict = false
+extra = true
+
+[case.elements]
+anime_title = "Grow Up Show"
+episode_number = "12"
+
+[[case]]
+name = "muse philippines: a lettered clip of a numbered episode"
+input = "《The Elusive Samurai》EP17 (e) #shorts"
+strict = false
+extra = true
+
+[case.elements]
+
+[[case]]
+name = "muse philippines: another lettered clip"
+input = "《Welcome To Demon School! Iruma-kun Season 4》EP04 (b) #shorts"
+strict = false
+extra = true
+
+[case.elements]
+
+[[case]]
+name = "muse philippines: a highlight with the series quoted mid-string"
+input = "Bad Timeline《That Time I Got Reincarnated as a Slime S4》Highlight"
+strict = false
+extra = true
+
+[case.elements]
+
+[[case]]
+name = "muse philippines: a marathon livestream names no episode"
+input = "(S2 Coming this October!) Sasaki and Peeps Marathon"
+strict = false
+
+[case.elements]
+
+[[case]]
+name = "muse philippines: an ending theme promo"
+input = "A Returner's Magic Should Be Special S2 - Ending Theme PV"
+strict = false
+extra = true
+
+[case.elements]
+
+[[case]]
+name = "muse india: two bracketed tags open a compilation"
+input = "【Hindi Dub】【Complete Series】 SPY×FAMILY (S1) | Muse IN"
+strict = false
+
+[case.elements]
+anime_title = "SPY×FAMILY"
+anime_season = "1"
+
+[[case]]
+name = "ani-one: an emoji-led recap of a numbered episode"
+input = "🤏【很熟練】💞《相反的你和我 第二季》第22話｜精華重溫【Ani-One Asia】"
+strict = false
+extra = true
+
+[case.elements]
+
+[[case]]
+name = "ani-one: a recap whose emoji is a joined sequence"
+input = "😓【別這樣…】🐈‍⬛《黒貓與魔女的教室》第22話｜精華重溫【Ani-One Asia】"
+strict = false
+extra = true
+
+[case.elements]
+
+[[case]]
+name = "ani-one: a watch-party livestream of a numbered episode"
+input = "【Ani-One On Live】《Saga of Tanya the Evil 2》#11 X Micho Teh"
+strict = false
+
+[case.elements]
+
+[[case]]
+name = "ani-one: a promo dated by season"
+input = "2023年4月新番《【我推的孩子】》PV【Ani-One Asia】"
+strict = false
+extra = true
+
+[case.elements]
+
+[[case]]
+name = "ani-one: a han trailer word"
+input = "2026年4月新番《黒貓與魔女的教室》預告【Ani-One Asia】"
+strict = false
+extra = true
+
+[case.elements]
+
+[[case]]
+name = "ani-one: a formal trailer and a licensor tag"
+input = "《Gachiakuta》正式預告 | 2025年7月6動畫【羚邦】"
+strict = false
+extra = true
+
+[case.elements]
+
+[[case]]
+name = "crunchyroll channel: a clip shaped exactly like a line and its series"
+input = "Elymas Desperately Wants The Clown Girl | The Exiled Heavy Knight Knows How to Game the System"
+strict = false
+
+[case.elements]
+
+[[case]]
+name = "crunchyroll channel: a quoted line and its series"
+input = "\"All of You Are My Enemies\" | Jaadugar: A Witch in Mongolia"
+strict = false
+
+[case.elements]
+
+[[case]]
+name = "crunchyroll channel: a clip with no word marking it one"
+input = "Shion Evolves | That Time I Got Reincarnated as a Slime"
+strict = false
+
+[case.elements]
+
+[[case]]
+name = "crunchyroll channel: another unmarked clip"
+input = "Robin First Appears | ONE PIECE"
+strict = false
+
+[case.elements]
+
+[[case]]
+name = "crunchyroll channel: an ending theme credited to its artist"
+input = "Daemons of the Shadow Realm Ending | \"Way Out\" by yama"
+strict = false
+extra = true
+
+[case.elements]
+
+[[case]]
+name = "crunchyroll channel: a game trailer"
+input = "Official Mobile Launch Trailer | Lock's Quest on Crunchyroll Game Vault"
+strict = false
+extra = true
+
+[case.elements]
+
+[[case]]
+name = "crunchyroll channel: a dub tag between two bars"
+input = "Phoenix Pyreapple! | DUB | One Piece"
+strict = false
+
+[case.elements]
+
+[[case]]
+name = "crunchyroll channel: a dub trailer"
+input = "Solo Leveling | DUB TRAILER"
+strict = false
+extra = true
+
+[case.elements]
+
+[[case]]
+name = "crunchyroll channel: a clip carrying a season"
+input = "A Touching Movie Farewell | DUB | Rent-a-Girlfriend Season 3"
+strict = false
+
+[case.elements]
+
+[[case]]
+name = "toho: a thirteen second teaser with no word marking it one"
+input = "MISSION: 49  | SPY x FAMILY Season 3"
+strict = false
+
+[case.elements]
+
+[[case]]
+name = "toho: a next-episode preview with its episode and episode title"
+input = "『無職転生Ⅲ』第13話「日記」次回予告／ナレーション：ルーデウス (cv.内山夕実)"
+strict = false
+extra = true
+
+[case.elements]
+
+[[case]]
+name = "toho: a preview dated by broadcast"
+input = "『薬屋のひとりごと』第1話「猫猫」予告【10/21（土）25：05～放送】"
+strict = false
+extra = true
+
+[case.elements]
+
+[[case]]
+name = "toho: a next-episode preview naming where it streams"
+input = "『葬送のフリーレン』第1話「冒険の終わり」次回予告／各動画配信サービスで配信中"
+strict = false
+extra = true
+
+[case.elements]
+
+[[case]]
+name = "toho: a preview whose episode title repeats the series"
+input = "TVアニメ『ふつつかな悪女ではございますが』第1話「ふつつかな悪女ではございますが」次回予告"
+strict = false
+extra = true
+
+[case.elements]
+
+[[case]]
+name = "toho: an excerpt from a numbered episode"
+input = "「歳をとった僕もなかなかイケメンだろう？」／『葬送のフリーレン』第1話「冒険の終わり」より"
+strict = false
+
+[case.elements]
+
+[[case]]
+name = "toho: a full length audio commentary over a real episode"
+input = "【期間限定】第3期放送記念『薬屋のひとりごと』第8話「麦稈」オーディオコメンタリー│9月27日(日)23:59まで"
+strict = false
+
+[case.elements]
+
+[[case]]
+name = "toho: a scene playback whose series is written as a hashtag"
+input = "「くそう、相変わらず可愛いなぁ」/『#無職転生Ⅲ』第12話「終わりと始まり」名シーンプレイバック!!"
+strict = false
+
+[case.elements]
+
+[[case]]
+name = "toho: highlights of a numbered episode"
+input = "[ENGLISH DUB] \"What would a villainess say?!\" Ep 8 Highlights | Though I Am an Inept Villainess"
+strict = false
+extra = true
+
+[case.elements]
+
+[[case]]
+name = "toho: highlights with the episode word spaced"
+input = "Tetsuo faces the state of the Earth - EP 1 Highlights | SNOWBALL EARTH"
+strict = false
+extra = true
+
+[case.elements]
+
+[[case]]
+name = "toho: a creditless opening"
+input = "TVアニメ『スノウボールアース』ノンクレジットOP映像／OPテーマ：tuki.「零-zero-」"
+strict = false
+extra = true
+
+[case.elements]
+
+[[case]]
+name = "toho: an episode number glued to its word inside a short"
+input = "Era's End. Their story of becoming the greatest heroes. | My Hero Academia FINAL SEASON Episode170"
+strict = false
+
+[case.elements]
+
+[[case]]
+name = "toho: a trailer joined by an em dash"
+input = "SNOWBALL EARTH—Official Main Trailer [EN SUB] Streaming Worldwide April 3"
+strict = false
+extra = true
+
+[case.elements]
+
+[[case]]
+name = "netflix: a recap across three bar segments"
+input = "1st STAGE Recap | STEEL BALL RUN JoJo's Bizarre Adventure | Netflix Anime"
+strict = false
+
+[case.elements]
+
+[[case]]
+name = "netflix: a clip that says it is one"
+input = "Velvet and Sapphire Save the Day | THE RIBBON HERO | Clip | Netflix Anime"
+strict = false
+extra = true
+
+[case.elements]
+
+[[case]]
+name = "netflix: a teaser whose tail drops the word anime"
+input = "Demon Slayer: Kimetsu no Yaiba Infinity Castle I | Official Teaser | Netflix"
+strict = false
+extra = true
+
+[case.elements]
+
+[[case]]
+name = "netflix: a trailer carrying a season"
+input = "The Apothecary Diaries Season 3 | Official Trailer | Netflix Anime"
+strict = false
+extra = true
+
+[case.elements]
+
+[[case]]
+name = "netflix: a trailer numbered by a number sign"
+input = "Mononoke The Movie: Chapter Ⅲ - The Curse of the Serpent | Official Trailer #2 | Netflix Anime"
+strict = false
+extra = true
+
+[case.elements]
+
+[[case]]
+name = "netflix: an opening credited to its artist"
+input = "SAKAMOTO DAYS OP | RUN SAKAMOTO RUN by Vaundy | Netflix Anime"
+strict = false
+extra = true
+
+[case.elements]
+
+[[case]]
+name = "netflix: a short whose only series name is a hashtag"
+input = "A blast to the past 😭 #HunterXHunter"
+strict = false
+
+[case.elements]
+
+[[case]]
+name = "netflix: a clip with no word marking it one"
+input = "Hathaway and Gigi | MOBILE SUIT GUNDAM HATHAWAY | Netflix Anime"
+strict = false
+
+[case.elements]
+
+[[case]]
+name = "tms: a short with a four digit episode number"
+input = "A Reunion and a Reckoning. | Detective Conan ep 0259 shorts"
+strict = false
+extra = true
+
+[case.elements]
+
+[[case]]
+name = "tms: another four digit short"
+input = "Chaos gets the job done. | Detective Conan ep 0278 shorts"
+strict = false
+extra = true
+
+[case.elements]
+
+[[case]]
+name = "tms: an official opening"
+input = "Blue Box | \"Same Blue\" - Official HIGE DANdism | Official Opening"
+strict = false
+extra = true
+
+[case.elements]
+
+[[case]]
+name = "tms: a numbered ending that is not an episode"
+input = "Blue Box | \"Contrast\" - TOMOO | Official Ending 2"
+strict = false
+extra = true
+
+[case.elements]
+
+[[case]]
+name = "aniplex: a preview tag opens the name"
+input = "【次回予告】TVアニメ『うちの弟どもがすみません』第12話「思い出よ降りつもれ」｜毎週金曜24：00より放送中！"
+strict = false
+extra = true
+
+[case.elements]
+
+[[case]]
+name = "aniplex: a creditless opening in kana"
+input = "【先行公開】TVアニメ「バーテックスフォース」ノンクレジットオープニング映像｜ClariS「シンクロブルー」"
+strict = false
+
+[case.elements]
+
+[[case]]
+name = "aniplex: a theatrical trailer"
+input = "劇場先行版『風を継ぐもの -はじまり-』予告映像"
+strict = false
+extra = true
+
+[case.elements]
+
+[[case]]
+name = "aniplex: a livestream whose part number looks like an episode"
+input = "【生配信】TVアニメ『電撃デイジー』その1：はじめまして。in 京都｜9月19日(土) 12:20～13:00"
+strict = false
+
+[case.elements]
+
+[[case]]
+name = "aniplex: a short with a dingbat count"
+input = "アニメ『青春ブタ野郎はサンタクロースの夢を見ない』第5話・ピックアップ❶｜#青ブタ  #アニメ #anime"
+strict = false
+
+[case.elements]
+
+[[case]]
+name = "aniplex: a short carrying an episode and its title"
+input = "今度は、西が勝つ｜TVアニメ「黄泉のツガイ」第23話 情と理｜#黄泉のツガイ #ヨミツガ  #アニメ #anime"
+strict = false
+
+[case.elements]
+
+[[case]]
+name = "aniplex: a numbered segment in mathematical letters"
+input = "【𝕌ℂℍ𝕀𝕆𝕋𝕆 ℙ𝕀ℂ𝕂 𝕌ℙ #11 】TVアニメ『うちの弟どもがすみません』毎週金曜24：00より放送中！"
+strict = false
+
+[case.elements]
+
+[[case]]
+name = "aniplex: a promo whose full-width number is not an episode"
+input = "TVアニメ『電撃デイジー』メインPV第１弾｜2027年1月より連続2クールにて放送開始"
+strict = false
+extra = true
+
+[case.elements]
+
+[[case]]
+name = "tv tokyo: a short quoting a season"
+input = "共闘｜TVアニメ「ブラッククローバー」1st Seasonより🍀"
+strict = false
+
+[case.elements]
+
+[[case]]
+name = "tv tokyo: a recap promo with a dingbat count"
+input = "TVアニメ「ブラッククローバー」1st Season振り返りPV ❾｜Black Catcher／ビッケブランカver."
+strict = false
+extra = true
+
+[case.elements]
+
+[[case]]
+name = "tv tokyo: a creditless opening in kana"
+input = "TVアニメ『BLEACH 千年血戦篇-禍進譚-』ノンクレジットオープニングムービー"
+strict = false
+
+[case.elements]
+
+[[case]]
+name = "tv tokyo: a creditless ending in kana"
+input = "TVアニメ『手札が多めのビクトリア』ノンテロップED映像｜エンディングテーマ：KI_EN「縁のつき」⟡.·"
+strict = false
+extra = true
+
+[case.elements]
+
+[[case]]
+name = "gundam: opening footage of a film"
+input = "『機動戦士ガンダム 光のともだち』冒頭映像｜【実物大νガンダム立像 新作壁面映像】9月19日(土)上映開始！"
+strict = false
+
+[case.elements]
+
+[[case]]
+name = "gundam: a dub trailer"
+input = "Mobile Suit Gundam GQuuuuuuX Trailer (EN dub)"
+strict = false
+extra = true
+
+[case.elements]
+
+[[case]]
+name = "gundam: a game livestream in square brackets"
+input = "[SD Gundam G Generation ETERNAL]1.5th Anniversary Roadmap Reveal Live Stream"
+strict = false
+
+[case.elements]
+
+[[case]]
+name = "gundam: a short whose scene number looks like an episode"
+input = "【GMM】Mobile Suit Gundam 0083: The Afterglow of Zeon scene1 #shorts #gundam #anime"
+strict = false
+extra = true
+
+[case.elements]
+
+[[case]]
+name = "gundam: a korean game promo"
+input = "\"기동전사 건담 00F\" SD건담 지 제네레이션 이터널 PLAY to WATCH!! [SD건담 지 제네레이션 이터널]"
+strict = false
+
+[case.elements]
+
+[[case]]
+name = "gundam: the same promo in traditional han"
+input = "《機動戰士鋼彈00F》G世代 永恆 PLAY to WATCH‼【SD鋼彈 G世代 永恆】"
+strict = false
+
+[case.elements]
+
+[[case]]
+name = "anime manga official: a teaser holding the japanese title in full-width parens"
+input = "【Official Teaser】\"GACHIAKUTA\"（アニメ『ガチアクタ』）【Anime Manga Official】"
+strict = false
+extra = true
+
+[case.elements]
+
+[[case]]
+name = "anime manga official: a trailer whose han number is a season"
+input = "【Official Trailer】\"That Time I Got Reincarnated as a Slime\"/『転生したらスライムだった件』第4期【Anime Manga Official】"
+strict = false
+extra = true
+
+[case.elements]
+
+[[case]]
+name = "anime manga official: an abbreviated channel tag"
+input = "【Official Trailer】\"The Laid-Off Cheat-Granting Mage Enjoys a Second Lease on Life\"【AMO】"
+strict = false
+extra = true
+
+[case.elements]
+
+[[case]]
+name = "anime manga official: full-width brackets around the series"
+input = "＼Witch Hat Atelier／ Who would you be for a day? @ Kodansha House in LA #とんがり帽子のアトリエ #Manga #Anime"
+strict = false
+
+[case.elements]
+
+# --- Streaming sites: the tab title, when the page declares no metadata ----
+
+[[case]]
+name = "iqiyi: a whole sentence wraps the series and episode"
+input = "Watch the latest Gachiakuta Episode 1  online with English subtitle for free – iQIYI | iQ.com"
+strict = false
+
+[case.elements]
+anime_title = "Gachiakuta"
+episode_number = "1"
+
+[[case]]
+name = "iqiyi: the series is itself bracketed"
+input = "Watch the latest 【Oshi No Ko】 Episode 1  online with English subtitle for free – iQIYI | iQ.com"
+strict = false
+
+[case.elements]
+anime_title = "【Oshi No Ko】"
+episode_number = "1"
+
+[[case]]
+name = "iqiyi: a colon inside the series"
+input = "Watch the latest Mushoku Tensei: Jobless Reincarnation Episode 1  online with English subtitle for free – iQIYI | iQ.com"
+strict = false
+
+[case.elements]
+anime_title = "Mushoku Tensei: Jobless Reincarnation"
+episode_number = "1"
+
+[[case]]
+name = "hidive: the page title names no series at all"
+input = "E1 - Mother and Children"
+strict = false
+
+[case.elements]
+episode_number = "1"
+
+[[case]]
+name = "bilibili: a user upload with the site as a suffix"
+input = "Mermaid Melody - Episode 1 (English subtitles) - BiliBili"
+strict = false
+
+[case.elements]
+anime_title = "Mermaid Melody"
+episode_number = "1"
+
+[[case]]
+name = "crunchyroll: every watch page serves one generic title until its script runs"
+input = "Crunchyroll: Watch Popular Anime, Play Games & Shop Online"
+strict = false
+
+[case.elements]
+
+[[case]]
+name = "netflix: the watch page names the series and no episode"
+input = "Watch My Happy Marriage | Netflix Official Site"
+strict = false
+
+[case.elements]
+anime_title = "My Happy Marriage"
+
+# --- Other languages and scripts -------------------------------------------
+
+[[case]]
+name = "tms brazil: portuguese episode word and a dubbed tag"
+input = "Guerreiras Mágicas de Rayearth | Episódio 1 - Guerreiras Mágicas! Chegou a sua vez! (Dublado)"
+strict = false
+
+[case.elements]
+anime_title = "Guerreiras Mágicas de Rayearth"
+episode_number = "1"
+
+[[case]]
+name = "tms brazil: the season is a portuguese word in the series"
+input = "LUPIN III: Parte 4 | Episódio 1 - O Casamento de Lupin | Sub Português"
+strict = false
+
+[case.elements]
+anime_title = "LUPIN III"
+anime_season = "4"
+episode_number = "1"
+
+[[case]]
+name = "tms brazil: a decimal inside the episode title"
+input = "LUPIN III: Parte 4 | Episódio 3 - Chances de Sobrevivência: 0.2% | Sub Português"
+strict = false
+
+[case.elements]
+anime_title = "LUPIN III"
+anime_season = "4"
+episode_number = "3"
+
+[[case]]
+name = "tms brazil: a japanese series with a portuguese tail"
+input = "Tsukumogami Kashimasu | Episódio 1 - Rikyu-nezumi | Sub Portuguese"
+strict = false
+
+[case.elements]
+anime_title = "Tsukumogami Kashimasu"
+episode_number = "1"
+
+[[case]]
+name = "tms brazil: a missing space before the final bar"
+input = "Tsukumogami Kashimasu | Episódio 4 - Kogare-kou| Sub Portuguese"
+strict = false
+
+[case.elements]
+anime_title = "Tsukumogami Kashimasu"
+episode_number = "4"
+
+[[case]]
+name = "tms brazil: the episode word is lower case"
+input = "SONIC X | episódio 1 - O Herói Supersônico Aparece  (Dublado)"
+strict = false
+
+[case.elements]
+anime_title = "SONIC X"
+episode_number = "1"
+
+[[case]]
+name = "tms brazil: the dash is glued to the episode number"
+input = "SONIC X | episódio 3- A Ambição Do Doutor Eggman  (Dublado)"
+strict = false
+
+[case.elements]
+anime_title = "SONIC X"
+episode_number = "3"
+
+[[case]]
+name = "sunrise: a tv-body tag and a zero padded han episode"
+input = "【TV本編】「クロスアンジュ 天使と竜の輪舞」第01話〔サンチャン〕"
+strict = false
+
+[case.elements]
+anime_title = "クロスアンジュ 天使と竜の輪舞"
+episode_number = "01"
+
+[[case]]
+name = "toei: an ideographic space before the episode word"
+input = "【公式】『仮面ライダーマイス』　第1話「子(ねずみ)マイスターとお嬢様」"
+strict = false
+
+[case.elements]
+anime_title = "仮面ライダーマイス"
+episode_number = "1"
+
+[[case]]
+name = "an arc name split from the series by an ideographic space"
+input = "アニメ『冒険大陸 アニアキングダム　ドラゴン島の戦い編』第1話「襲来！ドラゴン島」"
+strict = false
+
+[case.elements]
+anime_title = "冒険大陸 アニアキングダム　ドラゴン島の戦い編"
+episode_number = "1"
+
+[[case]]
+name = "sanrio: the episode title leads and the series follows a bar"
+input = "【サンリオアニメ】マイメロディのフキゲンな1日 パート1｜『スーパーキュートアドベンチャーズ』第1シリーズ第1話"
+strict = false
+
+[case.elements]
+anime_title = "スーパーキュートアドベンチャーズ"
+episode_number = "1"
+
+[[case]]
+name = "two episodes in one upload, mixing bar widths"
+input = "【2話まとめ】第1話・第2話｜アンナとアイニャン、運命の出会い🐱💖｜ウィッシュキャット | #子供向けアニメ #キッズアニメ #ウィッシュキャット"
+strict = false
+
+[case.elements]
+anime_title = "ウィッシュキャット"
+episode_number = ["1", "2"]
+
+[[case]]
+name = "takara tomy: a full-width digit in the episode word"
+input = "【トミカ クロスレスキュー】第１話 ゴー！ クロスレスキュー！ 【トミカ】"
+strict = false
+
+[case.elements]
+anime_title = "トミカ クロスレスキュー"
+episode_number = "1"
+
+[[case]]
+name = "the episode word leads in brackets, with two segments in the title"
+input = "【第1話】『ぷるるんっ!しずくちゃん あはっ☆』平成＆令和女子に大人気のキャラクター 「しずくの森へいらっしゃい!／ようこそ!ヴィーノ・ファミリー」"
+strict = false
+
+[case.elements]
+anime_title = "ぷるるんっ!しずくちゃん あはっ☆"
+episode_number = "1"
