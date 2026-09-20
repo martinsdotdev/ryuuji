@@ -16,11 +16,18 @@ identifiable = false
 searchable = false
 values = ["SP"]
 
+# Types no show can be: a name carrying one is a name for something beside
+# an episode. They stay unidentifiable so they can still be words of a title,
+# and `valid = false` is what [`Reading::extra`] reads to say so.
 [[keyword]]
 kind = "anime_type"
 identifiable = false
 valid = false
-values = ["ED", "ENDING", "NCED", "NCOP", "OP", "OPENING", "PREVIEW", "PV"]
+values = [
+    "ED", "ENDING", "NCED", "NCOP", "OP", "OPENING", "PREVIEW", "PV",
+    "TRAILER", "TEASER", "HIGHLIGHT", "HIGHLIGHTS", "CLIP", "CLIPS", "SHORTS",
+    "予告", "預告", "精華重溫",
+]
 
 [[keyword]]
 kind = "audio_term"
@@ -141,6 +148,22 @@ values = ["VOL", "VOL.", "VOLUME"]
 [[preidentified]]
 text = "Dual Audio"
 kind = "audio_term"
+
+# Han runs with no word breaks, so these never arrive as a token of their own
+# and the keyword table alone could never see them. 予告 is a prefix of
+# 次回予告 and matches inside it, which is the same word with "next time" in
+# front of it.
+[[preidentified]]
+text = "予告"
+kind = "anime_type"
+
+[[preidentified]]
+text = "預告"
+kind = "anime_type"
+
+[[preidentified]]
+text = "精華重溫"
+kind = "anime_type"
 
 [[preidentified]]
 text = "H264"

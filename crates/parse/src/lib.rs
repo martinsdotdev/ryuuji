@@ -132,6 +132,52 @@ mod tests {
     }
 
     #[test]
+    fn a_name_for_something_beside_an_episode_says_so() {
+        for input in [
+            "Daemons of the Shadow Realm - EP24 Preview",
+            "Solo Leveling | DUB TRAILER",
+            "Tetsuo faces the state of the Earth - EP 1 Highlights | SNOWBALL EARTH",
+            "Velvet and Sapphire Save the Day | THE RIBBON HERO | Clip | Netflix Anime",
+            "A Reunion and a Reckoning. | Detective Conan ep 0259 shorts",
+        ] {
+            assert!(
+                parse(input, &Options::default()).extra().is_some(),
+                "{input:?}"
+            );
+        }
+    }
+
+    // Han runs with no word breaks, so these reach no rule as a token of
+    // their own; only a pre-identified entry can cut them out. 次回予告 is
+    // 予告 with "next time" in front of it, and the prefix match is what
+    // catches both.
+    #[test]
+    fn a_han_word_for_something_beside_an_episode_says_so() {
+        for input in [
+            "『葬送のフリーレン』第1話「冒険の終わり」次回予告",
+            "『薬屋のひとりごと』第1話「猫猫」予告",
+            "2026年4月新番《黒貓與魔女的教室》預告【Ani-One Asia】",
+            "《相反的你和我 第二季》第22話｜精華重溫【Ani-One Asia】",
+        ] {
+            assert!(
+                parse(input, &Options::default()).extra().is_some(),
+                "{input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_episode_of_a_show_says_nothing_of_the_kind() {
+        for input in [
+            "[TaigaSubs]_Toradora!_(2008)_-_01v2_-_Tiger_and_Dragon_[1280x720].mkv",
+            "BLACK TORCH - Episode 12 [English Sub]",
+            "《幼女戰記 2》#11 (繁中字幕 | 日語原聲)【Ani-One Asia】",
+        ] {
+            assert_eq!(parse(input, &Options::default()).extra(), None, "{input:?}");
+        }
+    }
+
+    #[test]
     fn removing_an_ignored_string_maps_the_rest_back_to_the_input() {
         let input = "[EnigmaBD 1080p]";
         let mut text = input.to_owned();
