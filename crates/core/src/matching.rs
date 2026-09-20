@@ -61,18 +61,23 @@ impl ProposedMatch {
     }
 }
 
-/// Folds a title to the loose form matching compares: lowercase ASCII
+/// Folds a title to the loose form matching compares: lowercase
 /// alphanumeric tokens, `&` spelled out, a leading "the" dropped, roman
 /// numerals and season phrasings reduced to the bare number.
+///
+/// Every letter counts, not only the ASCII ones. A title written in kana or
+/// han folded to nothing while the punctuation around it folded to spaces,
+/// and an empty fold is how a title reaches [`Resolution::Unmatched`] before
+/// the aliases are even read, so no such title could ever be remembered.
 pub fn normalize_title(title: &str) -> String {
     let cleaned: String = title
         .replace('&', " and ")
         .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_lowercase()
+        .flat_map(|c| {
+            if c.is_alphanumeric() {
+                c.to_lowercase().collect::<Vec<char>>()
             } else {
-                ' '
+                vec![' ']
             }
         })
         .collect();
@@ -457,6 +462,28 @@ mod tests {
     #[test]
     fn ampersand_is_spelled_out() {
         assert_eq!(normalize_title("Hana & Alice"), "hana and alice");
+    }
+
+    // A browser reports the title a page wrote, which for most of the world
+    // is not ASCII. Folding those to nothing made every such show unmatchable
+    // and, worse, unrememberable: `resolve` gives up on an empty needle before
+    // it reads the aliases, so confirming one could never stick.
+    #[test]
+    fn a_title_outside_ascii_still_folds_to_something() {
+        assert_eq!(normalize_title("葬送のフリーレン"), "葬送のフリーレン");
+        assert_eq!(normalize_title("《幼女戰記 2》"), "幼女戰記 2");
+        assert_eq!(normalize_title("Pokémon"), "pokémon");
+        assert_eq!(normalize_title("ＴＶアニメ"), "ｔｖアニメ");
+    }
+
+    #[test]
+    fn a_title_outside_ascii_can_be_remembered() {
+        let library = library(&["Frieren: Beyond Journey's End"]);
+        let aliases = Aliases::of([("葬送のフリーレン".to_owned(), library[0].id)]);
+        assert_eq!(
+            resolve("葬送のフリーレン", &library, &aliases),
+            Resolution::Exact(library[0].id)
+        );
     }
 
     #[test]
