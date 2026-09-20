@@ -45,6 +45,7 @@ pub enum RuleName {
     EpisodeSeparated,
     EpisodeIsolated,
     EpisodeLast,
+    TitleQuoted,
     Title,
     ReleaseGroup,
     ReleaseGroupTrailing,
@@ -54,7 +55,7 @@ pub enum RuleName {
 }
 
 impl RuleName {
-    pub const ALL: [RuleName; 31] = [
+    pub const ALL: [RuleName; 32] = [
         RuleName::Prelude,
         RuleName::Preidentified,
         RuleName::Terms,
@@ -80,6 +81,7 @@ impl RuleName {
         RuleName::EpisodeSeparated,
         RuleName::EpisodeIsolated,
         RuleName::EpisodeLast,
+        RuleName::TitleQuoted,
         RuleName::Title,
         RuleName::ReleaseGroup,
         RuleName::ReleaseGroupTrailing,
@@ -115,6 +117,7 @@ impl RuleName {
             RuleName::EpisodeSeparated => "episode_separated",
             RuleName::EpisodeIsolated => "episode_isolated",
             RuleName::EpisodeLast => "episode_last",
+            RuleName::TitleQuoted => "title_quoted",
             RuleName::Title => "title",
             RuleName::ReleaseGroup => "release_group",
             RuleName::ReleaseGroupTrailing => "release_group_trailing",

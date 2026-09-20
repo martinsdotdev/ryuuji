@@ -4,7 +4,7 @@ use crate::options::Options;
 use crate::string;
 use crate::token::{Shape, Token};
 
-const BRACKET_PAIRS: [(char, char); 7] = [
+const BRACKET_PAIRS: [(char, char); 11] = [
     ('(', ')'),
     ('[', ']'),
     ('{', '}'),
@@ -12,6 +12,10 @@ const BRACKET_PAIRS: [(char, char); 7] = [
     ('『', '』'),
     ('【', '】'),
     ('（', '）'),
+    ('《', '》'),
+    ('〈', '〉'),
+    ('〔', '〕'),
+    ('“', '”'),
 ];
 
 /// The characters a site or an uploader writes between the parts of a name:
