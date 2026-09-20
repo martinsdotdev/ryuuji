@@ -393,7 +393,7 @@ fn run_browser() -> (usize, usize, Vec<String>) {
     (document.case.len(), passed, failures)
 }
 
-const BROWSER_BASELINE: usize = 98;
+const BROWSER_BASELINE: usize = 125;
 
 /// Every failing case: `cargo test -p ryuuji-parse -- --ignored
 /// browser_report --nocapture`.

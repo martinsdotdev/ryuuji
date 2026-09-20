@@ -172,7 +172,7 @@ mod tests {
         assert_eq!(count(table, ElementKind::AnimeSeasonPrefix), 2);
         assert_eq!(count(table, ElementKind::EpisodePrefix), 13);
         assert_eq!(count(table, ElementKind::ReleaseVersion), 5);
-        assert_eq!(table.preidentified().len(), 12);
+        assert_eq!(table.preidentified().len(), 15);
     }
 
     #[test]
