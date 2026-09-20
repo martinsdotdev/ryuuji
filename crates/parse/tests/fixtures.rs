@@ -46,6 +46,10 @@ struct Case {
     /// A doubt the reading must record.
     #[serde(default)]
     alternative: Vec<AlternativeCase>,
+    /// Whether the name says it is something beside an episode. Read by the
+    /// browser corpus, where it is half of what a case pins.
+    #[serde(default)]
+    extra: bool,
 }
 
 #[derive(Deserialize)]
@@ -205,7 +209,9 @@ fn every_rule_is_named_by_some_case() {
 fn a_guessed_episode_always_records_an_alternative() {
     let document: Document =
         toml::from_str(include_str!("../fixtures/ryuuji.toml")).expect("ryuuji.toml parses");
-    for case in &document.case {
+    let browser: Document =
+        toml::from_str(include_str!("../fixtures/browser.toml")).expect("browser.toml parses");
+    for case in document.case.iter().chain(&browser.case) {
         let reading = parse(&case.input, &case.options);
         let guessed = reading
             .episodes()
@@ -327,6 +333,8 @@ fn every_span_slices_its_input() {
         toml::from_str(include_str!("../fixtures/ryuuji.toml")).expect("ryuuji.toml parses");
     let anitomy: Vec<AnitomyCase> = serde_json::from_str(include_str!("../fixtures/anitomy.json"))
         .expect("anitomy.json parses");
+    let browser: Document =
+        toml::from_str(include_str!("../fixtures/browser.toml")).expect("browser.toml parses");
     let ryuuji = document
         .case
         .iter()
@@ -334,11 +342,79 @@ fn every_span_slices_its_input() {
     let anitomy = anitomy
         .iter()
         .map(|case| (case.file_name.as_str(), case.options()));
+    let browser = browser
+        .case
+        .iter()
+        .map(|case| (case.input.as_str(), case.options.clone()));
     let mismatches: Vec<String> = ryuuji
         .chain(anitomy)
+        .chain(browser)
         .flat_map(|(input, options)| span_mismatches(input, &parse(input, &options)))
         .collect();
     assert!(mismatches.is_empty(), "\n{}", mismatches.join("\n"));
+}
+
+/// The browser corpus, compared the way a loose ryuuji case is, plus what
+/// each name says it is. A case pins what Ryuuji should read, so the shapes
+/// a parser that sees only a title cannot reach stay failing here.
+fn run_browser() -> (usize, usize, Vec<String>) {
+    let document: Document =
+        toml::from_str(include_str!("../fixtures/browser.toml")).expect("browser.toml parses");
+    let mut passed = 0;
+    let mut failures = Vec::new();
+    for (index, case) in document.case.iter().enumerate() {
+        let expected = expected_map(&case.elements);
+        let reading = parse(&case.input, &case.options);
+        let mut parsed = parsed_map(reading.elements());
+        if !case.strict {
+            parsed.retain(|label, _| expected.contains_key(label));
+        }
+        let mut failure = if parsed == expected {
+            String::new()
+        } else {
+            differences(index, &case.input, &expected, &parsed)
+        };
+        let extra = reading.extra().is_some();
+        if extra != case.extra {
+            if failure.is_empty() {
+                failure = format!("#{index} {}", case.input);
+            }
+            failure.push_str(&format!(
+                "\n    extra: expected {} parsed {extra}",
+                case.extra
+            ));
+        }
+        if failure.is_empty() {
+            passed += 1;
+        } else {
+            failures.push(failure);
+        }
+    }
+    (document.case.len(), passed, failures)
+}
+
+const BROWSER_BASELINE: usize = 77;
+
+/// Every failing case: `cargo test -p ryuuji-parse -- --ignored
+/// browser_report --nocapture`.
+#[test]
+#[ignore]
+fn browser_report() {
+    let (total, passed, failures) = run_browser();
+    eprintln!("browser conformance: {passed}/{total} passed");
+    for failure in &failures {
+        eprintln!("{failure}");
+    }
+}
+
+#[test]
+fn browser_pass_count_never_regresses() {
+    let (total, passed, _) = run_browser();
+    assert_eq!(total, 163);
+    assert!(
+        passed >= BROWSER_BASELINE,
+        "browser passes regressed: {passed} < {BROWSER_BASELINE}"
+    );
 }
 
 const ANITOMY_BASELINE: usize = 156;
