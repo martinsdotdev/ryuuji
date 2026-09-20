@@ -14,6 +14,11 @@ pub(crate) enum Shape {
     /// A term the tokenizer cut out of a longer run because the keyword
     /// table lists it whole (`H.264`, `Dual Audio`). Never free.
     Term,
+    /// A bar or a bullet written between the parts of a name, the way a
+    /// site or an uploader divides a series from its episode from its
+    /// channel. Never free and never part of a value: it spells none of the
+    /// name, it says where one part of it stops.
+    Separator,
 }
 
 /// Which rule took which part of a token, and as what. A held taking reads
@@ -74,6 +79,10 @@ impl Token {
 
     pub(crate) fn is_delimiter(&self) -> bool {
         self.shape == Shape::Delimiter
+    }
+
+    pub(crate) fn is_separator(&self) -> bool {
+        self.shape == Shape::Separator
     }
 
     /// A word with chars no rule has taken: the working set of every rule.
@@ -246,7 +255,10 @@ impl Tape {
         (begin..self.tokens.len())
             .find_map(|index| {
                 let token = &self.tokens[index];
-                if token.is_taken() || (stop_at_brackets && token.is_bracket()) {
+                if token.is_taken()
+                    || token.is_separator()
+                    || (stop_at_brackets && token.is_bracket())
+                {
                     Some(index)
                 } else if token.is_partly_taken() {
                     Some(index + 1)
@@ -297,7 +309,7 @@ impl Tape {
                         }
                     }
                 },
-                Shape::Term => {}
+                Shape::Term | Shape::Separator => {}
             }
         }
         match delimiters {

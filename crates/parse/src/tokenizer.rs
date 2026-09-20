@@ -14,6 +14,14 @@ const BRACKET_PAIRS: [(char, char); 7] = [
     ('（', '）'),
 ];
 
+/// The characters a site or an uploader writes between the parts of a name:
+/// `Series | Episode 12 | Multi Sub`. They are not delimiters, because a
+/// delimiter stands inside a name the way a space or an underscore does,
+/// and these end one. The full-width bar is its own character rather than a
+/// spelling of the ASCII one, and at least one channel writes a
+/// box-drawing line where it means a bar.
+const SEPARATORS: [char; 4] = ['|', '｜', '│', '•'];
+
 fn matching_closer(open: char) -> Option<char> {
     BRACKET_PAIRS
         .iter()
@@ -162,6 +170,7 @@ fn split_by_delimiters(
     for &c in chars {
         if !c.is_ascii_alphanumeric()
             && c != '-'
+            && !SEPARATORS.contains(&c)
             && options.allowed_delimiters.contains(c)
             && !delimiters.contains(&c)
         {
@@ -182,13 +191,18 @@ fn split_by_delimiters(
     };
     let mut start = 0;
     for (index, &c) in chars.iter().enumerate() {
-        if delimiters.contains(&c) {
-            if index > start {
-                push(tokens, Shape::Word, start, index);
-            }
-            push(tokens, Shape::Delimiter, index, index + 1);
-            start = index + 1;
+        let shape = if SEPARATORS.contains(&c) {
+            Shape::Separator
+        } else if delimiters.contains(&c) {
+            Shape::Delimiter
+        } else {
+            continue;
+        };
+        if index > start {
+            push(tokens, Shape::Word, start, index);
         }
+        push(tokens, shape, index, index + 1);
+        start = index + 1;
     }
     if start < chars.len() {
         push(tokens, Shape::Word, start, chars.len());
@@ -330,6 +344,53 @@ mod tests {
         assert_eq!(
             tokens.iter().map(|t| t.enclosed).collect::<Vec<_>>(),
             [true, true, true, false, false]
+        );
+    }
+
+    #[test]
+    fn every_bar_and_bullet_separates() {
+        for bar in ["|", "｜", "│", "•"] {
+            let input = format!("Frieren {bar} Episode 12");
+            assert_eq!(
+                summary(&tokens(&input))
+                    .into_iter()
+                    .map(|(shape, _)| shape)
+                    .collect::<Vec<_>>(),
+                [
+                    Shape::Word,
+                    Shape::Delimiter,
+                    Shape::Separator,
+                    Shape::Delimiter,
+                    Shape::Word,
+                    Shape::Delimiter,
+                    Shape::Word,
+                ],
+                "{bar}"
+            );
+        }
+    }
+
+    // A bar between two spaces used to be promoted to a word, the way `_&_`
+    // is, and then leaked into whatever value the run spelled.
+    #[test]
+    fn a_spaced_bar_is_not_promoted_to_a_word() {
+        assert!(
+            !summary(&tokens("Frieren | Episode 12"))
+                .iter()
+                .any(|&(shape, text)| shape == Shape::Word && text == "|")
+        );
+    }
+
+    #[test]
+    fn a_bar_glued_to_a_word_still_separates() {
+        assert_eq!(
+            summary(&tokens("[EN Sub]｜Muse PH")).last(),
+            Some(&(Shape::Word, "PH"))
+        );
+        assert!(
+            summary(&tokens("[EN Sub]｜Muse PH"))
+                .iter()
+                .any(|&(shape, _)| shape == Shape::Separator)
         );
     }
 
