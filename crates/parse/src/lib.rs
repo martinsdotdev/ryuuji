@@ -176,6 +176,37 @@ mod tests {
         assert_eq!(text, "Watching YouTube");
     }
 
+    // A term with a space in it can only be found as a pre-identified entry:
+    // the keyword table is searched one token at a time and a space ends a
+    // token, so "MULTI SUB" sat in the table unreachable.
+    #[test]
+    fn a_term_written_with_a_space_is_read() {
+        for (input, term) in [
+            ("Show EP01 Multi Sub", "Multi Sub"),
+            ("Show EP01 MULTI SUB", "MULTI SUB"),
+        ] {
+            let elements = elements(input, &Options::default());
+            assert_eq!(
+                elements.get(ElementKind::AnimeTitle),
+                Some("Show"),
+                "{input}"
+            );
+            // The whole term, not the `Sub` the table would find on its own.
+            assert_eq!(elements.get(ElementKind::Subtitles), Some(term), "{input}");
+        }
+    }
+
+    #[test]
+    fn a_season_and_episode_may_be_split_by_a_colon() {
+        let elements = elements(
+            "TOUGEN ANKI S1:E1 \u{2022} Oni's Blood",
+            &Options::default(),
+        );
+        assert_eq!(elements.get(ElementKind::AnimeSeason), Some("1"));
+        assert_eq!(elements.get(ElementKind::EpisodeNumber), Some("1"));
+        assert_eq!(elements.get(ElementKind::AnimeTitle), Some("TOUGEN ANKI"));
+    }
+
     #[test]
     fn a_name_for_something_beside_an_episode_says_so() {
         for input in [

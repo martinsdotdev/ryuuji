@@ -187,9 +187,10 @@ mod tests {
     fn builtin_table_parses_with_expected_counts() {
         let table = KeywordTable::builtin();
         assert_eq!(count(table, ElementKind::AnimeSeasonPrefix), 2);
-        assert_eq!(count(table, ElementKind::EpisodePrefix), 13);
+        assert_eq!(count(table, ElementKind::EpisodePrefix), 14);
         assert_eq!(count(table, ElementKind::ReleaseVersion), 5);
-        assert_eq!(table.preidentified().len(), 15);
+        assert_eq!(table.preidentified().len(), 17);
+        assert_eq!(table.suffixes().len(), 7);
     }
 
     #[test]

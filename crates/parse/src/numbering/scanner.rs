@@ -96,9 +96,11 @@ pub(super) fn version(scanner: &mut Scanner) -> Option<Part> {
 }
 
 pub(super) fn eat_episode_separator(scanner: &mut Scanner) -> bool {
+    // A colon separates the two only in a title a person wrote (`S1:E1`); no
+    // release name spells it that way, and a colon never sits inside a word.
     let separated = scanner
         .attempt(|scanner| {
-            (scanner.eat_any(&[' ', '.', '_', '-', 'x', 'X']) && scanner.eat_any(&['E', 'e']))
+            (scanner.eat_any(&[' ', '.', '_', '-', ':', 'x', 'X']) && scanner.eat_any(&['E', 'e']))
                 .then_some(())
         })
         .is_some();
