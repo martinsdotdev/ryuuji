@@ -71,7 +71,7 @@ values = ["ANDROID"]
 kind = "episode_prefix"
 values = [
     "EP", "EP.", "EPS", "EPS.", "EPISODE", "EPISODE.", "EPISODES",
-    "CAPITULO", "EPISODIO", "EPISÓDIO", "FOLGE",
+    "CAPITULO", "EPISODIO", "EPISÓDIO", "ÉPISODE", "FOLGE",
 ]
 
 [[keyword]]
@@ -98,7 +98,7 @@ values = [
 
 [[keyword]]
 kind = "language"
-values = ["ENG", "ENGLISH", "ESPANOL", "JAP", "PT-BR", "SPANISH", "VOSTFR"]
+values = ["ENG", "ENGLISH", "ESPANOL", "HINDI", "JAP", "PT-BR", "SPANISH", "VOSTFR"]
 
 [[keyword]]
 kind = "language"
@@ -139,6 +139,7 @@ kind = "subtitles"
 values = [
     "ASS", "BIG5", "DUB", "DUBBED", "HARDSUB", "HARDSUBS", "RAW",
     "SOFTSUB", "SOFTSUBS", "SUB", "SUBBED", "SUBTITLED", "MULTISUB", "MULTI SUB",
+    "MULTI-SUB", "SUB/DUB",
 ]
 
 [[keyword]]
@@ -161,6 +162,17 @@ values = ["VOL", "VOL.", "VOLUME"]
 [[preidentified]]
 text = "Dual Audio"
 kind = "audio_term"
+
+# "MULTI SUB" is in the table above, where it can never be found: a lookup
+# takes one token and a space ends one. Only a pre-identified entry sees a
+# term with a space in it, and those match the written case exactly.
+[[preidentified]]
+text = "Multi Sub"
+kind = "subtitles"
+
+[[preidentified]]
+text = "MULTI SUB"
+kind = "subtitles"
 
 # Han runs with no word breaks, so these never arrive as a token of their own
 # and the keyword table alone could never see them. 予告 is a prefix of

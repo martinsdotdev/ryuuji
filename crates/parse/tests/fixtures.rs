@@ -410,7 +410,7 @@ fn browser_report() {
 #[test]
 fn browser_pass_count_never_regresses() {
     let (total, passed, _) = run_browser();
-    assert_eq!(total, 163);
+    assert_eq!(total, 164);
     assert!(
         passed >= BROWSER_BASELINE,
         "browser passes regressed: {passed} < {BROWSER_BASELINE}"

@@ -17,6 +17,18 @@
 
 # --- YouTube, official channels: full episodes and movies ------------------
 
+# Measured 2026-09-17 by playing it, not from a feed. Known failure: the
+# uploader's words lead the name, so the segment before the bar reads as the
+# title. Nothing here can tell "Full Movie" from a series called that, and
+# one name is not enough to write a rule on.
+[[case]]
+name = "youtube: the uploader's words lead the name"
+input = "Full Movie | Attack on Titan Part 1 - Guren no Yumiya - (English Sub)"
+strict = false
+
+[case.elements]
+anime_title = "Attack on Titan Part 1 - Guren no Yumiya"
+
 [[case]]
 name = "muse asia: season in the series, episode and language tag"
 input = "Mushoku Tensei: Jobless Reincarnation Season 3 - Episode 01 [English Sub]"
