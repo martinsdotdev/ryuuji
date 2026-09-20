@@ -31,6 +31,7 @@ mod term_in_anime_title;
 mod term_is_episode_title;
 mod terms;
 mod title;
+mod title_quoted;
 mod volume_in_word;
 mod volume_prefix;
 mod year;
@@ -229,6 +230,7 @@ pub(crate) const RULES: &[Step] = &[
     Step::Tape(episode_separated::RULE),
     Step::Tape(episode_isolated::RULE),
     Step::Tape(episode_last::RULE),
+    Step::Tape(title_quoted::RULE),
     Step::Tape(title::RULE),
     Step::Tape(release_group::RULE),
     Step::Tape(release_group_trailing::RULE),

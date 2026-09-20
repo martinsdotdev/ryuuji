@@ -1283,3 +1283,19 @@ anime_title = "title"
 anime_type = "terms"
 language = "terms"
 subtitles = "terms"
+
+# A channel that quotes its series writes everything else loose around it, so
+# the title rule would read the channel's own tag instead: nothing free stands
+# outside the brackets, and its fallback is the second bracket group.
+[[case]]
+name = "a quoted name before the episode is the anime title"
+input = "《黒貓與魔女的教室》 #24 (繁中字幕 | 日語原聲)【Ani-One Asia】"
+
+[case.elements]
+anime_title = "黒貓與魔女的教室"
+episode_number = "24"
+release_group = "Ani-One Asia"
+
+[case.by]
+anime_title = "title_quoted"
+episode_number = "episode_sign"
