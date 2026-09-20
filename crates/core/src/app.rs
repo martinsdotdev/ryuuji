@@ -261,9 +261,12 @@ impl Ryuuji {
 
     /// The write the standing viewing has earned, or the first gate that
     /// refuses it. The gates run in the order a decline would be explained
-    /// in: the match, then the entry.
+    /// in: the name, then the match, then the entry.
     fn earned(&self) -> Result<NewRecording, Decline> {
         let last = self.state.last_match.as_ref().ok_or(Decline::NotExact)?;
+        if matching::is_extra(&last.raw_title) {
+            return Err(Decline::NotEpisode);
+        }
         let Link::Exact(id) = last.link else {
             return Err(Decline::NotExact);
         };
@@ -2050,6 +2053,43 @@ mod tests {
             watches[0].outcome,
             WatchOutcome::Declined(Decline::NotExact)
         );
+    }
+
+    // A channel's preview names the show and the episode it previews, so
+    // every gate after this one would have waved it through and recorded an
+    // episode nobody watched.
+    #[test]
+    fn a_preview_of_an_episode_is_not_recorded() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::AddEntry(entry("Show")));
+        watch_past_threshold(&mut app, "Show - Episode 01 Preview");
+        assert_eq!(app.state().library[0].progress, 0);
+        assert_eq!(outcome(&app), RecordOutcome::Declined(Decline::NotEpisode));
+        assert_eq!(stored_declines(&dir), vec![Decline::NotEpisode]);
+    }
+
+    // The show is still named, so Now playing says which one it is and the
+    // person can still act on it. Only the writing is refused.
+    #[test]
+    fn a_preview_still_matches_its_show() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::AddEntry(entry("Show")));
+        let id = app.state().library[0].id;
+        watch_past_threshold(&mut app, "Show - Episode 01 Preview");
+        let last = app.state().last_match.clone().unwrap();
+        assert_eq!(last.link, Link::Exact(id));
+        assert_eq!(last.episode, Some(1..=1));
+    }
+
+    #[test]
+    fn an_episode_that_only_reads_like_a_preview_still_records() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::AddEntry(entry("Show")));
+        watch_past_threshold(&mut app, "Show - 01.mkv");
+        assert_eq!(app.state().library[0].progress, 1);
     }
 
     #[test]
