@@ -685,7 +685,12 @@ fn offers(m: &ProposedMatch, ignored: bool) -> Vec<Offer> {
             Offer::PickAnother,
             Offer::Ignore,
         ],
-        Link::Unmatched => vec![Offer::Add, Offer::Ignore],
+        // Adding is the usual answer, but not the only one: a name the
+        // library already holds can still fold to nothing like it, which is
+        // the rule for a browser's title rather than the exception. Without
+        // the picker, the only way to track such a name was to add the show
+        // a second time under whatever the parser made of it.
+        Link::Unmatched => vec![Offer::Add, Offer::PickAnother, Offer::Ignore],
         Link::Exact(_) => vec![Offer::PickAnother],
     }
 }
@@ -1069,7 +1074,10 @@ mod tests {
                 Offer::Ignore
             ]
         );
-        assert_eq!(offers(&proposal(), false), vec![Offer::Add, Offer::Ignore]);
+        assert_eq!(
+            offers(&proposal(), false),
+            vec![Offer::Add, Offer::PickAnother, Offer::Ignore]
+        );
         // A settled show used to offer nothing, which left the commonest
         // wrong match -- two titles that fold alike -- with no way out.
         let exact = ProposedMatch {
