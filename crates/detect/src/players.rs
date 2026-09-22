@@ -1,9 +1,11 @@
 //! The player table: which media players Ryuuji recognises and how each
-//! strategy identifies them. The table ships embedded in the binary.
+//! strategy identifies them. The built-in rows ship embedded in the binary,
+//! and the rows a person wrote in `players.toml` are laid over them.
 
+use ryuuji_core::{PlayerRow, too_short};
 use serde::Deserialize;
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
 pub(crate) struct Player {
     pub name: String,
     /// Substrings of the SMTC source app user model id, lowercased by
@@ -21,9 +23,29 @@ pub(crate) struct Player {
     /// this name alone, so two instances of one player read the same.
     #[serde(default)]
     pub executables: Vec<String>,
+    /// A person turned the player off. Its sessions are still matched, so
+    /// discovery finds the row and does not add the player again, but none
+    /// of them is watched.
+    #[serde(default)]
+    pub hidden: bool,
 }
 
 impl Player {
+    /// Takes the lists `row` wrote, emptied ones included, and whether it is
+    /// hidden. The name stays, because history stores it.
+    fn apply(&mut self, row: &PlayerRow) {
+        for (mine, theirs) in [
+            (&mut self.smtc_app_ids, row.smtc_app_ids()),
+            (&mut self.mpris_ids, row.mpris_ids()),
+            (&mut self.executables, row.executables()),
+        ] {
+            if let Some(theirs) = theirs {
+                *mine = theirs.to_vec();
+            }
+        }
+        self.hidden = row.hidden();
+    }
+
     /// Whether a player found at runtime is this row. The name, or a shared
     /// executable: the registry says "Mozilla Firefox" where the row says
     /// "Firefox", and both say `firefox.exe`.
@@ -54,8 +76,15 @@ impl Player {
     }
 }
 
+/// The players Ryuuji recognises, in two layers, as Windows Terminal keeps
+/// its profiles. The base holds the built-in rows and what discovery found,
+/// and the person's rows lie over it. Discovery reads and writes the base
+/// alone, so a person's row can neither mislead it nor be refilled by it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PlayerTable {
+    base: Vec<Player>,
+    rows: Vec<PlayerRow>,
+    /// The base with the rows laid over it, which every match reads.
     players: Vec<Player>,
 }
 
@@ -73,7 +102,6 @@ pub(crate) enum TableError {
     DuplicateName { name: String },
 }
 
-const MIN_PATTERN_LEN: usize = 3;
 const MPRIS_PREFIX: &str = "org.mpris.MediaPlayer2.";
 
 #[derive(Deserialize)]
@@ -86,6 +114,51 @@ impl PlayerTable {
     /// The embedded table; a parse failure is a build defect covered by a test.
     pub(crate) fn builtin() -> PlayerTable {
         PlayerTable::parse(include_str!("players.toml")).expect("embedded players.toml is valid")
+    }
+
+    /// The built-in table with a person's rows laid over it.
+    pub(crate) fn with_rows(rows: Vec<PlayerRow>) -> PlayerTable {
+        let mut table = PlayerTable::builtin();
+        table.rows = rows;
+        table.lay_rows();
+        table
+    }
+
+    fn of(base: Vec<Player>) -> PlayerTable {
+        PlayerTable {
+            players: base.clone(),
+            base,
+            rows: Vec::new(),
+        }
+    }
+
+    /// Lays the rows over the base. A row named like a player in the base,
+    /// whatever the case, changes that player in place and keeps its name,
+    /// which history stores. Any other row goes ahead of the base in the
+    /// order written, so it wins an id it shares with one. The core has
+    /// already checked, trimmed and lowercased the rows.
+    fn lay_rows(&mut self) {
+        let mut players = self.base.clone();
+        let mut added = Vec::new();
+        for row in &self.rows {
+            let name = row.name().to_lowercase();
+            match players
+                .iter_mut()
+                .find(|player| player.name.to_lowercase() == name)
+            {
+                Some(player) => player.apply(row),
+                None => {
+                    let mut player = Player {
+                        name: row.name().to_owned(),
+                        ..Player::default()
+                    };
+                    player.apply(row);
+                    added.push(player);
+                }
+            }
+        }
+        added.append(&mut players);
+        self.players = added;
     }
 
     pub(crate) fn parse(text: &str) -> Result<PlayerTable, TableError> {
@@ -103,29 +176,32 @@ impl PlayerTable {
             }
         }
         players.iter_mut().for_each(lowercase_patterns);
-        Ok(PlayerTable { players })
+        Ok(PlayerTable::of(players))
     }
 
-    /// Adds players found at runtime. One the table does not know is
-    /// appended after the built-in entries, so a built-in entry still wins a
-    /// match. One it knows, by name or by a shared executable, fills only the
-    /// pattern lists its row left empty: a row written for one platform is
-    /// completed by the other's discovery, never shadowed, and a built-in
-    /// pattern list is never overridden. A short pattern rejects the whole
-    /// batch, like [`PlayerTable::parse`]. Returns how many rows were
-    /// appended or filled.
+    /// Adds players found at runtime to the base, then lays the person's
+    /// rows over it again. One the base does not know is appended after the
+    /// built-in entries, so a built-in entry still wins a match. One it
+    /// knows, by name or by a shared executable, fills only the pattern lists
+    /// its row left empty: a row written for one platform is completed by the
+    /// other's discovery, never shadowed, and a built-in pattern list is
+    /// never overridden. A short pattern rejects the whole batch, like
+    /// [`PlayerTable::parse`]. Returns how many rows were appended or filled.
     pub(crate) fn extend(&mut self, players: Vec<Player>) -> Result<usize, TableError> {
         players.iter().try_for_each(check_patterns)?;
         let mut changed = 0;
         for mut player in players {
             lowercase_patterns(&mut player);
-            match self.players.iter_mut().find(|known| known.is_same(&player)) {
+            match self.base.iter_mut().find(|known| known.is_same(&player)) {
                 Some(known) => changed += usize::from(known.fill_from(player)),
                 None => {
-                    self.players.push(player);
+                    self.base.push(player);
                     changed += 1;
                 }
             }
+        }
+        if changed > 0 {
+            self.lay_rows();
         }
         Ok(changed)
     }
@@ -180,10 +256,7 @@ fn check_patterns(player: &Player) -> Result<(), TableError> {
         ("mpris_ids", &player.mpris_ids),
         ("executables", &player.executables),
     ] {
-        if let Some(pattern) = patterns
-            .iter()
-            .find(|pattern| pattern.chars().count() < MIN_PATTERN_LEN)
-        {
+        if let Some(pattern) = patterns.iter().find(|pattern| too_short(pattern)) {
             return Err(TableError::ShortPattern {
                 name: player.name.clone(),
                 field,
@@ -219,6 +292,7 @@ mod tests {
             smtc_app_ids: vec![app_id.to_owned()],
             mpris_ids: Vec::new(),
             executables: vec![format!("{}.exe", name.to_lowercase())],
+            hidden: false,
         }
     }
 
@@ -271,6 +345,7 @@ mod tests {
             smtc_app_ids: vec!["D52277D1BA334E98".to_owned()],
             mpris_ids: Vec::new(),
             executables: vec!["firefox.exe".to_owned()],
+            hidden: false,
         };
         assert_eq!(table.extend(vec![discovered]).unwrap(), 1);
         assert_eq!(names(&table), ["Firefox"]);
@@ -296,6 +371,7 @@ mod tests {
             smtc_app_ids: vec!["0123456789ABCDEF".to_owned()],
             mpris_ids: Vec::new(),
             executables: vec!["Waterfox.EXE".to_owned()],
+            hidden: false,
         };
         assert_eq!(table.extend(vec![discovered]).unwrap(), 1);
         assert_eq!(names(&table), ["Waterfox"]);
@@ -482,6 +558,139 @@ mod tests {
         ));
     }
 
+    /// The rows as the core reads them from `players.toml`.
+    fn with(text: &str) -> PlayerTable {
+        PlayerTable::with_rows(PlayerRow::read_all(text))
+    }
+
+    fn named<'a>(table: &'a PlayerTable, name: &str) -> &'a Player {
+        table.players().iter().find(|p| p.name == name).unwrap()
+    }
+
+    /// What the registry reports for release Firefox.
+    fn mozilla_firefox() -> Player {
+        Player {
+            name: "Mozilla Firefox".to_owned(),
+            smtc_app_ids: vec!["D52277D1BA334E98".to_owned()],
+            mpris_ids: Vec::new(),
+            executables: vec!["firefox.exe".to_owned()],
+            hidden: false,
+        }
+    }
+
+    #[test]
+    fn with_no_rows_is_the_builtin_table() {
+        assert_eq!(PlayerTable::with_rows(Vec::new()), PlayerTable::builtin());
+    }
+
+    #[test]
+    fn a_row_named_like_a_builtin_replaces_only_the_lists_it_wrote() {
+        let table = with("[[player]]\nname = \"mpv\"\nexecutables = []\n");
+        assert_eq!(names(&table), names(&PlayerTable::builtin()));
+        let mpv = named(&table, "mpv");
+        assert!(mpv.executables.is_empty());
+        assert_eq!(mpv.smtc_app_ids, ["mpv.exe"]);
+        assert_eq!(mpv.mpris_ids, ["mpv"]);
+        assert!(!mpv.hidden);
+    }
+
+    /// History stores the player's name, so a row written in another case
+    /// changes the built-in without renaming it.
+    #[test]
+    fn a_row_meets_a_builtin_whatever_the_case_and_keeps_its_name() {
+        let table = with("[[player]]\nname = \"brave\"\nhidden = true\n");
+        assert_eq!(names(&table), names(&PlayerTable::builtin()));
+        let brave = table
+            .match_app_id("Brave.TOV6AIDIK4HLZU7TATPUSWV77Q")
+            .unwrap();
+        assert_eq!(brave.name, "Brave");
+        assert!(brave.hidden);
+    }
+
+    #[test]
+    fn a_new_row_goes_ahead_of_the_builtins_and_wins_a_shared_id() {
+        let table = with(
+            "[[player]]\nname = \"Wrapper\"\nsmtc_app_ids = [\"mpv.exe\"]\n\
+             [[player]]\nname = \"PotPlayer\"\nsmtc_app_ids = [\"potplayer\"]\n",
+        );
+        assert_eq!(names(&table)[..3], ["Wrapper", "PotPlayer", "mpv"]);
+        assert_eq!(
+            table
+                .match_app_id("C:\\tools\\mpv.exe")
+                .map(|p| p.name.as_str()),
+            Some("Wrapper")
+        );
+    }
+
+    /// A hidden row stays in the table, so discovery ties the install hash
+    /// to it rather than appending "Mozilla Firefox" as a player of its own.
+    #[test]
+    fn discovery_fills_a_hidden_row_and_it_stays_hidden() {
+        let mut table = with("[[player]]\nname = \"Firefox\"\nhidden = true\n");
+        assert_eq!(table.extend(vec![mozilla_firefox()]).unwrap(), 1);
+        assert_eq!(names(&table), names(&PlayerTable::builtin()));
+        let firefox = table.match_app_id("D52277D1BA334E98").unwrap();
+        assert_eq!(firefox.name, "Firefox");
+        assert!(firefox.hidden);
+    }
+
+    /// Discovery ties to the built-in by its executable, which the person's
+    /// row does not take away, and the row's lists still win over what
+    /// discovery fills.
+    #[test]
+    fn emptied_lists_stay_empty_and_keep_the_tie_to_discovery() {
+        let mut table =
+            with("[[player]]\nname = \"Firefox\"\nexecutables = []\nsmtc_app_ids = []\n");
+        assert_eq!(table.extend(vec![mozilla_firefox()]).unwrap(), 1);
+        assert_eq!(names(&table), names(&PlayerTable::builtin()));
+        let firefox = named(&table, "Firefox");
+        assert!(firefox.executables.is_empty());
+        assert!(firefox.smtc_app_ids.is_empty());
+        assert_eq!(table.match_app_id("D52277D1BA334E98"), None);
+    }
+
+    /// A Gecko fork is not built in, so the person's row for it only meets
+    /// the player once discovery has added it, and meets it whatever the case.
+    #[test]
+    fn a_row_for_a_discovered_browser_meets_it_whatever_the_case() {
+        let mut table = with("[[player]]\nname = \"librewolf\"\nhidden = true\n");
+        let librewolf = Player {
+            name: "LibreWolf".to_owned(),
+            smtc_app_ids: vec!["83C1C0F3FA8524B1".to_owned()],
+            mpris_ids: Vec::new(),
+            executables: vec!["librewolf.exe".to_owned()],
+            hidden: false,
+        };
+        assert_eq!(table.extend(vec![librewolf]).unwrap(), 1);
+        let found = table.match_app_id("83C1C0F3FA8524B1").unwrap();
+        assert_eq!(found.name, "LibreWolf");
+        assert!(found.hidden);
+        assert_eq!(
+            names(&table)
+                .iter()
+                .filter(|name| name.eq_ignore_ascii_case("librewolf"))
+                .count(),
+            1
+        );
+    }
+
+    /// Discovery only sees the base, so a person's row that names the same
+    /// executable cannot take release Firefox's install hash.
+    #[test]
+    fn a_row_sharing_an_executable_does_not_take_a_discovered_hash() {
+        let mut table = with(
+            "[[player]]\nname = \"Firefox Nightly\"\nexecutables = [\"firefox.exe\"]\n\
+             smtc_app_ids = [\"6F193CCC56814779\"]\n",
+        );
+        assert_eq!(table.extend(vec![mozilla_firefox()]).unwrap(), 1);
+        assert_eq!(
+            table
+                .match_app_id("D52277D1BA334E98")
+                .map(|p| p.name.as_str()),
+            Some("Firefox")
+        );
+    }
+
     #[test]
     fn missing_id_lists_are_empty() {
         let table = PlayerTable::parse("[[player]]\nname = \"bare\"\n").unwrap();
@@ -492,6 +701,7 @@ mod tests {
                 smtc_app_ids: Vec::new(),
                 mpris_ids: Vec::new(),
                 executables: Vec::new(),
+                hidden: false,
             }]
         );
         assert_eq!(table.match_app_id("bare"), None);

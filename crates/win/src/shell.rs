@@ -66,8 +66,9 @@ impl Component for Shell {
         });
         // The watcher lives for the Shell's life; process exit ends its worker.
         let (latest, set_latest) = cx.use_async_state::<Option<PlaybackEvent>>(None);
+        let players = state.players.clone();
         let watcher: Rc<Result<Watcher, WatchError>> = cx.use_memo((), move || {
-            Rc::new(ryuuji_detect::watch(move |event| {
+            Rc::new(ryuuji_detect::watch(&players, move |event| {
                 set_latest.call(Some(event));
             }))
         });

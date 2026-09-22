@@ -246,16 +246,25 @@ fn episode_text(value: Option<&RangeInclusive<u32>>) -> String {
     )
 }
 
-/// `app_id | title | status | player`, the player as [`NOT_APPLICABLE`] when
-/// unmatched, matching the sessions card.
+/// `app_id | title | status | player`, matching the sessions card.
 fn session_line(session: &SessionFacts) -> String {
     format!(
         "{} | {} | {} | {}",
         session.app_id,
         session.title,
         session.status,
-        session.player.as_deref().unwrap_or(NOT_APPLICABLE)
+        player_label(session)
     )
+}
+
+/// The player that claimed the session, marked when a person turned it off,
+/// or [`NOT_APPLICABLE`] when nothing claimed it.
+fn player_label(session: &SessionFacts) -> String {
+    match &session.player {
+        Some(name) if session.hidden => format!("{name} (hidden)"),
+        Some(name) => name.clone(),
+        None => NOT_APPLICABLE.to_owned(),
+    }
 }
 
 /// `#id | opened | outcome | match | raw title | player`, matching the
@@ -644,7 +653,7 @@ fn session_cells(session: &SessionFacts) -> [TextBlock; 4] {
         mono(session.app_id.clone()).selectable(),
         text_block(session.title.clone()).wrap(),
         text_block(session.status.clone()),
-        text_block(session.player.as_deref().unwrap_or(NOT_APPLICABLE)),
+        text_block(player_label(session)),
     ]
 }
 
@@ -889,12 +898,14 @@ mod tests {
                 title: "Sousou no Frieren - 01".to_owned(),
                 status: "Playing".to_owned(),
                 player: Some("mpv".to_owned()),
+                hidden: false,
             },
             SessionFacts {
                 app_id: "Spotify.exe".to_owned(),
                 title: String::new(),
                 status: "Paused".to_owned(),
                 player: None,
+                hidden: false,
             },
         ];
         let last = ProposedMatch {

@@ -41,4 +41,6 @@ pub struct SessionFacts {
     pub status: String,
     /// The table name, or `None` when nothing claimed the id.
     pub player: Option<String>,
+    /// The player that claimed it is one a person turned off.
+    pub hidden: bool,
 }
