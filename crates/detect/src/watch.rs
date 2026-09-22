@@ -6,7 +6,8 @@
 //! trait: a trait with a single implementation would hide nothing. The
 //! contract is the module aliased as `strategy` below, four items long
 //! (`NAME`, `StartError`, `Source::start`, `Source::refresh`), and a module
-//! that does not meet it fails that target's build.
+//! that does not meet it fails that target's build. The worker builds the
+//! player table and hands it to `start`, so a strategy never reads a file.
 
 use std::error::Error;
 use std::io;
@@ -15,10 +16,11 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime};
 
-use ryuuji_core::PlaybackEvent;
+use ryuuji_core::{PlaybackEvent, PlayerRow};
 use tracing::debug;
 
 use crate::SessionFacts;
+use crate::players::PlayerTable;
 use crate::session::{Dedup, Reading, Tracking, observe};
 
 #[cfg(target_os = "linux")]
@@ -52,13 +54,18 @@ pub enum WatchError {
     Exited(&'static str),
 }
 
-/// Runs until dropped. `sink` is called on the worker thread, never on a
-/// platform callback thread.
-pub fn watch(sink: impl Fn(PlaybackEvent) + Send + 'static) -> Result<Watcher, WatchError> {
+/// Runs until dropped, on the built-in players with `players` laid over
+/// them. `sink` is called on the worker thread, never on a platform callback
+/// thread.
+pub fn watch(
+    players: &[PlayerRow],
+    sink: impl Fn(PlaybackEvent) + Send + 'static,
+) -> Result<Watcher, WatchError> {
     let (tx, rx) = mpsc::channel();
     let (ready_tx, ready_rx) = mpsc::sync_channel(1);
     let mirror = Mirror::default();
     let spawn = Spawn {
+        rows: players.to_vec(),
         waker: Waker(tx.clone()),
         rx,
         ready: ready_tx,
@@ -258,7 +265,7 @@ impl Publisher {
         for seen in reading.sessions {
             rows.push(seen.facts());
             match seen.tracking {
-                Tracking::Unknown => {}
+                Tracking::Unknown | Tracking::Hidden(_) => {}
                 Tracking::Unreadable(_) => unreadable += 1,
                 Tracking::Watched(matched) => watched.push(matched),
             }
@@ -294,6 +301,9 @@ impl Publisher {
 
 /// What the worker thread starts from.
 struct Spawn {
+    /// The person's rows, laid over the built-ins on the worker thread so
+    /// the caller never parses the embedded table.
+    rows: Vec<PlayerRow>,
     waker: Waker,
     rx: Receiver<Msg>,
     ready: SyncSender<StartResult>,
@@ -303,13 +313,14 @@ struct Spawn {
 
 impl Spawn {
     fn run(self) {
-        let mut source = match strategy::Source::start(self.waker) {
-            Ok(source) => source,
-            Err(err) => {
-                let _ = self.ready.send(Err(Box::new(err)));
-                return;
-            }
-        };
+        let mut source =
+            match strategy::Source::start(self.waker, PlayerTable::with_rows(self.rows)) {
+                Ok(source) => source,
+                Err(err) => {
+                    let _ = self.ready.send(Err(Box::new(err)));
+                    return;
+                }
+            };
         if self.ready.send(Ok(())).is_err() {
             return;
         }
@@ -361,6 +372,7 @@ mod tests {
             smtc_app_ids: Vec::new(),
             mpris_ids: Vec::new(),
             executables: Vec::new(),
+            hidden: false,
         }
     }
 
@@ -480,6 +492,25 @@ mod tests {
         assert_eq!(Pace::watching(true, 0), Pace::Poll(POLL));
         assert_eq!(Pace::watching(false, 1), Pace::Poll(POLL));
         assert_eq!(Pace::watching(false, 0), Pace::Idle);
+    }
+
+    #[test]
+    fn a_hidden_session_is_listed_and_never_watched() {
+        let mpv = player("mpv");
+        let (mut publisher, events) = publisher();
+        let reading = Reading {
+            front: Front::Unknown,
+            sessions: vec![Seen {
+                app_id: "mpv.exe".to_owned(),
+                status: "Playing".to_owned(),
+                tracking: Tracking::Hidden(&mpv),
+            }],
+        };
+        assert_eq!(publisher.publish(reading, now()), Pace::Idle);
+        let rows = publisher.mirror.read();
+        assert_eq!(rows[0].player.as_deref(), Some("mpv"));
+        assert!(rows[0].hidden);
+        assert!(events.try_recv().is_err());
     }
 
     #[test]

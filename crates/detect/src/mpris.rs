@@ -10,6 +10,7 @@
 
 use std::time::SystemTime;
 
+use crate::players::PlayerTable;
 use crate::watch::{Refresh, Wake, Waker};
 
 pub(crate) const NAME: &str = "MPRIS";
@@ -27,7 +28,7 @@ pub(crate) enum StartError {
 pub(crate) struct Source;
 
 impl Source {
-    pub(crate) fn start(_waker: Waker) -> Result<Source, StartError> {
+    pub(crate) fn start(_waker: Waker, _table: PlayerTable) -> Result<Source, StartError> {
         Err(StartError::Unimplemented)
     }
 

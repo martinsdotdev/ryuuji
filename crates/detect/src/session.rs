@@ -59,6 +59,8 @@ pub(crate) struct Seen<'a> {
 pub(crate) enum Tracking<'a> {
     /// No table entry claimed this session's id.
     Unknown,
+    /// A player a person turned off claimed it, so it is not watched.
+    Hidden(&'a Player),
     /// The table claimed it, but the platform would not say what it holds
     /// this refresh. Keeps the observation out of `Absent`.
     Unreadable(&'a Player),
@@ -71,7 +73,9 @@ impl Seen<'_> {
     pub(crate) fn facts(&self) -> SessionFacts {
         let (title, player) = match &self.tracking {
             Tracking::Unknown => (String::new(), None),
-            Tracking::Unreadable(player) => (String::new(), Some(player.name.clone())),
+            Tracking::Hidden(player) | Tracking::Unreadable(player) => {
+                (String::new(), Some(player.name.clone()))
+            }
             Tracking::Watched(matched) => (
                 matched.snapshot.title.clone(),
                 Some(matched.player.name.clone()),
@@ -82,6 +86,7 @@ impl Seen<'_> {
             title,
             status: self.status.clone(),
             player,
+            hidden: matches!(self.tracking, Tracking::Hidden(_)),
         }
     }
 }
@@ -295,6 +300,7 @@ mod tests {
             smtc_app_ids: Vec::new(),
             mpris_ids: Vec::new(),
             executables: vec![format!("{}.exe", name.to_lowercase())],
+            hidden: false,
         }
     }
 
@@ -504,6 +510,16 @@ mod tests {
         assert_eq!(
             (unreadable.title.as_str(), unreadable.player.as_deref()),
             ("", Some("mpv"))
+        );
+        assert!(!unreadable.hidden);
+        let hidden = seen("mpv.exe", Tracking::Hidden(&mpv)).facts();
+        assert_eq!(
+            (
+                hidden.title.as_str(),
+                hidden.player.as_deref(),
+                hidden.hidden
+            ),
+            ("", Some("mpv"), true)
         );
         let watched = seen(
             "mpv.exe",

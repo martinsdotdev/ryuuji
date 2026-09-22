@@ -100,7 +100,7 @@ pub(crate) struct Source {
 }
 
 impl Source {
-    pub(crate) fn start(waker: Waker) -> Result<Source, StartError> {
+    pub(crate) fn start(waker: Waker, table: PlayerTable) -> Result<Source, StartError> {
         let (manager, revoker) = windows::core::init_mta()
             .and_then(|()| Manager::RequestAsync()?.join())
             .and_then(|manager| {
@@ -112,7 +112,7 @@ impl Source {
         Ok(Source {
             manager,
             _manager_revoker: revoker,
-            table: PlayerTable::builtin(),
+            table,
             waker,
             subscriptions: Vec::new(),
             stale: true,
@@ -167,6 +167,7 @@ impl Source {
                 status.map_or_else(|| format!("Unknown({raw})"), |s| s.label().to_owned());
             debug!(app_id, status = status_label, "smtc session");
             let tracking = match (self.table.match_app_id(&app_id), status) {
+                (Some(player), _) if player.hidden => Tracking::Hidden(player),
                 (Some(player), Some(status)) => {
                     live.push(session.clone());
                     match read_snapshot(&session, status) {
