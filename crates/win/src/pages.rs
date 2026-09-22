@@ -173,25 +173,35 @@ pub fn boot_failed(err: &StoreError, dir: &DataDir) -> Element {
 }
 
 /// Shows the oldest notice, or nothing at all when the queue is empty.
-/// Keyed on the queue length so a dismissal remounts the bar: `IsOpen` is
-/// diffed, and WinUI has already closed it. That key only distinguishes one
-/// notice from the next because the queue is FIFO and only ever loses its
-/// head, so a push and a pop cannot land on the same length.
+/// Keyed on the queue length and the notice shown, so a dismissal remounts
+/// the bar: `IsOpen` is diffed, and WinUI has already closed it. The length
+/// alone is not enough, because a reread file replaces its notice in place,
+/// and a pop and a replacement handled in one render leave the length as
+/// it was.
 fn notice(notices: &[Notice], dispatch: Dispatch<Command>) -> Element {
-    let (severity, title, message) = match notices.first() {
+    let head = notices.first();
+    let (severity, title, message) = match head {
         Some(Notice::SaveFailed { detail }) => (
             InfoBarSeverity::Error,
-            "Couldn't save your change",
+            "Couldn't save your change".to_owned(),
             detail.clone(),
         ),
-        Some(Notice::SettingsUnreadable { detail }) => (
+        Some(Notice::FileProblem { file, problems }) => (
             InfoBarSeverity::Warning,
-            "settings.toml could not be read",
-            detail.clone(),
+            format!(
+                "{} has {}",
+                file.file_name(),
+                if problems.len() == 1 {
+                    "a problem"
+                } else {
+                    "problems"
+                }
+            ),
+            problems.join("\n"),
         ),
         Some(Notice::LibraryReset { backup }) => (
             InfoBarSeverity::Warning,
-            "Your library was reset",
+            "Your library was reset".to_owned(),
             format!(
                 "The previous file wasn't a readable database. It was kept at {}.",
                 backup.display()
@@ -204,7 +214,7 @@ fn notice(notices: &[Notice], dispatch: Dispatch<Command>) -> Element {
         .severity(severity)
         .is_open(true)
         .on_closed(move || dispatch.call(Command::DismissNotice))
-        .with_key(notices.len().to_string())
+        .with_key(format!("{} {head:?}", notices.len()))
         .grid_row(0)
         .into()
 }

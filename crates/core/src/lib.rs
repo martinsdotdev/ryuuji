@@ -15,6 +15,7 @@ mod playback;
 mod settings;
 mod store;
 mod tagged;
+mod user_file;
 mod watch;
 
 use std::fmt;
@@ -38,6 +39,7 @@ pub use store::{
     Added, DbError, Moved, Opened, Recording, Recovered, SchemaVersion, Store, StoreError,
 };
 use tagged::tagged_enum;
+pub use user_file::UserFile;
 
 tagged_enum! {
     /// Every destination in the navigation pane, in pane order, so the
@@ -95,7 +97,7 @@ tagged_enum! {
     }
 }
 
-/// Everything the user can configure, as persisted in `settings.toml`.
+/// What `settings.toml` holds.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct Settings {
     pub theme: ThemePreference,
@@ -294,10 +296,11 @@ pub enum Notice {
     SaveFailed {
         detail: String,
     },
-    /// `settings.toml` exists but could not be used; the app runs on defaults
-    /// and leaves the file alone.
-    SettingsUnreadable {
-        detail: String,
+    /// A file the person edits has problems. Each sentence says what was
+    /// dropped; the rest of the file applies. At most one stands per file.
+    FileProblem {
+        file: UserFile,
+        problems: Vec<String>,
     },
     /// The library file was not a readable database. It was moved to
     /// `backup` and a fresh one created.

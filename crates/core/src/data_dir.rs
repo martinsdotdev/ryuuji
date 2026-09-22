@@ -2,6 +2,8 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::{fs, io};
 
+use crate::UserFile;
+
 /// Environment variable that overrides the platform data directory.
 pub const DATA_DIR_ENV: &str = "RYUUJI_DATA_DIR";
 
@@ -89,7 +91,7 @@ impl DataDir {
     }
 
     pub(crate) fn settings_file(&self) -> PathBuf {
-        self.root.join("settings.toml")
+        UserFile::Settings.path(self)
     }
 }
 

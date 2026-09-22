@@ -47,7 +47,9 @@ fn report(notices: &[Notice]) {
     for notice in notices {
         match notice {
             Notice::SaveFailed { detail } => println!("save failed: {detail}"),
-            Notice::SettingsUnreadable { detail } => println!("settings unreadable: {detail}"),
+            Notice::FileProblem { file, problems } => {
+                println!("{} has problems: {}", file.file_name(), problems.join(" "));
+            }
             Notice::LibraryReset { backup } => {
                 println!("library reset; the old file is at {}", backup.display());
             }

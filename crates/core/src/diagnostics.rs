@@ -228,7 +228,7 @@ mod tests {
         assert_eq!(before.settings.path, dir.settings_file());
         assert_eq!(before.settings.stat, FileStat::Missing);
 
-        let _ = settings::load_or_init(&dir);
+        let _ = settings::load(&dir);
         let after = Diagnostics::gather(&dir, &store);
         assert!(matches!(
             after.settings.stat,
