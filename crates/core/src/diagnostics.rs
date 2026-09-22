@@ -82,6 +82,7 @@ pub struct Diagnostics {
     pub library: FileFacts,
     pub schema: Result<SchemaVersion, ProbeFailed>,
     pub settings: FileFacts,
+    pub players: FileFacts,
     pub logs: PathBuf,
     /// The newest file in `logs`, when there is one.
     pub current_log: Option<FileFacts>,
@@ -111,6 +112,7 @@ impl Diagnostics {
             library: FileFacts::of(dir.library_db()),
             schema,
             settings: FileFacts::of(dir.settings_file()),
+            players: FileFacts::of(dir.players_file()),
             logs,
             current_log,
             watches,
