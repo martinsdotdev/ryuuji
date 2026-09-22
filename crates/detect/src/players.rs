@@ -124,6 +124,17 @@ impl PlayerTable {
         table
     }
 
+    /// Lays `rows` over the base in place of the rows it had. Returns
+    /// whether they differed; the same rows again change nothing.
+    pub(crate) fn set_rows(&mut self, rows: Vec<PlayerRow>) -> bool {
+        if rows == self.rows {
+            return false;
+        }
+        self.rows = rows;
+        self.lay_rows();
+        true
+    }
+
     fn of(base: Vec<Player>) -> PlayerTable {
         PlayerTable {
             players: base.clone(),
@@ -672,6 +683,23 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    /// A save lays new rows over the same base, so a browser discovery found
+    /// stays found and nothing has to scan the registry again.
+    #[test]
+    fn new_rows_keep_what_discovery_found_and_the_same_rows_change_nothing() {
+        let mut table = with("[[player]]\nname = \"mpv\"\nhidden = true\n");
+        assert_eq!(table.extend(vec![mozilla_firefox()]).unwrap(), 1);
+        assert!(!table.set_rows(PlayerRow::read_all(
+            "[[player]]\nname = \"mpv\"\nhidden = true\n"
+        )));
+        assert!(table.set_rows(PlayerRow::read_all(
+            "[[player]]\nname = \"Firefox\"\nhidden = true\n"
+        )));
+        let firefox = table.match_app_id("D52277D1BA334E98").unwrap();
+        assert!(firefox.hidden);
+        assert!(!named(&table, "mpv").hidden);
     }
 
     /// Discovery only sees the base, so a person's row that names the same

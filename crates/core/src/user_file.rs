@@ -3,12 +3,13 @@
 //! only what the person wrote. A missing file gets a starter that explains
 //! it. A problem never stops the app and drops only the part it is in: a bad
 //! value or row falls back to the built-in under it, an unknown key is
-//! ignored, and a file that is not TOML at all applies nothing. Every
-//! problem is said, once per file, in words the person can act on. When a
-//! setting changes in the app, Ryuuji writes that one value and leaves the
-//! rest of the file as the person wrote it, and it never writes a file that
-//! is not TOML, since it cannot rewrite what it did not understand without
-//! destroying it.
+//! ignored, and a file that is not TOML at all applies nothing, so the
+//! version already running stays. Every problem is said, once per file, in
+//! words the person can act on. When a setting changes in the app, Ryuuji
+//! writes that one value and leaves the rest of the file as the person
+//! wrote it, and it never writes a file that is not TOML, since it cannot
+//! rewrite what it did not understand without destroying it. A save
+//! applies as soon as [`watch_files`] sees it.
 //!
 //! App state is not a file a person edits: the library is Ryuuji's own, and
 //! a damaged one is moved aside rather than read around.
@@ -16,12 +17,18 @@
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, SystemTime};
 
 use tempfile::NamedTempFile;
 use tracing::{info, info_span, warn};
 
 use crate::DataDir;
 use crate::tagged::tagged_enum;
+
+/// How often [`watch_files`] looks. A save shows within two of these.
+const POLL: Duration = Duration::from_millis(500);
 
 tagged_enum! {
     /// A file in the data folder that a person may edit. The tag is its
@@ -152,6 +159,122 @@ pub(crate) fn write(dir: &DataDir, path: &Path, contents: &[u8]) -> Result<(), W
     })
 }
 
+/// Watches every file a person edits until dropped.
+pub struct FileWatch {
+    stop: Sender<()>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl Drop for FileWatch {
+    fn drop(&mut self) {
+        let _ = self.stop.send(());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// Calls `on_save` on a thread of its own each time a file a person edits is
+/// saved, so the shell can hand it to [`crate::Ryuuji`] as
+/// [`crate::Command::Reload`]. It passes how many saves it has seen so far,
+/// a number that never repeats: a UI that keeps only the latest value still
+/// sees every save, whether two files settle in one poll or two saves share
+/// a modified time. It reads the modified time and length by path twice a
+/// second rather than asking the platform, which needs nothing beyond std,
+/// works on every shell, and follows editors that save by writing a new file
+/// and renaming it over the old. Ryuuji's own writes are seen too, and
+/// rereading them changes nothing.
+pub fn watch_files(dir: &DataDir, on_save: impl Fn(u64) + Send + 'static) -> io::Result<FileWatch> {
+    watch_every(dir, POLL, on_save)
+}
+
+fn watch_every(
+    dir: &DataDir,
+    every: Duration,
+    on_save: impl Fn(u64) + Send + 'static,
+) -> io::Result<FileWatch> {
+    let paths = UserFile::ALL.map(|file| file.path(dir));
+    // Taken here rather than on the thread, so a save made after this call
+    // returns is a change however late the thread starts.
+    let mut tracks = paths.each_ref().map(|path| Track::from(Stamp::of(path)));
+    let (stop, stopped) = mpsc::channel();
+    let thread = thread::Builder::new()
+        .name("ryuuji-files".to_owned())
+        .spawn(move || {
+            let mut saves = 0;
+            while let Err(RecvTimeoutError::Timeout) = stopped.recv_timeout(every) {
+                for (path, track) in paths.iter().zip(&mut tracks) {
+                    if track.poll(Stamp::of(path)).is_some() {
+                        saves += 1;
+                        on_save(saves);
+                    }
+                }
+            }
+        })?;
+    Ok(FileWatch {
+        stop,
+        thread: Some(thread),
+    })
+}
+
+/// One file across polls: what it last settled on, and what the last poll
+/// saw if that differed.
+#[derive(Debug)]
+struct Track {
+    settled: Stamp,
+    pending: Option<Stamp>,
+}
+
+impl From<Stamp> for Track {
+    fn from(settled: Stamp) -> Track {
+        Track {
+            settled,
+            pending: None,
+        }
+    }
+}
+
+impl Track {
+    /// A new stamp once it has held for a whole poll, so a save is reported
+    /// when it is finished and a half-written file is never read. A file
+    /// that goes back to what it was reports nothing.
+    fn poll(&mut self, now: Stamp) -> Option<Stamp> {
+        if now == self.settled {
+            self.pending = None;
+            None
+        } else if self.pending == Some(now) {
+            self.settled = now;
+            self.pending = None;
+            Some(now)
+        } else {
+            self.pending = Some(now);
+            None
+        }
+    }
+}
+
+/// What a poll can see of a file without opening it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Stamp {
+    modified: Option<SystemTime>,
+    len: Option<u64>,
+}
+
+impl Stamp {
+    fn of(path: &Path) -> Stamp {
+        match fs::metadata(path) {
+            Ok(meta) => Stamp {
+                modified: meta.modified().ok(),
+                len: Some(meta.len()),
+            },
+            Err(_) => Stamp {
+                modified: None,
+                len: None,
+            },
+        }
+    }
+}
+
 /// Where the parser stopped and why, on one line: the TOML error's own
 /// display draws the line with a caret under it, which a notice cannot show.
 fn toml_error(text: &str, err: &toml::de::Error) -> String {
@@ -247,5 +370,79 @@ mod tests {
             Some(vec!["known".to_owned(), "other".to_owned()])
         );
         assert_eq!(loaded.problems, ["`other` is not known"]);
+    }
+
+    fn stamp(len: u64) -> Stamp {
+        Stamp {
+            modified: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(len)),
+            len: Some(len),
+        }
+    }
+
+    #[test]
+    fn a_stamp_is_reported_once_it_holds_for_a_whole_poll() {
+        let mut track = Track::from(stamp(1));
+        assert_eq!(track.poll(stamp(1)), None);
+        assert_eq!(track.poll(stamp(2)), None);
+        assert_eq!(track.poll(stamp(2)), Some(stamp(2)));
+        assert_eq!(track.poll(stamp(2)), None);
+    }
+
+    #[test]
+    fn a_save_still_being_written_is_reported_only_when_it_stops() {
+        let mut track = Track::from(stamp(1));
+        assert_eq!(track.poll(stamp(2)), None);
+        assert_eq!(track.poll(stamp(3)), None);
+        assert_eq!(track.poll(stamp(4)), None);
+        assert_eq!(track.poll(stamp(4)), Some(stamp(4)));
+    }
+
+    #[test]
+    fn a_file_that_goes_back_to_what_it_was_reports_nothing() {
+        let mut track = Track::from(stamp(1));
+        assert_eq!(track.poll(stamp(2)), None);
+        assert_eq!(track.poll(stamp(1)), None);
+        assert_eq!(track.poll(stamp(1)), None);
+    }
+
+    /// Slow enough that a write finishes well inside one poll, so these
+    /// tests do not depend on timing; `Track`'s own tests pin exactness.
+    const EVERY: Duration = Duration::from_millis(50);
+
+    fn watching(dir: &DataDir) -> (FileWatch, mpsc::Receiver<u64>) {
+        let (tx, rx) = mpsc::channel();
+        let watch = watch_every(dir, EVERY, move |saves| {
+            let _ = tx.send(saves);
+        })
+        .unwrap();
+        (watch, rx)
+    }
+
+    #[test]
+    fn files_already_there_are_not_saves() {
+        let (_tmp, dir) = tmp_dir();
+        fs::write(dir.settings_file(), "theme = \"dark\"\n").unwrap();
+        let (_watch, rx) = watching(&dir);
+        assert!(rx.recv_timeout(EVERY * 4).is_err());
+    }
+
+    #[test]
+    fn a_save_is_counted_and_the_count_goes_up() {
+        let (_tmp, dir) = tmp_dir();
+        let (_watch, rx) = watching(&dir);
+        fs::write(dir.players_file(), "# one\n").unwrap();
+        let first = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        fs::write(dir.settings_file(), "theme = \"dark\"\n").unwrap();
+        let second = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(second > first, "{first} then {second}");
+    }
+
+    #[test]
+    fn a_deleted_file_is_a_save() {
+        let (_tmp, dir) = tmp_dir();
+        fs::write(dir.players_file(), "# here\n").unwrap();
+        let (_watch, rx) = watching(&dir);
+        fs::remove_file(dir.players_file()).unwrap();
+        assert!(rx.recv_timeout(Duration::from_secs(5)).is_ok());
     }
 }

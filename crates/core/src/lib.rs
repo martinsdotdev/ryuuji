@@ -41,7 +41,7 @@ pub use store::{
     Added, DbError, Moved, Opened, Recording, Recovered, SchemaVersion, Store, StoreError,
 };
 use tagged::tagged_enum;
-pub use user_file::UserFile;
+pub use user_file::{FileWatch, UserFile, watch_files};
 
 tagged_enum! {
     /// Every destination in the navigation pane, in pane order, so the
@@ -261,6 +261,9 @@ pub enum Command {
         rewatching: bool,
     },
     SetTheme(ThemePreference),
+    /// A file a person edits was saved: read them all again and apply what
+    /// changed. Rereading a file that did not change changes nothing.
+    Reload,
     /// Drops the oldest notice.
     DismissNotice,
     /// A detection strategy or the inject control observed a player.

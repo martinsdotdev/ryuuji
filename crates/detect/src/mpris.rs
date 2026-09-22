@@ -5,10 +5,12 @@
 //! [`Waker::session_changed`]; `Position` never signals progress, so it is
 //! re-read on the worker's poll while something plays.
 //!
-//! Not implemented (RYU-63). The four items are here so the shared worker
+//! Not implemented (RYU-63). The five items are here so the shared worker
 //! compiles on Linux and the ubuntu job proves the seam holds.
 
 use std::time::SystemTime;
+
+use ryuuji_core::PlayerRow;
 
 use crate::players::PlayerTable;
 use crate::watch::{Refresh, Wake, Waker};
@@ -37,5 +39,9 @@ impl Source {
     /// `Front::Unknown` is the honest reading here.
     pub(crate) fn refresh(&mut self, _wake: Wake, _now: SystemTime) -> Refresh<'_> {
         todo!("RYU-63: list the org.mpris.MediaPlayer2.* owners and read each one")
+    }
+
+    pub(crate) fn set_rows(&mut self, _rows: Vec<PlayerRow>) {
+        todo!("RYU-63: lay the rows over the table the next refresh matches against")
     }
 }

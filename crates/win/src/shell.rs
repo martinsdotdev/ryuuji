@@ -7,8 +7,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use ryuuji_core::{
-    AppState, Command, DataDir, Detail, Page, PlaybackEvent, Ryuuji, StoreError, ThemePreference,
-    error_chain,
+    AppState, Command, DataDir, Detail, FileWatch, Page, PlaybackEvent, Ryuuji, StoreError,
+    ThemePreference, error_chain, watch_files,
 };
 use ryuuji_detect::{WatchError, Watcher};
 use windows_reactor::{
@@ -66,9 +66,9 @@ impl Component for Shell {
         });
         // The watcher lives for the Shell's life; process exit ends its worker.
         let (latest, set_latest) = cx.use_async_state::<Option<PlaybackEvent>>(None);
-        let players = state.players.clone();
+        let players = &state.players;
         let watcher: Rc<Result<Watcher, WatchError>> = cx.use_memo((), move || {
-            Rc::new(ryuuji_detect::watch(&players, move |event| {
+            Rc::new(ryuuji_detect::watch(players, move |event| {
                 set_latest.call(Some(event));
             }))
         });
@@ -77,6 +77,37 @@ impl Component for Shell {
             move || {
                 if let Some(event) = latest {
                     dispatch.call(Command::Playback(event));
+                }
+            }
+        });
+        // A save to a file the person edits reaches the core the way a
+        // playback event does. The watch lives for the Shell's life too.
+        let (saves, set_saves) = cx.use_async_state::<u64>(0);
+        let _files: Rc<Option<FileWatch>> = cx.use_memo((), {
+            let dir = self.dir.clone();
+            move || {
+                let watch = watch_files(&dir, move |saves| set_saves.call(saves));
+                if let Err(err) = &watch {
+                    tracing::error!(error = %err, "file watch not started; saves apply at launch");
+                }
+                Rc::new(watch.ok())
+            }
+        });
+        // Runs at mount as well: the watch took its first look after
+        // `Ryuuji::open` read the files, so a save made between the two is
+        // read here rather than lost.
+        cx.use_effect(saves, {
+            let dispatch = dispatch.clone();
+            move || dispatch.call(Command::Reload)
+        });
+        // The first run hands the worker the rows it started with, which
+        // changes nothing there.
+        cx.use_effect(state.players.clone(), {
+            let watcher = watcher.clone();
+            let players = state.players.clone();
+            move || {
+                if let Ok(watcher) = &*watcher {
+                    watcher.set_players(&players);
                 }
             }
         });

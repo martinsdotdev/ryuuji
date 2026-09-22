@@ -7,6 +7,7 @@
 use std::collections::HashSet;
 use std::time::{Duration, SystemTime};
 
+use ryuuji_core::PlayerRow;
 use tracing::{debug, warn};
 use windows::Media::Control::{
     GlobalSystemMediaTransportControlsSession as Session,
@@ -208,6 +209,17 @@ impl Source {
             front,
             sessions: seen,
         })
+    }
+
+    /// Lays the person's new rows over the same base, so every browser
+    /// discovery found stays found. When they changed, every session is
+    /// subscribed afresh, since which ones are watched may have. The hashes
+    /// discovery could not tie stay untied, because the base discovery reads
+    /// does not depend on the rows.
+    pub(crate) fn set_rows(&mut self, rows: Vec<PlayerRow>) {
+        if self.table.set_rows(rows) {
+            self.stale = true;
+        }
     }
 
     fn is_unknown_hash(&self, app_id: &str) -> bool {
