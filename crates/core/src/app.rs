@@ -1,12 +1,13 @@
+use std::collections::HashMap;
 use std::time::SystemTime;
 
-use crate::settings::{self, SettingsError};
+use crate::settings;
 use crate::watch::{Accrual, Logged, WatchSession};
 use crate::{
     Added, AppState, Command, DataDir, Decline, Diagnostics, EntryId, HistoryId, HistoryPage,
     LibraryEntry, Link, Moved, NewEntry, NewRecording, Notice, NowPlaying, Opened, PlaybackEvent,
     ProposedMatch, RecordOutcome, Recording, Settings, Store, StoreError, ThemePreference,
-    WatchProgress, WatchStatus, error_chain, matching,
+    UserFile, WatchProgress, WatchStatus, error_chain, matching,
 };
 
 /// The running application: the store plus the state derived from it.
@@ -30,11 +31,14 @@ pub struct Ryuuji {
     /// The files the person said not to track, read once at open. Matching
     /// stops at these before it reaches the library.
     ignored: matching::Ignored,
+    /// What the last read of each file the person edits was reported to
+    /// have dropped, so the same problems are not said twice.
+    said: HashMap<UserFile, Vec<String>>,
 }
 
 impl Ryuuji {
     pub fn open(dir: &DataDir) -> Result<Ryuuji, StoreError> {
-        let loaded = settings::load_or_init(dir);
+        let settings = settings::load(dir);
         let Opened { store, recovered } = Store::open(dir)?;
         let library = store.entries()?;
         let last_match = store.last_match().unwrap_or_else(|err| {
@@ -67,9 +71,8 @@ impl Ryuuji {
                 backup: recovered.backup,
             })
             .into_iter()
-            .chain(loaded.problem.map(SettingsError::into_notice))
             .collect();
-        Ok(Ryuuji {
+        let mut app = Ryuuji {
             dir: dir.clone(),
             store,
             session: WatchSession::resume(last_match.as_ref(), newest.as_ref()),
@@ -80,12 +83,15 @@ impl Ryuuji {
                     .as_ref()
                     .is_some_and(|last| ignored.contains(&last.raw_title)),
                 last_match,
-                settings: loaded.settings,
+                settings: settings.value.unwrap_or_default(),
                 notices,
                 ..AppState::default()
             },
             ignored,
-        })
+            said: HashMap::new(),
+        };
+        app.report(UserFile::Settings, settings.problems);
+        Ok(app)
     }
 
     pub fn state(&self) -> &AppState {
@@ -321,12 +327,40 @@ impl Ryuuji {
         if theme == self.state.settings.theme {
             return;
         }
-        let next = Settings { theme };
-        if let Err(err) = settings::save(&self.dir, &next) {
-            tracing::error!(error = %error_chain(&err), "settings save failed");
-            self.state.notices.push(err.into_notice());
+        if let Err(err) = settings::save_theme(&self.dir, theme) {
+            let detail = format!("{}. It applies until Ryuuji closes.", error_chain(&err));
+            tracing::error!(error = %detail, "theme not saved");
+            // Every pick while the file stays broken fails the same way.
+            let notice = Notice::SaveFailed { detail };
+            if !self.state.notices.contains(&notice) {
+                self.state.notices.push(notice);
+            }
         }
-        self.state.settings = next;
+        self.state.settings = Settings { theme };
+    }
+
+    /// Says what a read of `file` dropped. The same problems as last time
+    /// say nothing, so a notice the person dismissed stays dismissed.
+    /// Different ones replace the file's notice where it stands in the queue,
+    /// and a clean read takes it away.
+    fn report(&mut self, file: UserFile, problems: Vec<String>) {
+        let said = self.said.entry(file).or_default();
+        if *said == problems {
+            return;
+        }
+        said.clone_from(&problems);
+        let notices = &mut self.state.notices;
+        let standing = notices
+            .iter()
+            .position(|notice| matches!(notice, Notice::FileProblem { file: f, .. } if *f == file));
+        match (standing, problems.is_empty()) {
+            (Some(at), true) => {
+                notices.remove(at);
+            }
+            (Some(at), false) => notices[at] = Notice::FileProblem { file, problems },
+            (None, false) => notices.push(Notice::FileProblem { file, problems }),
+            (None, true) => {}
+        }
     }
 
     fn absorb(&mut self, outcome: Result<LibraryEntry, StoreError>) -> Option<LibraryEntry> {
@@ -921,7 +955,10 @@ mod tests {
             app.state().notices.as_slice(),
             [
                 Notice::LibraryReset { .. },
-                Notice::SettingsUnreadable { .. }
+                Notice::FileProblem {
+                    file: UserFile::Settings,
+                    ..
+                }
             ]
         ));
         assert_eq!(app.state().settings, Settings::default());
@@ -929,7 +966,7 @@ mod tests {
         app.dispatch(Command::DismissNotice);
         assert!(matches!(
             app.state().notices.as_slice(),
-            [Notice::SettingsUnreadable { .. }]
+            [Notice::FileProblem { .. }]
         ));
         app.dispatch(Command::DismissNotice);
         assert!(app.state().notices.is_empty());
@@ -961,16 +998,95 @@ mod tests {
         let mut app = Ryuuji::open(&dir).unwrap();
         assert!(matches!(
             app.state().notices.as_slice(),
-            [Notice::SettingsUnreadable { .. }]
+            [Notice::FileProblem { .. }]
         ));
 
         app.dispatch(Command::SetTheme(ThemePreference::Light));
         assert_eq!(app.state().settings.theme, ThemePreference::Light);
         assert!(matches!(
             app.state().notices.as_slice(),
-            [Notice::SettingsUnreadable { .. }, Notice::SaveFailed { .. }]
+            [Notice::FileProblem { .. }, Notice::SaveFailed { .. }]
         ));
         assert!(dir.settings_file().is_dir());
+    }
+
+    /// A pick writes its own line, so the key Ryuuji does not know survives
+    /// and the theme it could not read gives way.
+    #[test]
+    fn a_pick_writes_only_the_theme_into_a_file_with_problems() {
+        let (_tmp, dir) = open_tmp();
+        fs::write(dir.settings_file(), "theme = \"blue\"\nfuture_knob = 3\n").unwrap();
+
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::SetTheme(ThemePreference::Dark));
+        assert_eq!(app.state().settings.theme, ThemePreference::Dark);
+        assert!(matches!(
+            app.state().notices.as_slice(),
+            [Notice::FileProblem { .. }]
+        ));
+        assert_eq!(
+            fs::read_to_string(dir.settings_file()).unwrap(),
+            "theme = \"dark\"\nfuture_knob = 3\n"
+        );
+    }
+
+    #[test]
+    fn picks_into_a_file_that_is_not_toml_leave_it_and_say_so_once() {
+        let (_tmp, dir) = open_tmp();
+        let garbage = "theme = [unterminated\n";
+        fs::write(dir.settings_file(), garbage).unwrap();
+
+        let mut app = Ryuuji::open(&dir).unwrap();
+        for theme in [
+            ThemePreference::Dark,
+            ThemePreference::Light,
+            ThemePreference::Dark,
+        ] {
+            app.dispatch(Command::SetTheme(theme));
+        }
+        assert_eq!(app.state().settings.theme, ThemePreference::Dark);
+        assert!(matches!(
+            app.state().notices.as_slice(),
+            [Notice::FileProblem { .. }, Notice::SaveFailed { detail }]
+                if detail.starts_with("settings.toml isn't valid TOML")
+        ));
+        assert_eq!(fs::read_to_string(dir.settings_file()).unwrap(), garbage);
+    }
+
+    /// Reporting the same problems again says nothing, so a dismissed
+    /// notice stays dismissed; different ones replace the file's notice
+    /// where it stands.
+    #[test]
+    fn a_file_notice_is_said_once_and_replaced_in_place() {
+        let (_tmp, dir) = open_tmp();
+        fs::write(dir.settings_file(), "theme = \"blue\"\n").unwrap();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        let first = app.state().notices.clone();
+        app.dispatch(Command::DismissNotice);
+
+        let same = match &first[..] {
+            [Notice::FileProblem { problems, .. }] => problems.clone(),
+            other => panic!("{other:?}"),
+        };
+        app.report(UserFile::Settings, same);
+        assert!(app.state().notices.is_empty());
+
+        app.report(UserFile::Settings, vec!["one".to_owned()]);
+        app.state.notices.push(Notice::SaveFailed {
+            detail: "later".to_owned(),
+        });
+        app.report(UserFile::Settings, vec!["two".to_owned()]);
+        assert!(matches!(
+            app.state().notices.as_slice(),
+            [Notice::FileProblem { problems, .. }, Notice::SaveFailed { .. }]
+                if problems == &["two"]
+        ));
+
+        app.report(UserFile::Settings, Vec::new());
+        assert!(matches!(
+            app.state().notices.as_slice(),
+            [Notice::SaveFailed { .. }]
+        ));
     }
 
     #[test]

@@ -31,6 +31,7 @@ tracing = "0.1"
 thiserror = "2"
 tempfile = "3"
 toml = "1"
+toml_edit = "0.25"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

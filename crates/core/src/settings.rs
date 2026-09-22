@@ -1,168 +1,99 @@
-use std::fs;
-use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+//! `settings.toml`, read and written under the rule in [`crate::user_file`].
 
-use serde::Deserialize;
-use tempfile::NamedTempFile;
-use tracing::{info, info_span, warn};
+use std::{fs, io};
 
-use crate::{DataDir, Notice, Settings, ThemePreference, error_chain};
+use tracing::{info, info_span};
 
-/// What booting found in `settings.toml`. A problem never stops the app:
-/// the settings are the defaults and the file is left for the user to fix.
-#[must_use]
-pub(crate) struct Loaded {
-    pub(crate) settings: Settings,
-    pub(crate) problem: Option<SettingsError>,
-}
+use crate::user_file::{self, Loaded, UserFile, WriteError};
+use crate::{DataDir, Settings, ThemePreference};
+
+const KEYS: &[&str] = &["theme"];
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum SettingsError {
-    #[error("could not read {}", path.display())]
-    Read {
-        path: PathBuf,
-        #[source]
-        source: io::Error,
-    },
-    #[error("could not parse {}", path.display())]
-    Parse {
-        path: PathBuf,
-        #[source]
-        source: TomlError,
-    },
-    #[error("{} has an invalid {field}: {value:?}", path.display())]
-    Invalid {
-        path: PathBuf,
-        field: &'static str,
-        value: String,
-    },
-    #[error("could not write {}", path.display())]
-    Write {
-        path: PathBuf,
-        #[source]
-        source: io::Error,
-    },
+pub(crate) enum SaveError {
+    #[error("settings.toml couldn't be read, so the theme wasn't saved")]
+    Read(#[source] io::Error),
+    #[error("settings.toml isn't valid TOML, so the theme wasn't saved")]
+    NotToml,
+    #[error(transparent)]
+    Write(#[from] WriteError),
 }
 
-impl SettingsError {
-    pub(crate) fn into_notice(self) -> Notice {
-        let detail = error_chain(&self);
-        match self {
-            SettingsError::Read { .. }
-            | SettingsError::Parse { .. }
-            | SettingsError::Invalid { .. } => Notice::SettingsUnreadable { detail },
-            SettingsError::Write { .. } => Notice::SaveFailed { detail },
+/// Reads `settings.toml`, writing a starter when it does not exist yet.
+pub(crate) fn load(dir: &DataDir) -> Loaded<Settings> {
+    user_file::load(dir, UserFile::Settings, &render(&Settings::default()), read)
+}
+
+/// Writes `theme` into `settings.toml` and changes nothing else: the
+/// person's comments, keys Ryuuji does not know and values it could not
+/// read all stay as written, and a theme it could not read gives way to the
+/// pick. A file that is not TOML is left alone.
+pub(crate) fn save_theme(dir: &DataDir, theme: ThemePreference) -> Result<(), SaveError> {
+    let _span = info_span!("settings.save", theme = theme.tag()).entered();
+    let path = UserFile::Settings.path(dir);
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => {
+            let mut document: toml_edit::DocumentMut =
+                text.parse().map_err(|_| SaveError::NotToml)?;
+            document["theme"] = toml_edit::value(theme.tag());
+            document.to_string()
         }
-    }
-}
-
-/// A TOML error whose concrete type stays inside this crate.
-#[derive(Debug, thiserror::Error)]
-#[error(transparent)]
-pub(crate) struct TomlError(toml::de::Error);
-
-/// The file as TOML sees it. Every field is optional; unknown keys are ignored
-/// on read and not preserved on write.
-#[derive(Deserialize)]
-struct Document {
-    theme: Option<String>,
-}
-
-/// Reads `settings.toml`, writing the defaults when it does not exist yet.
-pub(crate) fn load_or_init(dir: &DataDir) -> Loaded {
-    let path = dir.settings_file();
-    let _span = info_span!("settings.load", path = %path.display()).entered();
-    let loaded = match fs::read_to_string(&path) {
-        Ok(text) => parse(&path, &text).map(|settings| Loaded {
-            settings,
-            problem: None,
-        }),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {
-            let settings = Settings::default();
-            let problem = write(dir.root(), &path, &settings).err();
-            info!("settings.toml missing; wrote defaults");
-            Ok(Loaded { settings, problem })
-        }
-        Err(source) => Err(SettingsError::Read { path, source }),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => render(&Settings { theme }),
+        Err(err) => return Err(SaveError::Read(err)),
     };
-    match loaded {
-        Ok(loaded) => {
-            if let Some(problem) = &loaded.problem {
-                warn!(error = %error_chain(problem), "default settings not written");
-            }
-            info!(theme = loaded.settings.theme.tag(), "settings loaded");
-            loaded
-        }
-        Err(problem) => {
-            warn!(error = %error_chain(&problem), "settings unreadable; running on defaults");
-            Loaded {
-                settings: Settings::default(),
-                problem: Some(problem),
-            }
-        }
-    }
-}
-
-pub(crate) fn save(dir: &DataDir, settings: &Settings) -> Result<(), SettingsError> {
-    let path = dir.settings_file();
-    let _span =
-        info_span!("settings.save", path = %path.display(), theme = settings.theme.tag()).entered();
-    write(dir.root(), &path, settings)?;
-    info!("settings saved");
+    user_file::write(dir, &path, text.as_bytes())?;
+    info!("theme saved");
     Ok(())
 }
 
-fn parse(path: &Path, text: &str) -> Result<Settings, SettingsError> {
-    let document: Document = toml::from_str(text).map_err(|err| SettingsError::Parse {
-        path: path.to_path_buf(),
-        source: TomlError(err),
-    })?;
-    let theme = match document.theme {
+fn read(table: toml::Table, problems: &mut Vec<String>) -> Settings {
+    let theme = match table.get("theme") {
         None => ThemePreference::default(),
-        Some(value) => ThemePreference::from_tag(&value).ok_or_else(|| SettingsError::Invalid {
-            path: path.to_path_buf(),
-            field: "theme",
-            value,
-        })?,
+        Some(toml::Value::String(tag)) => ThemePreference::from_tag(tag).unwrap_or_else(|| {
+            problems.push(format!(
+                "theme = {tag:?} isn't one of {}, so it is {:?}.",
+                themes(),
+                ThemePreference::default().tag()
+            ));
+            ThemePreference::default()
+        }),
+        Some(value) => {
+            problems.push(format!(
+                "theme should be text, not {}, so it is {:?}.",
+                value.type_str(),
+                ThemePreference::default().tag()
+            ));
+            ThemePreference::default()
+        }
     };
-    Ok(Settings { theme })
+    problems.extend(
+        user_file::unknown_keys(&table, KEYS)
+            .map(|key| format!("{key} isn't a setting Ryuuji knows, so it is ignored.")),
+    );
+    Settings { theme }
 }
 
 fn render(settings: &Settings) -> String {
-    format!("{}theme = {:?}\n", header(), settings.theme.tag())
-}
-
-fn header() -> String {
-    let themes = ThemePreference::ALL
-        .map(|theme| format!("\"{}\"", theme.tag()))
-        .join(" | ");
     format!(
-        "# Ryuuji settings. Ryuuji rewrites this file whenever a setting changes, \
-         so edit it while the app is closed.\n\
-         # theme = {themes}\n"
+        "# Ryuuji settings. Changing a setting in Ryuuji changes only its own \
+         line here.\n\
+         # theme = {}\n\
+         theme = {:?}\n",
+        themes(),
+        settings.theme.tag()
     )
 }
 
-fn write(root: &Path, path: &Path, settings: &Settings) -> Result<(), SettingsError> {
-    let contents = render(settings);
-    write_atomically(root, path, contents.as_bytes()).map_err(|source| SettingsError::Write {
-        path: path.to_path_buf(),
-        source,
-    })
-}
-
-/// The target either keeps its old bytes or holds all the new ones; a crash
-/// mid-write leaves only an unnamed temp file beside it.
-fn write_atomically(root: &Path, target: &Path, contents: &[u8]) -> io::Result<()> {
-    let mut file = NamedTempFile::new_in(root)?;
-    file.write_all(contents)?;
-    file.as_file().sync_all()?;
-    file.persist(target).map_err(|err| err.error)?;
-    Ok(())
+fn themes() -> String {
+    ThemePreference::ALL
+        .map(|theme| format!("\"{}\"", theme.tag()))
+        .join(" | ")
 }
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
 
     fn tmp_dir() -> (tempfile::TempDir, DataDir) {
@@ -180,12 +111,18 @@ mod tests {
         names
     }
 
+    fn dark() -> Settings {
+        Settings {
+            theme: ThemePreference::Dark,
+        }
+    }
+
     #[test]
     fn missing_file_is_written_with_defaults_and_header() {
         let (_tmp, dir) = tmp_dir();
-        let loaded = load_or_init(&dir);
-        assert_eq!(loaded.settings, Settings::default());
-        assert!(loaded.problem.is_none());
+        let loaded = load(&dir);
+        assert_eq!(loaded.value, Some(Settings::default()));
+        assert!(loaded.is_clean());
         let text = fs::read_to_string(dir.settings_file()).unwrap();
         assert!(text.starts_with("# Ryuuji settings."));
         assert!(text.contains("# theme = \"system\" | \"light\" | \"dark\"\n"));
@@ -195,65 +132,130 @@ mod tests {
     #[test]
     fn loading_twice_leaves_the_file_byte_identical() {
         let (_tmp, dir) = tmp_dir();
-        let _ = load_or_init(&dir);
+        let _ = load(&dir);
         let first = fs::read(dir.settings_file()).unwrap();
-        let _ = load_or_init(&dir);
+        let _ = load(&dir);
         assert_eq!(fs::read(dir.settings_file()).unwrap(), first);
     }
 
     #[test]
     fn save_then_load_round_trips_without_leftovers() {
         let (_tmp, dir) = tmp_dir();
-        let dark = Settings {
-            theme: ThemePreference::Dark,
-        };
-        save(&dir, &dark).unwrap();
-        let loaded = load_or_init(&dir);
-        assert_eq!(loaded.settings, dark);
-        assert!(loaded.problem.is_none());
+        let _ = load(&dir);
+        save_theme(&dir, ThemePreference::Dark).unwrap();
+        let loaded = load(&dir);
+        assert_eq!(loaded.value, Some(dark()));
+        assert!(loaded.is_clean());
         assert_eq!(file_names(&dir), ["logs", "settings.toml"]);
     }
 
     #[test]
-    fn invalid_toml_is_a_parse_problem_and_stays_untouched() {
+    fn a_theme_save_to_a_missing_file_writes_the_starter_with_it() {
+        let (_tmp, dir) = tmp_dir();
+        save_theme(&dir, ThemePreference::Dark).unwrap();
+        let text = fs::read_to_string(dir.settings_file()).unwrap();
+        assert!(text.starts_with("# Ryuuji settings."));
+        assert!(text.ends_with("theme = \"dark\"\n"));
+    }
+
+    /// The person's file is theirs: a pick rewrites its own line and
+    /// nothing else.
+    #[test]
+    fn a_theme_save_keeps_comments_unknown_keys_and_order() {
+        let (_tmp, dir) = tmp_dir();
+        fs::write(
+            dir.settings_file(),
+            "# mine\nfuture_knob = 3 # later\ntheme = \"light\"\n\n# end\n",
+        )
+        .unwrap();
+        save_theme(&dir, ThemePreference::Dark).unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.settings_file()).unwrap(),
+            "# mine\nfuture_knob = 3 # later\ntheme = \"dark\"\n\n# end\n"
+        );
+    }
+
+    #[test]
+    fn a_theme_save_replaces_a_theme_it_could_not_read() {
+        let (_tmp, dir) = tmp_dir();
+        fs::write(dir.settings_file(), "theme = \"blue\"\n").unwrap();
+        save_theme(&dir, ThemePreference::Dark).unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.settings_file()).unwrap(),
+            "theme = \"dark\"\n"
+        );
+    }
+
+    #[test]
+    fn a_theme_save_leaves_a_file_that_is_not_toml_alone() {
         let (_tmp, dir) = tmp_dir();
         let garbage = b"theme = [unterminated";
         fs::write(dir.settings_file(), garbage).unwrap();
-        let loaded = load_or_init(&dir);
-        assert_eq!(loaded.settings, Settings::default());
-        assert!(matches!(loaded.problem, Some(SettingsError::Parse { .. })));
+        assert!(matches!(
+            save_theme(&dir, ThemePreference::Dark),
+            Err(SaveError::NotToml)
+        ));
         assert_eq!(fs::read(dir.settings_file()).unwrap(), garbage);
     }
 
     #[test]
-    fn unknown_theme_is_an_invalid_problem_and_stays_untouched() {
+    fn invalid_toml_applies_nothing_and_stays_untouched() {
+        let (_tmp, dir) = tmp_dir();
+        let garbage = b"theme = [unterminated";
+        fs::write(dir.settings_file(), garbage).unwrap();
+        let loaded = load(&dir);
+        assert_eq!(loaded.value, None);
+        assert_eq!(loaded.problems.len(), 1);
+        assert_eq!(fs::read(dir.settings_file()).unwrap(), garbage);
+    }
+
+    #[test]
+    fn unknown_theme_falls_back_names_the_value_and_stays_untouched() {
         let (_tmp, dir) = tmp_dir();
         let text = "theme = \"blue\"\n";
         fs::write(dir.settings_file(), text).unwrap();
-        let loaded = load_or_init(&dir);
-        assert_eq!(loaded.settings, Settings::default());
-        assert!(matches!(
-            loaded.problem,
-            Some(SettingsError::Invalid { field: "theme", ref value, .. }) if value == "blue"
-        ));
+        let loaded = load(&dir);
+        assert_eq!(loaded.value, Some(Settings::default()));
+        assert_eq!(
+            loaded.problems,
+            [
+                "theme = \"blue\" isn't one of \"system\" | \"light\" | \"dark\", so it is \"system\"."
+            ]
+        );
         assert_eq!(fs::read_to_string(dir.settings_file()).unwrap(), text);
     }
 
     #[test]
-    fn unknown_keys_are_tolerated() {
+    fn a_theme_that_is_not_text_falls_back() {
         let (_tmp, dir) = tmp_dir();
-        fs::write(dir.settings_file(), "future_knob = 3\n").unwrap();
-        let loaded = load_or_init(&dir);
-        assert_eq!(loaded.settings, Settings::default());
-        assert!(loaded.problem.is_none());
+        fs::write(dir.settings_file(), "theme = 3\n").unwrap();
+        let loaded = load(&dir);
+        assert_eq!(loaded.value, Some(Settings::default()));
+        assert_eq!(
+            loaded.problems,
+            ["theme should be text, not integer, so it is \"system\"."]
+        );
+    }
+
+    /// A newer build's key is named, not fatal: the theme beside it still
+    /// applies.
+    #[test]
+    fn an_unknown_key_is_named_and_the_theme_beside_it_applies() {
+        let (_tmp, dir) = tmp_dir();
+        fs::write(dir.settings_file(), "theme = \"dark\"\nfuture_knob = 3\n").unwrap();
+        let loaded = load(&dir);
+        assert_eq!(loaded.value, Some(dark()));
+        assert_eq!(
+            loaded.problems,
+            ["future_knob isn't a setting Ryuuji knows, so it is ignored."]
+        );
     }
 
     #[test]
-    fn save_over_a_directory_is_a_write_error() {
+    fn a_theme_save_over_a_directory_is_refused() {
         let (_tmp, dir) = tmp_dir();
         fs::create_dir(dir.settings_file()).unwrap();
-        let result = save(&dir, &Settings::default());
-        assert!(matches!(result, Err(SettingsError::Write { .. })));
+        assert!(save_theme(&dir, ThemePreference::Dark).is_err());
         assert!(dir.settings_file().is_dir());
         assert_eq!(file_names(&dir), ["logs", "settings.toml"]);
     }
