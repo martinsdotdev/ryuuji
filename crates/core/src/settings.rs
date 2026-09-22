@@ -13,9 +13,14 @@ const KEYS: &[&str] = &["theme"];
 pub(crate) enum SaveError {
     #[error("settings.toml couldn't be read, so the theme wasn't saved")]
     Read(#[source] io::Error),
-    #[error("settings.toml isn't valid TOML, so the theme wasn't saved")]
+    /// A reread of such a file keeps what is running, so the pick lasts
+    /// until the file parses again.
+    #[error(
+        "settings.toml isn't valid TOML, so the theme wasn't saved. It applies until the file \
+         is fixed"
+    )]
     NotToml,
-    #[error(transparent)]
+    #[error("settings.toml couldn't be written, so the theme wasn't saved")]
     Write(#[from] WriteError),
 }
 
@@ -75,8 +80,8 @@ fn read(table: toml::Table, problems: &mut Vec<String>) -> Settings {
 
 fn render(settings: &Settings) -> String {
     format!(
-        "# Ryuuji settings. Changing a setting in Ryuuji changes only its own \
-         line here.\n\
+        "# Ryuuji settings. A save applies at once. Changing a setting in Ryuuji \
+         changes only its own line here.\n\
          # theme = {}\n\
          theme = {:?}\n",
         themes(),

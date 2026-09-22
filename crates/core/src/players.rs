@@ -67,7 +67,7 @@ const ROW_KEYS: &[&str] = &["name", "smtc_app_ids", "mpris_ids", "executables", 
 const STARTER: &str = "\
 # Players Ryuuji detects, on top of the ones it knows already.
 #
-# Ryuuji reads this file when it starts and never writes to it.
+# A save applies at once. Ryuuji never writes to this file.
 # Settings > Diagnostics > Media sessions lists every player session with its
 # app id and the player it matched, which is where to find what to write here.
 # A row holds a name and any of smtc_app_ids (Windows), mpris_ids (Linux),

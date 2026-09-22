@@ -4,10 +4,12 @@
 //!
 //! Exactly one strategy compiles for a target, so there is no strategy
 //! trait: a trait with a single implementation would hide nothing. The
-//! contract is the module aliased as `strategy` below, four items long
-//! (`NAME`, `StartError`, `Source::start`, `Source::refresh`), and a module
-//! that does not meet it fails that target's build. The worker builds the
-//! player table and hands it to `start`, so a strategy never reads a file.
+//! contract is the module aliased as `strategy` below, five items long
+//! (`NAME`, `StartError`, `Source::start`, `Source::refresh`,
+//! `Source::set_rows`), and a module that does not meet it fails that
+//! target's build. The worker builds the player table and hands it to
+//! `start`, and the person's later rows to `set_rows`, so a strategy never
+//! reads a file.
 
 use std::error::Error;
 use std::io;
@@ -110,6 +112,13 @@ impl Watcher {
     pub fn sessions(&self) -> Vec<SessionFacts> {
         self.mirror.read()
     }
+
+    /// Lays `players` over the built-in and discovered players in place of
+    /// the rows the worker had, before its next refresh. The worker does the
+    /// laying, so the caller's thread does no more than copy the rows.
+    pub fn set_players(&self, players: &[PlayerRow]) {
+        let _ = self.tx.send(Msg::Players(players.to_vec()));
+    }
 }
 
 impl Drop for Watcher {
@@ -142,6 +151,8 @@ impl Mirror {
 enum Msg {
     SessionsChanged,
     SessionChanged,
+    /// Only [`Watcher::set_players`] sends it.
+    Players(Vec<PlayerRow>),
     Stop,
 }
 
@@ -199,6 +210,9 @@ impl Pace {
 
 struct Mailbox {
     rx: Receiver<Msg>,
+    /// The newest rows the messages carried, for the worker to take before
+    /// the next refresh.
+    rows: Option<Vec<PlayerRow>>,
 }
 
 impl Mailbox {
@@ -216,30 +230,27 @@ impl Mailbox {
             },
             Pace::Idle => self.rx.recv().ok()?,
         };
-        if !wake.note(first) {
+        if !self.note(&mut wake, first) {
             return None;
         }
         while let Ok(msg) = self.rx.try_recv() {
-            if !wake.note(msg) {
+            if !self.note(&mut wake, msg) {
                 return None;
             }
         }
         Some(wake)
     }
-}
 
-impl Wake {
     /// Records what one message means for the next refresh. False means
     /// stop.
-    fn note(&mut self, msg: Msg) -> bool {
+    fn note(&mut self, wake: &mut Wake, msg: Msg) -> bool {
         match msg {
-            Msg::SessionsChanged => {
-                self.sessions_changed = true;
-                true
-            }
-            Msg::SessionChanged => true,
-            Msg::Stop => false,
+            Msg::SessionsChanged => wake.sessions_changed = true,
+            Msg::SessionChanged => {}
+            Msg::Players(rows) => self.rows = Some(rows),
+            Msg::Stop => return false,
         }
+        true
     }
 }
 
@@ -330,7 +341,10 @@ impl Spawn {
             sink: self.sink,
             unreadable_since: None,
         };
-        let mut mailbox = Mailbox { rx: self.rx };
+        let mut mailbox = Mailbox {
+            rx: self.rx,
+            rows: None,
+        };
         let mut wake = Wake {
             sessions_changed: true,
         };
@@ -346,6 +360,9 @@ impl Spawn {
             match mailbox.next(pace) {
                 Some(next) => wake = next,
                 None => break,
+            }
+            if let Some(rows) = mailbox.rows.take() {
+                source.set_rows(rows);
             }
         }
     }
@@ -363,7 +380,7 @@ mod tests {
 
     fn new_mailbox() -> (Sender<Msg>, Mailbox) {
         let (tx, rx) = channel();
-        (tx, Mailbox { rx })
+        (tx, Mailbox { rx, rows: None })
     }
 
     fn player(name: &str) -> Player {
@@ -455,6 +472,26 @@ mod tests {
                 sessions_changed: false
             })
         );
+    }
+
+    #[test]
+    fn a_burst_of_rows_leaves_the_newest_for_the_worker() {
+        let (tx, mut mailbox) = new_mailbox();
+        let older = Vec::new();
+        let newer = PlayerRow::read_all("[[player]]\nname = \"mpv\"\nhidden = true\n");
+        tx.send(Msg::Players(older)).unwrap();
+        tx.send(Msg::SessionChanged).unwrap();
+        tx.send(Msg::Players(newer.clone())).unwrap();
+        assert_eq!(
+            mailbox.next(Pace::Idle),
+            Some(Wake {
+                sessions_changed: false
+            })
+        );
+        assert_eq!(mailbox.rows.take(), Some(newer));
+        tx.send(Msg::SessionChanged).unwrap();
+        mailbox.next(Pace::Idle);
+        assert_eq!(mailbox.rows, None);
     }
 
     #[test]

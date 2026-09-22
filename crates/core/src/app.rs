@@ -38,8 +38,6 @@ pub struct Ryuuji {
 
 impl Ryuuji {
     pub fn open(dir: &DataDir) -> Result<Ryuuji, StoreError> {
-        let settings = settings::load(dir);
-        let players = players::load(dir);
         let Opened { store, recovered } = Store::open(dir)?;
         let library = store.entries()?;
         let last_match = store.last_match().unwrap_or_else(|err| {
@@ -84,16 +82,14 @@ impl Ryuuji {
                     .as_ref()
                     .is_some_and(|last| ignored.contains(&last.raw_title)),
                 last_match,
-                settings: settings.value.unwrap_or_default(),
-                players: players.value.unwrap_or_default(),
                 notices,
                 ..AppState::default()
             },
             ignored,
             said: HashMap::new(),
         };
-        app.report(UserFile::Settings, settings.problems);
-        app.report(UserFile::Players, players.problems);
+        // Read the way a save is, over the built-ins the state starts with.
+        app.reload_all();
         Ok(app)
     }
 
@@ -127,6 +123,7 @@ impl Ryuuji {
             Command::OpenDetail(detail) => self.state.detail = Some(detail),
             Command::CloseDetail => self.state.detail = None,
             Command::SetTheme(theme) => self.set_theme(theme),
+            Command::Reload => self.reload_all(),
             Command::DismissNotice => {
                 if !self.state.notices.is_empty() {
                     self.state.notices.remove(0);
@@ -331,7 +328,7 @@ impl Ryuuji {
             return;
         }
         if let Err(err) = settings::save_theme(&self.dir, theme) {
-            let detail = format!("{}. It applies until Ryuuji closes.", error_chain(&err));
+            let detail = error_chain(&err);
             tracing::error!(error = %detail, "theme not saved");
             // Every pick while the file stays broken fails the same way.
             let notice = Notice::SaveFailed { detail };
@@ -340,6 +337,35 @@ impl Ryuuji {
             }
         }
         self.state.settings = Settings { theme };
+    }
+
+    /// Reads `file` again. What it says replaces what the last read said,
+    /// unless it could not be read or is not TOML, when what is running
+    /// stays.
+    fn reload_all(&mut self) {
+        for file in UserFile::ALL {
+            self.reload(file);
+        }
+    }
+
+    fn reload(&mut self, file: UserFile) {
+        let problems = match file {
+            UserFile::Settings => {
+                let loaded = settings::load(&self.dir);
+                if let Some(settings) = loaded.value {
+                    self.state.settings = settings;
+                }
+                loaded.problems
+            }
+            UserFile::Players => {
+                let loaded = players::load(&self.dir);
+                if let Some(players) = loaded.value {
+                    self.state.players = players;
+                }
+                loaded.problems
+            }
+        };
+        self.report(file, problems);
     }
 
     /// Says what a read of `file` dropped. The same problems as last time
@@ -1079,6 +1105,120 @@ mod tests {
                 if detail.starts_with("settings.toml isn't valid TOML")
         ));
         assert_eq!(fs::read_to_string(dir.settings_file()).unwrap(), garbage);
+    }
+
+    #[test]
+    fn a_fixed_settings_file_applies_on_reload() {
+        let (_tmp, dir) = open_tmp();
+        fs::write(dir.settings_file(), "theme = \"blue\"\n").unwrap();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        assert_eq!(app.state().notices.len(), 1);
+
+        fs::write(dir.settings_file(), "theme = \"light\"\n").unwrap();
+        app.dispatch(Command::Reload);
+        assert_eq!(app.state().settings.theme, ThemePreference::Light);
+        assert!(app.state().notices.is_empty());
+    }
+
+    /// A save caught half-written must not undo what the person set up, so
+    /// a file that is not TOML keeps the rows already running. Its notice
+    /// replaces the last one rather than queueing beside it.
+    #[test]
+    fn a_reload_that_is_not_toml_keeps_the_running_players_and_one_notice() {
+        let (_tmp, dir) = open_tmp();
+        fs::write(
+            dir.players_file(),
+            "[[player]]\nname = \"mpv\"\nhidden = true\n",
+        )
+        .unwrap();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        let running = app.state().players.clone();
+        assert_eq!(running.len(), 1);
+
+        fs::write(dir.players_file(), "[[player]\n").unwrap();
+        app.dispatch(Command::Reload);
+        fs::write(dir.players_file(), "[[player]]\nname = \n").unwrap();
+        app.dispatch(Command::Reload);
+        assert_eq!(app.state().players, running);
+        let problems = match app.state().notices.as_slice() {
+            [
+                Notice::FileProblem {
+                    file: UserFile::Players,
+                    problems,
+                },
+            ] => problems,
+            other => panic!("{other:?}"),
+        };
+        assert!(problems[0].contains("line 2"), "{problems:?}");
+
+        fs::write(dir.players_file(), "[[player]]\nname = \"VLC\"\n").unwrap();
+        app.dispatch(Command::Reload);
+        assert_eq!(app.state().players[0].name(), "VLC");
+        assert!(app.state().notices.is_empty());
+    }
+
+    #[test]
+    fn a_reload_of_a_deleted_players_file_is_the_builtins_and_a_new_starter() {
+        let (_tmp, dir) = open_tmp();
+        fs::write(
+            dir.players_file(),
+            "[[player]]\nname = \"mpv\"\nhidden = true\n",
+        )
+        .unwrap();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        fs::remove_file(dir.players_file()).unwrap();
+        app.dispatch(Command::Reload);
+        assert!(app.state().players.is_empty());
+        assert!(
+            fs::read_to_string(dir.players_file())
+                .unwrap()
+                .starts_with("# Players")
+        );
+    }
+
+    /// Ryuuji's own save wakes the watcher like any other, so rereading it
+    /// has to change nothing, a dismissed notice included.
+    #[test]
+    fn rereading_ryuujis_own_save_changes_nothing() {
+        let (_tmp, dir) = open_tmp();
+        fs::write(dir.settings_file(), "future_knob = 3\n").unwrap();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::DismissNotice);
+        app.dispatch(Command::SetTheme(ThemePreference::Dark));
+        let before = app.state().clone();
+        app.dispatch(Command::Reload);
+        assert_eq!(app.state(), &before);
+        assert!(app.state().notices.is_empty());
+    }
+
+    /// A save the watcher has not reported yet is in the file a pick reads,
+    /// so the pick keeps it.
+    #[test]
+    fn a_pick_keeps_a_save_not_yet_reported() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        fs::write(dir.settings_file(), "theme = \"light\"\nfuture_knob = 3\n").unwrap();
+        app.dispatch(Command::SetTheme(ThemePreference::Dark));
+        assert_eq!(
+            fs::read_to_string(dir.settings_file()).unwrap(),
+            "theme = \"dark\"\nfuture_knob = 3\n"
+        );
+    }
+
+    /// A reread of a file that is not TOML keeps what is running, so the
+    /// refused pick lasts until the file is fixed, as its notice says.
+    #[test]
+    fn a_refused_pick_lasts_until_the_file_is_fixed() {
+        let (_tmp, dir) = open_tmp();
+        fs::write(dir.settings_file(), "theme = [unterminated\n").unwrap();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::SetTheme(ThemePreference::Dark));
+        app.dispatch(Command::Reload);
+        assert_eq!(app.state().settings.theme, ThemePreference::Dark);
+
+        fs::write(dir.settings_file(), "theme = \"light\"\n").unwrap();
+        app.dispatch(Command::Reload);
+        assert_eq!(app.state().settings.theme, ThemePreference::Light);
     }
 
     /// Reporting the same problems again says nothing, so a dismissed
