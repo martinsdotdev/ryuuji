@@ -29,6 +29,7 @@ tagged_enum! {
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub enum UserFile {
         Settings => "settings.toml", "Settings",
+        Players => "players.toml", "Players",
     }
 }
 

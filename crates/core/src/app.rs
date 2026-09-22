@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::time::SystemTime;
 
-use crate::settings;
 use crate::watch::{Accrual, Logged, WatchSession};
 use crate::{
     Added, AppState, Command, DataDir, Decline, Diagnostics, EntryId, HistoryId, HistoryPage,
@@ -9,6 +8,7 @@ use crate::{
     ProposedMatch, RecordOutcome, Recording, Settings, Store, StoreError, ThemePreference,
     UserFile, WatchProgress, WatchStatus, error_chain, matching,
 };
+use crate::{players, settings};
 
 /// The running application: the store plus the state derived from it.
 ///
@@ -39,6 +39,7 @@ pub struct Ryuuji {
 impl Ryuuji {
     pub fn open(dir: &DataDir) -> Result<Ryuuji, StoreError> {
         let settings = settings::load(dir);
+        let players = players::load(dir);
         let Opened { store, recovered } = Store::open(dir)?;
         let library = store.entries()?;
         let last_match = store.last_match().unwrap_or_else(|err| {
@@ -84,6 +85,7 @@ impl Ryuuji {
                     .is_some_and(|last| ignored.contains(&last.raw_title)),
                 last_match,
                 settings: settings.value.unwrap_or_default(),
+                players: players.value.unwrap_or_default(),
                 notices,
                 ..AppState::default()
             },
@@ -91,6 +93,7 @@ impl Ryuuji {
             said: HashMap::new(),
         };
         app.report(UserFile::Settings, settings.problems);
+        app.report(UserFile::Players, players.problems);
         Ok(app)
     }
 
@@ -1008,6 +1011,31 @@ mod tests {
             [Notice::FileProblem { .. }, Notice::SaveFailed { .. }]
         ));
         assert!(dir.settings_file().is_dir());
+    }
+
+    #[test]
+    fn open_reads_the_players_a_person_wrote_and_says_what_it_dropped() {
+        let (_tmp, dir) = open_tmp();
+        fs::write(
+            dir.players_file(),
+            "[[player]]\nname = \"mpv\"\nhidden = true\n\
+             [[player]]\nname = \"Odd\"\nexecutables = [\"ab\"]\n",
+        )
+        .unwrap();
+
+        let app = Ryuuji::open(&dir).unwrap();
+        let rows: Vec<&str> = app
+            .state()
+            .players
+            .iter()
+            .map(|row| row.name.as_str())
+            .collect();
+        assert_eq!(rows, ["mpv"]);
+        assert!(matches!(
+            app.state().notices.as_slice(),
+            [Notice::FileProblem { file: UserFile::Players, problems }]
+                if problems.len() == 1 && problems[0].starts_with("Player \"Odd\"")
+        ));
     }
 
     /// A pick writes its own line, so the key Ryuuji does not know survives

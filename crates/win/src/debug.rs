@@ -145,6 +145,7 @@ impl Report {
         let _ = writeln!(out, "Library: {}", file_line(&core.library, now));
         let _ = writeln!(out, "Schema version: {}", schema_text(&core.schema));
         let _ = writeln!(out, "Settings: {}", file_line(&core.settings, now));
+        let _ = writeln!(out, "Players: {}", file_line(&core.players, now));
         let _ = writeln!(out, "Logs: {}", core.logs.display());
         let current_log = core
             .current_log
@@ -567,6 +568,7 @@ fn files_card(core: &Diagnostics, now: SystemTime) -> Border {
     let rows = [
         FileRow::of(&core.library, root, schema_note(&core.schema), now),
         FileRow::of(&core.settings, root, NOT_APPLICABLE.to_owned(), now),
+        FileRow::of(&core.players, root, NOT_APPLICABLE.to_owned(), now),
         log,
     ];
     card_frame(

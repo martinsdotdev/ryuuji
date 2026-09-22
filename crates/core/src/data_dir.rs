@@ -93,6 +93,10 @@ impl DataDir {
     pub(crate) fn settings_file(&self) -> PathBuf {
         UserFile::Settings.path(self)
     }
+
+    pub(crate) fn players_file(&self) -> PathBuf {
+        UserFile::Players.path(self)
+    }
 }
 
 fn create_dir(path: &Path) -> Result<(), DataDirError> {

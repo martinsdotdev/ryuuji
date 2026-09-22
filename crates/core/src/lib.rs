@@ -12,6 +12,7 @@ mod diagnostics;
 mod history;
 mod matching;
 mod playback;
+mod players;
 mod settings;
 mod store;
 mod tagged;
@@ -33,6 +34,7 @@ pub use history::{
 pub use jiff::tz::TimeZone;
 pub use matching::{Confidence, Link, ProposedMatch, normalize_title, similarity};
 pub use playback::{PlaybackEvent, PlaybackSource, PlaybackStatus};
+pub use players::{MIN_PATTERN_LEN, PlayerRow, too_short};
 // Shells depend on this crate alone, so the parser reaches them through here.
 pub use ryuuji_parse::{Certainty, ElementKind, Options, parse};
 pub use store::{
@@ -330,6 +332,9 @@ pub struct AppState {
     /// watched.
     pub watch_progress: Option<WatchProgress>,
     pub settings: Settings,
+    /// The rows of `players.toml`, which detection lays over its built-in
+    /// players.
+    pub players: Vec<PlayerRow>,
     /// Oldest first; the shell shows the front one.
     pub notices: Vec<Notice>,
 }
@@ -345,6 +350,7 @@ impl Default for AppState {
             ignored: false,
             watch_progress: None,
             settings: Settings::default(),
+            players: Vec::new(),
             notices: Vec::new(),
         }
     }
