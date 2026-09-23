@@ -413,6 +413,28 @@ fn fetch_listing(
     .parse()
 }
 
+/// The values taken from a list, newest first, for one entry or all of
+/// them, written at or after `since` or at any time: the ones
+/// [`Store::history`] lays beside a page of watches. One statement serves
+/// every case; the table holds one row per value taken, so no index is
+/// missed.
+pub(super) fn updates_since(
+    conn: &Connection,
+    entry: Option<EntryId>,
+    since: Option<i64>,
+) -> Result<Vec<ListUpdate>, StoreError> {
+    let mut stmt = conn
+        .prepare(&format!(
+            "{SELECT_UPDATE} WHERE (?1 IS NULL OR entry_id = ?1) AND (?2 IS NULL OR at >= ?2) \
+             ORDER BY id DESC"
+        ))
+        .map_err(query_failed)?;
+    let rows = stmt
+        .query_map(params![entry.map(|id| id.0), since], RawUpdate::read)
+        .map_err(query_failed)?;
+    rows.map(|row| row.map_err(query_failed)?.parse()).collect()
+}
+
 fn fetch_update(conn: &Connection, id: ListUpdateId) -> Result<ListUpdate, StoreError> {
     conn.query_row(
         &format!("{SELECT_UPDATE} WHERE id = ?1"),

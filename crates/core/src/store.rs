@@ -623,8 +623,17 @@ impl Store {
         Ok(moved)
     }
 
-    /// Up to `limit` watches, newest first, for one entry or all of them.
-    /// One row past the limit is read to learn whether older ones exist.
+    /// Up to `limit` watches, newest first, for one entry or all of them,
+    /// with the values taken from a list over the same stretch of time. One
+    /// row past the limit is read to learn whether older watches exist.
+    ///
+    /// The page is cut by `id`, which runs with `at`, the time a row was
+    /// first written; a recording's later `recorded_at` does not move it.
+    /// The updates are those written at or after the oldest watch on the
+    /// page, and every update when no older watch exists, so a page grown
+    /// to the next limit adds updates and never repeats one, and a value
+    /// taken before anything was recorded still shows. A page with no
+    /// watch and older ones past the limit carries none.
     pub fn history(&self, entry: Option<EntryId>, limit: usize) -> Result<HistoryPage, StoreError> {
         let _span = info_span!("store.history", entry = ?entry, limit).entered();
         let wanted = i64::try_from(limit).unwrap_or(i64::MAX).saturating_add(1);
@@ -647,7 +656,18 @@ impl Store {
             .collect::<Result<Vec<_>, _>>()?;
         let more = watches.len() > limit;
         watches.truncate(limit);
-        Ok(HistoryPage { watches, more })
+        let updates = match (more, watches.last()) {
+            (false, _) => lists::updates_since(&self.conn, entry, None)?,
+            (true, Some(oldest)) => {
+                lists::updates_since(&self.conn, entry, Some(unix_secs(oldest.at)))?
+            }
+            (true, None) => Vec::new(),
+        };
+        Ok(HistoryPage {
+            watches,
+            updates,
+            more,
+        })
     }
 
     /// How many episodes the recordings made at or after `since` wrote and
@@ -1694,6 +1714,7 @@ mod tests {
                     ),
                     copied(4, 1..=1, 0, 1, "Show - 01.mkv", "mpv", 1_700_000_000, None),
                 ],
+                updates: vec![],
                 more: false,
             }
         );
@@ -2158,6 +2179,7 @@ mod tests {
         let a2 = store.record(watching(a, 2..=2)).unwrap().watch;
         let page = |watches: &[&Watch], more| HistoryPage {
             watches: watches.iter().map(|watch| (*watch).clone()).collect(),
+            updates: vec![],
             more,
         };
         assert_eq!(
@@ -2168,6 +2190,150 @@ mod tests {
         assert_eq!(store.history(Some(a), 1).unwrap(), page(&[&a2], true));
         assert_eq!(store.history(Some(b), 5).unwrap(), page(&[&b1], false));
         assert_eq!(store.history(None, 0).unwrap(), page(&[], true));
+    }
+
+    /// An `updates` row as `Store::settle` writes one, at a chosen time.
+    fn take_from_list(store: &Store, entry: EntryId, at: i64) -> ListUpdateId {
+        store.execute_raw(&format!(
+            "INSERT INTO updates (entry_id, service, progress_before, progress, status_before, \
+             status, at) VALUES ({}, 'anilist', 3, 5, 'watching', 'watching', {at})",
+            entry.0
+        ));
+        ListUpdateId(store.conn.last_insert_rowid())
+    }
+
+    /// Ids of a page's updates, in the page's order.
+    fn update_ids(page: &HistoryPage) -> Vec<ListUpdateId> {
+        page.updates.iter().map(|update| update.id).collect()
+    }
+
+    #[test]
+    fn a_page_carries_the_updates_from_its_oldest_watch_on_and_the_last_page_all_of_them() {
+        let (_tmp, dir) = open_tmp();
+        let mut store = open(&dir);
+        let a = store.add(entry("A")).unwrap().id;
+        let b = store.add(entry("B")).unwrap().id;
+        let mut watch_at = |entry, secs: i64| {
+            let id = store.record(watching(entry, 1..=1)).unwrap().watch.id;
+            store.execute_raw(&format!(
+                "UPDATE history SET at = {secs}, recorded_at = {secs} WHERE id = {}",
+                id.0
+            ));
+            id
+        };
+        let w1 = watch_at(a, 100);
+        let w2 = watch_at(a, 200);
+        let w3 = watch_at(b, 300);
+        let before_any = take_from_list(&store, a, 50);
+        let between = take_from_list(&store, a, 150);
+        let same_second = take_from_list(&store, b, 200);
+        let newest = take_from_list(&store, a, 350);
+
+        let first = store.history(None, 1).unwrap();
+        assert_eq!(
+            first
+                .watches
+                .iter()
+                .map(|watch| watch.id)
+                .collect::<Vec<_>>(),
+            vec![w3]
+        );
+        assert_eq!(update_ids(&first), vec![newest]);
+        // The one written in the oldest watch's second is on its page.
+        let second = store.history(None, 2).unwrap();
+        assert_eq!(update_ids(&second), vec![newest, same_second]);
+        let last = store.history(None, 3).unwrap();
+        assert!(!last.more);
+        assert_eq!(
+            last.watches
+                .iter()
+                .map(|watch| watch.id)
+                .collect::<Vec<_>>(),
+            vec![w3, w2, w1]
+        );
+        assert_eq!(
+            update_ids(&last),
+            vec![newest, same_second, between, before_any]
+        );
+        assert_eq!(store.history(None, 0).unwrap().updates, vec![]);
+
+        // For one entry, the watches and the updates are both its own.
+        let only_a = store.history(Some(a), 1).unwrap();
+        assert_eq!(
+            only_a
+                .watches
+                .iter()
+                .map(|watch| watch.id)
+                .collect::<Vec<_>>(),
+            vec![w2]
+        );
+        assert_eq!(update_ids(&only_a), vec![newest]);
+        assert_eq!(
+            update_ids(&store.history(Some(a), 2).unwrap()),
+            vec![newest, between, before_any]
+        );
+        assert_eq!(
+            update_ids(&store.history(Some(b), 5).unwrap()),
+            vec![same_second]
+        );
+    }
+
+    /// Paging as the shell does it, by a growing limit: what each read adds
+    /// over the last is every update once, newest first.
+    #[test]
+    fn paging_through_watches_and_updates_shows_every_update_once_in_order() {
+        let (_tmp, dir) = open_tmp();
+        let mut store = open(&dir);
+        let id = store.add(entry("Show")).unwrap().id;
+        let mut all = Vec::new();
+        for step in 1..=6i64 {
+            let watch = store.record(watching(id, 1..=1)).unwrap().watch.id;
+            store.execute_raw(&format!(
+                "UPDATE history SET at = {}, recorded_at = {} WHERE id = {}",
+                step * 100,
+                step * 100,
+                watch.0
+            ));
+            all.push(take_from_list(&store, id, step * 100 - 50));
+            all.push(take_from_list(&store, id, step * 100));
+        }
+        all.reverse();
+
+        let mut seen: Vec<ListUpdateId> = Vec::new();
+        let mut added = Vec::new();
+        for limit in 1.. {
+            let page = store.history(None, limit).unwrap();
+            let ids = update_ids(&page);
+            assert!(ids.starts_with(&seen), "limit {limit}: {ids:?} vs {seen:?}");
+            added.extend_from_slice(&ids[seen.len()..]);
+            seen = ids;
+            if !page.more {
+                break;
+            }
+        }
+        assert_eq!(added, all);
+    }
+
+    #[test]
+    fn updates_show_on_the_first_page_when_nothing_was_recorded() {
+        let (_tmp, dir) = open_tmp();
+        let mut store = open(&dir);
+        let id = store.add(entry("Show")).unwrap().id;
+        let older = take_from_list(&store, id, 100);
+        let newer = take_from_list(&store, id, 200);
+        let page = store.history(None, 10).unwrap();
+        assert_eq!(page.watches, vec![]);
+        assert!(!page.more);
+        assert_eq!(update_ids(&page), vec![newer, older]);
+        assert_eq!(
+            update_ids(&store.history(Some(id), 10).unwrap()),
+            vec![newer, older]
+        );
+        // No watch lies past any limit, so even a page of none is the last.
+        assert_eq!(
+            update_ids(&store.history(None, 0).unwrap()),
+            vec![newer, older]
+        );
     }
 
     #[test]
