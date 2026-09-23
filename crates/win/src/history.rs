@@ -1,16 +1,19 @@
-//! The History page: every watch that reached its threshold, newest first,
-//! under the local day it shows at, with Undo on a recording the show still
-//! stands at. Rows are read from the core on each render rather than held in
-//! the app state, which the shell clones on every dispatch; a page of them
-//! loads at a time and Show older asks for the next.
+//! The History page: every watch that reached its threshold and every value
+//! the library took from a list, newest first, under the local day it shows
+//! at, with Undo on a recording the show still stands at. Rows are read from
+//! the core on each render rather than held in the app state, which the
+//! shell clones on every dispatch; a page of them loads at a time and Show
+//! older asks for the next.
 
 use std::cell::RefCell;
+use std::fmt;
 use std::rc::Rc;
 use std::time::SystemTime;
 
 use ryuuji_core::{
-    Command, EntryId, HistoryId, HistoryPage, LibraryEntry, Link, Recorded, Ryuuji, TimeZone,
-    Watch, WatchOutcome, days, error_chain, time_of_day, week_start,
+    Command, EntryId, HistoryId, HistoryPage, LibraryEntry, Line, Link, ListStatus, ListUpdate,
+    ListUpdateId, Recorded, Ryuuji, StatusMove, TimeZone, Watch, WatchOutcome, days, error_chain,
+    time_of_day, week_start,
 };
 use windows_reactor::*;
 
@@ -66,7 +69,7 @@ pub fn history(props: &HistoryProps, cx: &mut RenderCx) -> Element {
             });
         }
     };
-    if page.watches.is_empty() {
+    if page.watches.is_empty() && page.updates.is_empty() {
         return placeholder(EMPTY_HEADING, EMPTY_BODY);
     }
 
@@ -114,7 +117,8 @@ fn unreadable(detail: &str, retry: impl Fn() + 'static) -> Element {
 }
 
 /// `5 episodes recorded in the last 7 days`, the count Taiga's idle Now
-/// Playing page gives.
+/// Playing page gives. Recordings only: what a list changed was not
+/// watched here.
 fn summary_text(episodes: u32) -> String {
     match episodes {
         0 => "No episodes recorded in the last 7 days".to_owned(),
@@ -123,17 +127,17 @@ fn summary_text(episodes: u32) -> String {
     }
 }
 
-/// One entry of the list: a day's heading, a watch, or the way to older
-/// watches after a full page.
+/// One entry of the list: a day's heading, a row, or the way to older rows
+/// after a full page.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Item {
-    /// Keyed by its first watch, since a label can repeat across a page
+    /// Keyed by its first row, since a label can repeat across a page
     /// whose times are out of order.
     Day {
         label: String,
-        first: HistoryId,
+        first: RowId,
     },
-    Watch(Row),
+    Row(Row),
     Older,
 }
 
@@ -144,16 +148,17 @@ fn items(
     zone: &TimeZone,
 ) -> Vec<Item> {
     let mut items = Vec::new();
-    for day in days(&page.watches, now, zone) {
+    for day in days(&page.watches, &page.updates, now, zone) {
+        let rows: Vec<Row> = day
+            .lines
+            .iter()
+            .map(|line| Row::of(*line, library, zone))
+            .collect();
         items.push(Item::Day {
             label: day.label,
-            first: day.watches[0].id,
+            first: rows[0].id,
         });
-        items.extend(
-            day.watches
-                .into_iter()
-                .map(|watch| Item::Watch(Row::of(watch, library, zone))),
-        );
+        items.extend(rows.into_iter().map(Item::Row));
     }
     if page.more {
         items.push(Item::Older);
@@ -164,22 +169,41 @@ fn items(
 fn key(item: &Item) -> String {
     match item {
         Item::Day { first, .. } => format!("day-{first}"),
-        Item::Watch(row) => format!("watch-{}", row.id),
+        Item::Row(row) => row.id.to_string(),
         Item::Older => "older".to_owned(),
     }
 }
 
-/// What a watch row shows, worked out from the row and the library so the
+/// The stored row a History row shows; written out, the list's key for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RowId {
+    Watch(HistoryId),
+    Update(ListUpdateId),
+}
+
+impl fmt::Display for RowId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RowId::Watch(id) => write!(f, "watch-{id}"),
+            RowId::Update(id) => write!(f, "update-{id}"),
+        }
+    }
+}
+
+/// What a row shows, worked out from the stored row and the library so the
 /// view only lays it out.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Row {
-    id: HistoryId,
+    id: RowId,
     mark: Mark,
-    /// `Episode 8 · Frieren: Beyond Journey's End`.
+    /// `Episode 8 · Frieren: Beyond Journey's End`; the show alone for an
+    /// update, which is about the show and not an episode.
     title: String,
-    /// The outcome, the marks on it and the player, joined by middle dots.
+    /// The outcome, the marks on it and the player, joined by middle dots;
+    /// for an update, what the list changed.
     detail: String,
-    file: String,
+    /// The file the player reported. An update came from no file.
+    file: Option<String>,
     time: String,
     action: Action,
 }
@@ -191,10 +215,11 @@ enum Mark {
     Added,
     Undone,
     Ignored,
+    Updated,
 }
 
 impl Mark {
-    /// Segoe Fluent Icons: CheckMark, Info, Add, Undo, Blocked.
+    /// Segoe Fluent Icons: CheckMark, Info, Add, Undo, Blocked, Sync.
     fn glyph(self) -> &'static str {
         match self {
             Mark::Recorded => "\u{E73E}",
@@ -202,32 +227,35 @@ impl Mark {
             Mark::Added => "\u{E710}",
             Mark::Undone => "\u{E7A7}",
             Mark::Ignored => "\u{E733}",
+            Mark::Updated => "\u{E895}",
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Action {
-    Undo,
+    Undo(HistoryId),
     Undone,
     Nothing,
 }
 
 impl Row {
-    fn of(watch: &Watch, library: &[LibraryEntry], zone: &TimeZone) -> Row {
+    fn of(line: Line<'_>, library: &[LibraryEntry], zone: &TimeZone) -> Row {
+        match line {
+            Line::Watch(watch) => Row::watch(watch, library, zone),
+            Line::Update(update) => Row::update(update, library, zone),
+        }
+    }
+
+    fn watch(watch: &Watch, library: &[LibraryEntry], zone: &TimeZone) -> Row {
         let (mark, outcome) = match watch.outcome {
-            WatchOutcome::Recorded(Recorded {
-                progress_before,
-                progress,
-                undone_at,
-                ..
-            }) => (
-                if undone_at.is_some() {
+            WatchOutcome::Recorded(recorded) => (
+                if recorded.undone_at.is_some() {
                     Mark::Undone
                 } else {
                     Mark::Recorded
                 },
-                format!("Recorded {progress_before} \u{2192} {progress}"),
+                recorded_text(&recorded),
             ),
             WatchOutcome::Declined(decline) => (Mark::Declined, decline.label().to_owned()),
             WatchOutcome::Added => (Mark::Added, "Added to library".to_owned()),
@@ -253,22 +281,77 @@ impl Row {
         }
         detail.push(watch.player.clone());
         let action = if watch.undoable(library) {
-            Action::Undo
+            Action::Undo(watch.id)
         } else if mark == Mark::Undone {
             Action::Undone
         } else {
             Action::Nothing
         };
         Row {
-            id: watch.id,
+            id: RowId::Watch(watch.id),
             mark,
             title: row_title(watch, library),
             detail: detail.join(" \u{b7} "),
-            file: watch.raw_title.clone(),
+            file: Some(watch.raw_title.clone()),
             time: time_of_day(watch.shown_at(), zone),
             action,
         }
     }
+
+    /// Nothing to undo: what a list changed is changed back on the list,
+    /// and the next merge takes that up.
+    fn update(update: &ListUpdate, library: &[LibraryEntry], zone: &TimeZone) -> Row {
+        Row {
+            id: RowId::Update(update.id),
+            mark: Mark::Updated,
+            title: show_named(update.entry, library),
+            detail: update_text(update),
+            file: None,
+            time: time_of_day(update.at, zone),
+            action: Action::Nothing,
+        }
+    }
+}
+
+/// `Recorded 1 → 2`, then where the episode moved the show when it moved
+/// it. An undone recording says only what it wrote: the move went back with
+/// the episode, and the row is dimmed for that.
+fn recorded_text(recorded: &Recorded) -> String {
+    let wrote = format!(
+        "Recorded {} \u{2192} {}",
+        recorded.progress_before, recorded.progress
+    );
+    match recorded.status.filter(|_| recorded.undone_at.is_none()) {
+        Some(moved) => format!("{wrote} \u{b7} {}", status_move_text(moved)),
+        None => wrote,
+    }
+}
+
+/// Where a recording moved the show: `Completed` for the last episode,
+/// `rewatch finished` when that episode ended a rewatch, `Watching` for a
+/// show taken off Plan to watch, On hold or Dropped.
+fn status_move_text(moved: StatusMove) -> &'static str {
+    match (moved.before, moved.after) {
+        (ListStatus::Rewatching, ListStatus::Completed) => "rewatch finished",
+        (_, after) => after.label(),
+    }
+}
+
+/// `Updated from AniList 3 → 5`, then the status the list moved the show to
+/// when it moved it; `Updated from AniList · Completed` when only the status
+/// moved.
+fn update_text(update: &ListUpdate) -> String {
+    let mut text = format!("Updated from {}", update.service.label());
+    if update.progress != update.progress_before {
+        text.push_str(&format!(
+            " {} \u{2192} {}",
+            update.progress_before, update.progress
+        ));
+    }
+    if update.status != update.status_before {
+        text.push_str(&format!(" \u{b7} {}", update.status.label()));
+    }
+    text
 }
 
 /// The show as the library names it, falling back to its id for an entry
@@ -311,7 +394,7 @@ fn item_view(
                 ..Thickness::default()
             })
             .into(),
-        Item::Watch(row) => row_view(row, dispatch.clone()),
+        Item::Row(row) => row_view(row, dispatch.clone()),
         Item::Older => {
             let set_limit = set_limit.clone();
             button("Show older")
@@ -335,16 +418,20 @@ fn row_view(row: &Row, dispatch: Dispatch<Command>) -> Element {
     let title = text_block(row.title.clone())
         .max_lines(1)
         .text_trimming(TextTrimming::CharacterEllipsis);
-    let detail = grid((
-        caption(format!("{} \u{b7} ", row.detail)).grid_column(0),
-        caption(row.file.clone())
-            .font_family(MONO_FONT)
-            .max_lines(1)
-            .text_trimming(TextTrimming::CharacterEllipsis)
-            .grid_column(1),
-    ))
-    .columns([GridLength::Auto, GridLength::STAR]);
-    let main = vstack((title, detail))
+    let detail: Element = match &row.file {
+        Some(file) => grid((
+            caption(format!("{} \u{b7} ", row.detail)).grid_column(0),
+            caption(file.clone())
+                .font_family(MONO_FONT)
+                .max_lines(1)
+                .text_trimming(TextTrimming::CharacterEllipsis)
+                .grid_column(1),
+        ))
+        .columns([GridLength::Auto, GridLength::STAR])
+        .into(),
+        None => caption(row.detail.clone()).into(),
+    };
+    let main = vstack(vec![title.into(), detail])
         .spacing(2.0)
         .vertical_alignment(VerticalAlignment::Center)
         .grid_column(1);
@@ -352,14 +439,11 @@ fn row_view(row: &Row, dispatch: Dispatch<Command>) -> Element {
         .vertical_alignment(VerticalAlignment::Center)
         .grid_column(2);
     let action: Element = match row.action {
-        Action::Undo => {
-            let id = row.id;
-            button("Undo")
-                .on_click(move || dispatch.call(Command::UndoRecording(id)))
-                .vertical_alignment(VerticalAlignment::Center)
-                .grid_column(3)
-                .into()
-        }
+        Action::Undo(id) => button("Undo")
+            .on_click(move || dispatch.call(Command::UndoRecording(id)))
+            .vertical_alignment(VerticalAlignment::Center)
+            .grid_column(3)
+            .into(),
         Action::Undone => caption("Undone")
             .vertical_alignment(VerticalAlignment::Center)
             .grid_column(3)
@@ -398,8 +482,12 @@ fn row_view(row: &Row, dispatch: Dispatch<Command>) -> Element {
 
 #[cfg(test)]
 mod tests {
+    use std::time::UNIX_EPOCH;
+
     use ryuuji_core::{
-        Decline, EntryId, NewEntry, NewRecording, Opened, ProposedMatch, Store, WatchStatus,
+        Account, Asked, Decline, EntryId, ListEntryId, ListState, Media, MediaId, NewEntry,
+        NewRecording, Opened, ProposedMatch, Remote, Report, Service, Signed, Store, UserId,
+        WatchStatus,
     };
 
     use super::*;
@@ -443,6 +531,10 @@ mod tests {
         let dir = ryuuji_core::DataDir::at(tmp.path()).unwrap();
         let Opened { store, .. } = Store::open(&dir).unwrap();
         (tmp, store)
+    }
+
+    fn watch_row(watch: &Watch, library: &[LibraryEntry]) -> Row {
+        Row::of(Line::Watch(watch), library, &TimeZone::UTC)
     }
 
     #[test]
@@ -521,9 +613,9 @@ mod tests {
         let watches = store.history(None, 20).unwrap().watches;
         let rows: Vec<Row> = watches
             .iter()
-            .map(|watch| Row::of(watch, &library, &TimeZone::UTC))
+            .map(|watch| watch_row(watch, &library))
             .collect();
-        let row = |id: HistoryId| rows.iter().find(|row| row.id == id).unwrap();
+        let row = |id: HistoryId| rows.iter().find(|row| row.id == RowId::Watch(id)).unwrap();
         let said = |id| {
             let row = row(id);
             (
@@ -540,7 +632,7 @@ mod tests {
                 Mark::Recorded,
                 "Episode 2 \u{b7} Frieren",
                 "Recorded 1 \u{2192} 2 \u{b7} mpv",
-                Action::Undo
+                Action::Undo(latest)
             )
         );
         assert_eq!(
@@ -612,15 +704,228 @@ mod tests {
                 Mark::Recorded,
                 "Episode 1 \u{b7} Kagurabachi",
                 "Recorded 0 \u{2192} 1 \u{b7} moved here \u{b7} mpv",
-                Action::Undo
+                Action::Undo(corrected)
             )
         );
         let watch = watches.iter().find(|watch| watch.id == latest).unwrap();
-        assert_eq!(row(latest).file, "Frieren - 02.mkv");
+        assert_eq!(row(latest).file.as_deref(), Some("Frieren - 02.mkv"));
         assert_eq!(
             row(latest).time,
             time_of_day(watch.shown_at(), &TimeZone::UTC)
         );
+    }
+
+    #[test]
+    fn a_recording_says_where_it_moved_the_show_and_an_undone_one_only_what_it_wrote() {
+        let moved = |before, after, undone_at| Recorded {
+            progress_before: 11,
+            progress: 12,
+            at: UNIX_EPOCH,
+            undone_at,
+            status: Some(StatusMove { before, after }),
+        };
+        assert_eq!(
+            recorded_text(&moved(ListStatus::Watching, ListStatus::Completed, None)),
+            "Recorded 11 \u{2192} 12 \u{b7} Completed"
+        );
+        assert_eq!(
+            recorded_text(&moved(ListStatus::Rewatching, ListStatus::Completed, None)),
+            "Recorded 11 \u{2192} 12 \u{b7} rewatch finished"
+        );
+        for before in [
+            ListStatus::PlanToWatch,
+            ListStatus::OnHold,
+            ListStatus::Dropped,
+        ] {
+            assert_eq!(
+                recorded_text(&moved(before, ListStatus::Watching, None)),
+                "Recorded 11 \u{2192} 12 \u{b7} Watching",
+                "{before:?}"
+            );
+        }
+        assert_eq!(
+            recorded_text(&moved(
+                ListStatus::Watching,
+                ListStatus::Completed,
+                Some(UNIX_EPOCH)
+            )),
+            "Recorded 11 \u{2192} 12"
+        );
+        assert_eq!(
+            recorded_text(&Recorded {
+                status: None,
+                ..moved(ListStatus::Watching, ListStatus::Completed, None)
+            }),
+            "Recorded 11 \u{2192} 12"
+        );
+    }
+
+    #[test]
+    fn a_rows_detail_carries_the_move_and_an_undone_rows_does_not() {
+        let (_tmp, mut store) = open_store();
+        let one_episode = NewEntry {
+            total: Some(1),
+            ..show("Frieren")
+        };
+        let frieren = store.add(one_episode.clone()).unwrap().id;
+        let completed = store
+            .record(recording(frieren, 1, "Frieren - 01.mkv"))
+            .unwrap()
+            .watch
+            .id;
+        let spice = store
+            .add(NewEntry {
+                title: "Spice and Wolf".into(),
+                ..one_episode
+            })
+            .unwrap()
+            .id;
+        let undone = store
+            .record(recording(spice, 1, "Spice - 01.mkv"))
+            .unwrap()
+            .watch
+            .id;
+        store.undo(undone).unwrap();
+        let library = store.entries().unwrap();
+        let watches = store.history(None, 10).unwrap().watches;
+        let row = |id: HistoryId| {
+            watch_row(
+                watches.iter().find(|watch| watch.id == id).unwrap(),
+                &library,
+            )
+        };
+        assert_eq!(
+            row(completed).detail,
+            "Recorded 0 \u{2192} 1 \u{b7} Completed \u{b7} mpv"
+        );
+        let undone = row(undone);
+        assert_eq!(
+            (undone.mark, undone.detail.as_str(), undone.action),
+            (
+                Mark::Undone,
+                "Recorded 0 \u{2192} 1 \u{b7} mpv",
+                Action::Undone
+            )
+        );
+    }
+
+    /// Adds `title` at episode 3, ties it to `media` and reports the list
+    /// holding `held` for it, so the library takes the difference and
+    /// writes the update row History reads. The app must be signed in.
+    fn take_from_list(app: &mut Ryuuji, title: &str, media: u64, held: ListState) -> EntryId {
+        app.dispatch(Command::AddEntry(NewEntry {
+            progress: 3,
+            ..show(title)
+        }));
+        let id = app
+            .state()
+            .library
+            .iter()
+            .find(|entry| entry.title == title)
+            .unwrap()
+            .id;
+        app.dispatch(Command::LinkShow {
+            entry: id,
+            service: Service::AniList,
+            media: Media {
+                id: MediaId(media),
+                title: title.to_owned(),
+                episodes: None,
+                mal_id: None,
+            },
+        });
+        let asked = ListState {
+            status: ListStatus::Watching,
+            progress: 3,
+            repeat: 0,
+        };
+        app.dispatch(Command::Synced(Report::Reconciled {
+            service: Service::AniList,
+            user: UserId(7),
+            entry: id,
+            media: MediaId(media),
+            asked: Asked {
+                wanted: asked,
+                base: asked,
+            },
+            remote: Remote::Listed {
+                id: Some(ListEntryId(media)),
+                state: held,
+            },
+        }));
+        id
+    }
+
+    #[test]
+    fn an_update_row_says_what_the_list_changed_and_offers_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = ryuuji_core::DataDir::at(tmp.path()).unwrap();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::Synced(Report::SignedIn(Account {
+            service: Service::AniList,
+            user: UserId(7),
+            name: "someone".into(),
+            expires: None,
+            signed: Signed::In,
+        })));
+        let held = |status, progress| ListState {
+            status,
+            progress,
+            repeat: 0,
+        };
+        take_from_list(&mut app, "Frieren", 5, held(ListStatus::Completed, 28));
+        take_from_list(&mut app, "Dandadan", 6, held(ListStatus::Watching, 5));
+        let status_only = take_from_list(&mut app, "Mushishi", 7, held(ListStatus::OnHold, 3));
+
+        let page = app.history(None, 10).unwrap();
+        assert_eq!(page.watches, vec![]);
+        let library = app.state().library.clone();
+        let rows: Vec<Row> = page
+            .updates
+            .iter()
+            .map(|update| Row::of(Line::Update(update), &library, &TimeZone::UTC))
+            .collect();
+        let said: Vec<(&str, &str)> = rows
+            .iter()
+            .map(|row| (row.title.as_str(), row.detail.as_str()))
+            .collect();
+        assert_eq!(
+            said,
+            vec![
+                ("Mushishi", "Updated from AniList \u{b7} On hold"),
+                ("Dandadan", "Updated from AniList 3 \u{2192} 5"),
+                (
+                    "Frieren",
+                    "Updated from AniList 3 \u{2192} 28 \u{b7} Completed"
+                ),
+            ]
+        );
+        let newest = &page.updates[0];
+        assert_eq!(
+            (
+                rows[0].id,
+                rows[0].mark,
+                rows[0].file.as_deref(),
+                rows[0].action
+            ),
+            (
+                RowId::Update(newest.id),
+                Mark::Updated,
+                None,
+                Action::Nothing
+            )
+        );
+        assert_eq!(rows[0].time, time_of_day(newest.at, &TimeZone::UTC));
+        assert_eq!(
+            Row::of(Line::Update(newest), &[], &TimeZone::UTC).title,
+            format!("entry {status_only}")
+        );
+
+        // With no watch at all, the updates still head a day of their own.
+        let listed = items(&page, &library, SystemTime::now(), &TimeZone::UTC);
+        assert_eq!(listed.len(), 4);
+        assert_eq!(key(&listed[0]), format!("day-update-{}", newest.id));
+        assert_eq!(key(&listed[1]), format!("update-{}", newest.id));
     }
 
     #[test]
@@ -665,7 +970,7 @@ mod tests {
         assert_eq!(
             listed.iter().map(key).collect::<Vec<_>>(),
             vec![
-                format!("day-{first}"),
+                format!("day-watch-{first}"),
                 format!("watch-{first}"),
                 format!("watch-{second}"),
                 "older".to_owned(),

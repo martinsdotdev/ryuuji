@@ -10,7 +10,7 @@ use std::time::SystemTime;
 use jiff::tz::TimeZone;
 use jiff::{Timestamp, ToSpan, Zoned};
 
-use crate::{Decline, EntryId, LibraryEntry, Link, ListStatus};
+use crate::{Decline, EntryId, LibraryEntry, Link, ListStatus, ListUpdate};
 
 /// Identity of a stored history row. Only [`Store`](crate::Store) mints
 /// these.
@@ -116,10 +116,14 @@ impl StatusMove {
     }
 }
 
-/// The newest watches, and whether older ones lie past the limit.
+/// The newest watches, the values taken from a list over the same stretch
+/// of time, and whether older watches lie past the limit.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct HistoryPage {
     pub watches: Vec<Watch>,
+    /// Newest first. [`Store::history`](crate::Store::history) says which
+    /// updates a page carries.
+    pub updates: Vec<ListUpdate>,
     pub more: bool,
 }
 
@@ -148,34 +152,81 @@ impl Watch {
     }
 }
 
-/// Watches that show under the same local day, in the page's order.
+/// One row of the History page: a watch, or a value the library took from
+/// a list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Line<'a> {
+    Watch(&'a Watch),
+    Update(&'a ListUpdate),
+}
+
+impl Line<'_> {
+    /// The time the line shows at.
+    pub fn at(&self) -> SystemTime {
+        match self {
+            Line::Watch(watch) => watch.shown_at(),
+            Line::Update(update) => update.at,
+        }
+    }
+}
+
+/// Lines that show under the same local day, newest first.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Day<'a> {
     /// Today, Yesterday, or the weekday and date.
     pub label: String,
-    pub watches: Vec<&'a Watch>,
+    pub lines: Vec<Line<'a>>,
 }
 
-/// Groups a page of watches under the local days they show at. A run of
-/// watches on one date is one day; the page is newest first, so the days
-/// are too.
-pub fn days<'a>(watches: &'a [Watch], now: SystemTime, zone: &TimeZone) -> Vec<Day<'a>> {
+/// Groups a page under the local days its lines show at, the updates
+/// slotted among the watches by time. Both come newest first, so the days
+/// do too; a run of lines on one date is one day.
+pub fn days<'a>(
+    watches: &'a [Watch],
+    updates: &'a [ListUpdate],
+    now: SystemTime,
+    zone: &TimeZone,
+) -> Vec<Day<'a>> {
     let today = local(now, zone).date();
     let mut days: Vec<(jiff::civil::Date, Day<'a>)> = Vec::new();
-    for watch in watches {
-        let shown = local(watch.shown_at(), zone);
+    for line in interleave(watches, updates) {
+        let shown = local(line.at(), zone);
         match days.last_mut() {
-            Some((date, day)) if *date == shown.date() => day.watches.push(watch),
+            Some((date, day)) if *date == shown.date() => day.lines.push(line),
             _ => days.push((
                 shown.date(),
                 Day {
                     label: day_label(&shown, today),
-                    watches: vec![watch],
+                    lines: vec![line],
                 },
             )),
         }
     }
     days.into_iter().map(|(_, day)| day).collect()
+}
+
+/// Merges two newest-first lists into one, each keeping its own order. An
+/// update goes above a watch only when it is strictly newer, so the two in
+/// one second read as the watch first.
+fn interleave<'a>(watches: &'a [Watch], updates: &'a [ListUpdate]) -> Vec<Line<'a>> {
+    let mut lines = Vec::with_capacity(watches.len() + updates.len());
+    let mut watches = watches.iter().peekable();
+    let mut updates = updates.iter().peekable();
+    loop {
+        let update_first = match (watches.peek(), updates.peek()) {
+            (Some(watch), Some(update)) => update.at > watch.shown_at(),
+            (None, Some(_)) => true,
+            (Some(_), None) => false,
+            (None, None) => break,
+        };
+        let line = if update_first {
+            updates.next().map(Line::Update)
+        } else {
+            watches.next().map(Line::Watch)
+        };
+        lines.extend(line);
+    }
+    lines
 }
 
 /// `23:14`: the local 24-hour clock time of `at`.
@@ -227,7 +278,7 @@ mod tests {
     use std::time::{Duration, UNIX_EPOCH};
 
     use super::*;
-    use crate::WatchStatus;
+    use crate::{ListUpdateId, Service, WatchStatus};
 
     fn utc(text: &str) -> SystemTime {
         SystemTime::from(text.parse::<Timestamp>().unwrap())
@@ -312,37 +363,115 @@ mod tests {
         );
     }
 
-    #[test]
-    fn days_group_a_page_by_the_local_date_each_row_shows() {
-        let at = |text: &str, id: i64| Watch {
+    fn watch_at(text: &str, id: i64) -> Watch {
+        Watch {
             id: HistoryId(id),
             at: utc(text),
             outcome: WatchOutcome::Declined(Decline::NotNext),
             ..recorded(2, None)
-        };
-        let page = [
-            at("2026-09-15T08:00:00Z", 4),
-            at("2026-09-15T01:00:00Z", 3),
-            at("2026-09-14T22:00:00Z", 2),
-            at("2026-09-12T16:20:00Z", 1),
-        ];
-        let grouped = days(&page, utc("2026-09-15T10:00:00Z"), &zone("UTC0"));
-        let summary: Vec<(&str, Vec<i64>)> = grouped
-            .iter()
+        }
+    }
+
+    fn update_at(text: &str, id: i64) -> ListUpdate {
+        ListUpdate {
+            id: ListUpdateId(id),
+            entry: EntryId(3),
+            service: Service::AniList,
+            progress_before: 3,
+            progress: 5,
+            status_before: ListStatus::Watching,
+            status: ListStatus::Watching,
+            at: utc(text),
+        }
+    }
+
+    /// `(label, [line ids])` per day; a watch's id as is, an update's
+    /// negated, so one list tells them apart.
+    fn summary<'d>(days: &'d [Day<'_>]) -> Vec<(&'d str, Vec<i64>)> {
+        days.iter()
             .map(|day| {
-                (
-                    day.label.as_str(),
-                    day.watches.iter().map(|watch| watch.id.as_i64()).collect(),
-                )
+                let ids = day
+                    .lines
+                    .iter()
+                    .map(|line| match line {
+                        Line::Watch(watch) => watch.id.as_i64(),
+                        Line::Update(update) => -update.id.as_i64(),
+                    })
+                    .collect();
+                (day.label.as_str(), ids)
             })
-            .collect();
+            .collect()
+    }
+
+    #[test]
+    fn days_group_a_page_by_the_local_date_each_row_shows() {
+        let page = [
+            watch_at("2026-09-15T08:00:00Z", 4),
+            watch_at("2026-09-15T01:00:00Z", 3),
+            watch_at("2026-09-14T22:00:00Z", 2),
+            watch_at("2026-09-12T16:20:00Z", 1),
+        ];
+        let grouped = days(&page, &[], utc("2026-09-15T10:00:00Z"), &zone("UTC0"));
         assert_eq!(
-            summary,
+            summary(&grouped),
             vec![
                 ("Today", vec![4, 3]),
                 ("Yesterday", vec![2]),
                 ("Saturday, 12 September", vec![1]),
             ]
+        );
+    }
+
+    #[test]
+    fn updates_slot_among_a_days_watches_by_time() {
+        let watches = [
+            watch_at("2026-09-15T08:00:00Z", 4),
+            watch_at("2026-09-15T01:00:00Z", 3),
+        ];
+        let updates = [
+            update_at("2026-09-15T09:00:00Z", 12),
+            update_at("2026-09-15T05:00:00Z", 11),
+            update_at("2026-09-15T01:00:00Z", 10),
+        ];
+        let grouped = days(
+            &watches,
+            &updates,
+            utc("2026-09-15T10:00:00Z"),
+            &zone("UTC0"),
+        );
+        // The one in the watch's own second reads after the watch.
+        assert_eq!(
+            summary(&grouped),
+            vec![("Today", vec![-12, 4, -11, 3, -10])]
+        );
+    }
+
+    #[test]
+    fn an_update_on_a_day_with_no_watch_makes_its_own_day() {
+        let watches = [
+            watch_at("2026-09-15T08:00:00Z", 2),
+            watch_at("2026-09-12T16:20:00Z", 1),
+        ];
+        let updates = [update_at("2026-09-13T12:00:00Z", 10)];
+        let grouped = days(
+            &watches,
+            &updates,
+            utc("2026-09-15T10:00:00Z"),
+            &zone("UTC0"),
+        );
+        assert_eq!(
+            summary(&grouped),
+            vec![
+                ("Today", vec![2]),
+                ("Sunday, 13 September", vec![-10]),
+                ("Saturday, 12 September", vec![1]),
+            ]
+        );
+        let alone = days(&[], &updates, utc("2026-09-15T10:00:00Z"), &zone("UTC0"));
+        assert_eq!(summary(&alone), vec![("Sunday, 13 September", vec![-10])]);
+        assert_eq!(
+            days(&[], &[], utc("2026-09-15T10:00:00Z"), &zone("UTC0")),
+            vec![]
         );
     }
 
