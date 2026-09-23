@@ -439,6 +439,7 @@ mod tests {
                 progress: 0,
                 total: None,
                 rewatching: false,
+                rewatched: 0,
             })
             .collect()
     }
