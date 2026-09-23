@@ -5,8 +5,8 @@ use crate::watch::{Accrual, Logged, WatchSession};
 use crate::{
     Added, AppState, Command, DataDir, Decline, Diagnostics, EntryId, HistoryId, HistoryPage,
     LibraryEntry, Link, Moved, NewEntry, NewRecording, Notice, NowPlaying, Opened, PlaybackEvent,
-    ProposedMatch, RecordOutcome, Recording, Settings, Store, StoreError, ThemePreference,
-    UserFile, WatchProgress, WatchStatus, error_chain, matching,
+    ProposedMatch, RecordOutcome, Recording, Settings, Store, StoreError, SyncState,
+    ThemePreference, UserFile, WatchProgress, WatchStatus, error_chain, matching,
 };
 use crate::{players, settings};
 
@@ -65,6 +65,16 @@ impl Ryuuji {
                 tracing::warn!(error = %error_chain(&err), "ignored files unreadable");
                 matching::Ignored::default()
             });
+        let sync = SyncState {
+            accounts: store.accounts().unwrap_or_else(|err| {
+                tracing::warn!(error = %error_chain(&err), "accounts unreadable");
+                Vec::new()
+            }),
+            listings: store.listings().unwrap_or_else(|err| {
+                tracing::warn!(error = %error_chain(&err), "listings unreadable");
+                Vec::new()
+            }),
+        };
         let notices = recovered
             .map(|recovered| Notice::LibraryReset {
                 backup: recovered.backup,
@@ -83,6 +93,7 @@ impl Ryuuji {
                     .is_some_and(|last| ignored.contains(&last.raw_title)),
                 last_match,
                 notices,
+                sync,
                 ..AppState::default()
             },
             ignored,
@@ -740,7 +751,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        Detail, EntryId, Page, PlaybackSource, PlaybackStatus, Recorded, Watch, WatchOutcome,
+        Account, Detail, EntryId, Page, PlaybackSource, PlaybackStatus, Recorded, Service, Signed,
+        Tie, UserId, Watch, WatchOutcome,
     };
 
     fn open_tmp() -> (tempfile::TempDir, DataDir) {
@@ -787,6 +799,50 @@ mod tests {
 
         let reopened = Ryuuji::open(&dir).unwrap();
         assert_eq!(reopened.state().library, added);
+    }
+
+    #[test]
+    fn open_loads_the_accounts_and_listings_and_leaves_an_unreadable_table_empty() {
+        let (_tmp, dir) = open_tmp();
+        let mut store = Store::open(&dir).unwrap().store;
+        let id = store.add(entry("Show")).unwrap().id;
+        let account = store
+            .save_account(&Account {
+                service: Service::AniList,
+                user: UserId(7),
+                name: "someone".into(),
+                expires: None,
+                signed: Signed::In,
+            })
+            .unwrap();
+        let tied = store
+            .set_tie(id, Service::AniList, &Tie::Unpicked { found: 2 })
+            .unwrap();
+        drop(store);
+
+        let app = Ryuuji::open(&dir).unwrap();
+        assert_eq!(
+            app.state().sync,
+            SyncState {
+                accounts: vec![account.clone()],
+                listings: vec![tied.listing],
+            }
+        );
+        drop(app);
+
+        Store::open(&dir)
+            .unwrap()
+            .store
+            .execute_raw("UPDATE listings SET tie = 'bogus'");
+        let app = Ryuuji::open(&dir).unwrap();
+        assert_eq!(
+            app.state().sync,
+            SyncState {
+                accounts: vec![account],
+                listings: vec![],
+            }
+        );
+        assert!(app.state().notices.is_empty());
     }
 
     #[test]
