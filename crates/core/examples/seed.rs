@@ -53,6 +53,19 @@ fn report(notices: &[Notice]) {
             Notice::LibraryReset { backup } => {
                 println!("library reset; the old file is at {}", backup.display());
             }
+            Notice::SignInRefused { service } => {
+                println!("{} refused the sign-in", service.label());
+            }
+            Notice::ListRejected {
+                service,
+                show,
+                message,
+            } => {
+                println!("{} refused a change to {show}: {message}", service.label());
+            }
+            Notice::ListGone { service, show } => {
+                println!("{} no longer has {show}", service.label());
+            }
         }
     }
 }

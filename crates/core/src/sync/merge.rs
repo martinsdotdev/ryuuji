@@ -149,7 +149,7 @@ pub struct Asked {
 /// What a report settles into: the fields the library takes from the list,
 /// and the base the next merge measures against.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Settlement {
+pub(crate) struct Settlement {
     pub take_status: Option<ListStatus>,
     pub take_progress: Option<u32>,
     pub base: ListBase,
@@ -171,7 +171,7 @@ pub struct Settlement {
 /// own count; on a first merge for `user` the offset was another account's
 /// list's, or nothing, so it starts over from nothing unless a repeat is
 /// taken.
-pub fn settlement(
+pub(crate) fn settlement(
     asked: &Asked,
     remote: &Remote,
     user: UserId,
@@ -248,7 +248,7 @@ fn settle<T: Copy + PartialEq>(held: T, asked: T, base: T, now: T) -> (Option<T>
 /// How a search settled a show: tied to the one candidate that fits, or
 /// left to the person with how many were found.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum AutoLink {
+pub(crate) enum AutoLink {
     Link(Media),
     Pick { found: u32 },
 }
@@ -259,7 +259,7 @@ pub enum AutoLink {
 /// at least reaches its progress when it is not. Fruits Basket 2001 and 2019
 /// share their titles, so with no total both fit and the show waits for the
 /// person; a total of 25 tells them apart.
-pub fn auto_link(entry: &LibraryEntry, found: &[Candidate]) -> AutoLink {
+pub(crate) fn auto_link(entry: &LibraryEntry, found: &[Candidate]) -> AutoLink {
     let title = normalize_title(&entry.title);
     let fits = |candidate: &&Candidate| {
         let named = std::iter::once(&candidate.media.title)

@@ -2,7 +2,7 @@
 //! core: the account signed in, the media a show is tied to, the base a
 //! merge measures both sides against, and the work that follows from them.
 //! The rows live in `store::lists`, the rule that settles a difference in
-//! `merge`; the commands that drive it come later.
+//! `merge`, and what the reducer does with each report in `app::sync`.
 
 mod merge;
 
@@ -12,12 +12,13 @@ use std::time::SystemTime;
 use crate::tagged::tagged_enum;
 use crate::{AppState, EntryId, LibraryEntry, ListStatus};
 
-pub use merge::{Asked, AutoLink, Merge, Patch, Settlement, Write, auto_link, merge, settlement};
+pub use merge::{Asked, Merge, Patch, Write, merge};
+pub(crate) use merge::{AutoLink, Settlement, auto_link, settlement};
 
 tagged_enum! {
     /// A list service a show can be kept in step with. Tags are stored in
     /// the `accounts`, `listings` and `updates` tables.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub enum Service {
         AniList => "anilist", "AniList",
     }
@@ -241,11 +242,90 @@ pub enum Signed {
     Out,
 }
 
+/// A sign-in the Settings card is waiting on, or how the last one failed.
+/// Neither is stored: a token refused before it was ever kept leaves no
+/// account row behind, and a check under way is nothing yet.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Attempt {
+    Checking(Service),
+    Failed { service: Service, message: String },
+}
+
+/// The picker open over a show: what the person asked the service for, and
+/// what came back once it has. The search itself is the worker's, asked
+/// through [`AppState::work`] while `found` is `None`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Picker {
+    pub entry: EntryId,
+    pub service: Service,
+    pub query: String,
+    pub found: Option<Vec<Candidate>>,
+}
+
+/// What the sync worker sends back, each taken by the reducer through
+/// `Command::Synced`. No variant carries a token: the token lives in the
+/// worker and the vault, never in state the shell clones on every dispatch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Report {
+    /// A pasted token is being checked against the service.
+    Checking(Service),
+    /// The token works, and this is whose it is.
+    SignedIn(Account),
+    /// The pasted token did not work, so nothing was kept.
+    NotSignedIn {
+        service: Service,
+        message: String,
+    },
+    SignedOut(Service),
+    /// The kept token stopped working; nothing goes out until a new one.
+    Refused {
+        service: Service,
+        message: String,
+    },
+    /// What a search for `query` turned up for `entry`.
+    Found {
+        service: Service,
+        entry: EntryId,
+        query: String,
+        candidates: Vec<Candidate>,
+    },
+    /// A reconcile ran for `user`'s list: what it asked with, and what the
+    /// list holds for `media` after its write, if it made one.
+    Reconciled {
+        service: Service,
+        user: UserId,
+        entry: EntryId,
+        media: MediaId,
+        asked: Asked,
+        remote: Remote,
+    },
+    /// The service refused to write `wanted` for `entry`.
+    Rejected {
+        service: Service,
+        entry: EntryId,
+        media: MediaId,
+        wanted: ListState,
+        message: String,
+    },
+    /// The media `entry` is tied to is no longer on the service.
+    Gone {
+        service: Service,
+        entry: EntryId,
+        media: MediaId,
+    },
+}
+
 /// The sync side of [`AppState`].
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct SyncState {
     pub accounts: Vec<Account>,
     pub listings: Vec<Listing>,
+    /// The Settings card's sign-in in progress, or how it failed.
+    pub attempt: Option<Attempt>,
+    /// The shows the watched-ahead rule asked a list about and has not
+    /// heard back on. Each gives a reconcile at once, in step or not.
+    pub checks: Vec<(Service, EntryId)>,
+    pub picker: Option<Picker>,
 }
 
 impl SyncState {
@@ -284,35 +364,61 @@ impl SyncState {
         })
     }
 
-    fn signed_in(&self, service: Service) -> Option<&Account> {
+    /// The account for `service`, whatever its standing.
+    pub(crate) fn account(&self, service: Service) -> Option<&Account> {
         self.accounts
             .iter()
-            .find(|account| account.service == service && matches!(account.signed, Signed::In))
+            .find(|account| account.service == service)
     }
 
-    fn listing(&self, entry: EntryId, service: Service) -> Option<&Listing> {
+    pub(crate) fn signed_in(&self, service: Service) -> Option<&Account> {
+        self.account(service)
+            .filter(|account| matches!(account.signed, Signed::In))
+    }
+
+    pub(crate) fn listing(&self, entry: EntryId, service: Service) -> Option<&Listing> {
         self.listings
             .iter()
             .find(|listing| listing.entry == entry && listing.service == service)
     }
 
-    /// The job one show gives one account, if any. A show never looked up
-    /// is searched for in the background. A linked show is reconciled when
-    /// what the library wants differs from its base, or from a first merge
-    /// when this user has no base for it, which asks with Ryuuji's own
-    /// repeat count; one parked on the very state it still wants is left
-    /// alone, since sending it again would meet the same refusal. An
-    /// unpicked, gone or off show has nothing to send.
-    fn job(&self, entry: &LibraryEntry, account: &Account) -> Option<Job> {
-        let Some(listing) = self.listing(entry.id, account.service) else {
+    /// The search one show gives one account, if any: the picker's query at
+    /// once while it is open over this show and unanswered, else the show's
+    /// own title in the background while it has never been looked up. One
+    /// or the other, never both, so two answers cannot race to tie it.
+    fn find(&self, entry: &LibraryEntry, service: Service) -> Option<Job> {
+        if let Some(picker) = &self.picker
+            && picker.entry == entry.id
+            && picker.service == service
+            && picker.found.is_none()
+        {
             return Some(Job {
                 entry: entry.id,
                 task: Task::Find {
-                    title: entry.title.clone(),
+                    title: picker.query.clone(),
                 },
-                when: When::Background,
+                when: When::Now,
             });
-        };
+        }
+        self.listing(entry.id, service).is_none().then(|| Job {
+            entry: entry.id,
+            task: Task::Find {
+                title: entry.title.clone(),
+            },
+            when: When::Background,
+        })
+    }
+
+    /// The reconcile one show gives one account, if any. A linked show is
+    /// reconciled when what the library wants differs from its base, or
+    /// from a first merge when this user has no base for it, which asks
+    /// with Ryuuji's own repeat count; one the watched-ahead rule asked
+    /// about is reconciled at once, in step or not, since the read is the
+    /// check. One parked on the very state it still wants is left alone,
+    /// since sending it again would meet the same refusal. An unpicked,
+    /// gone or off show has nothing to send.
+    fn reconcile(&self, entry: &LibraryEntry, account: &Account) -> Option<Job> {
+        let listing = self.listing(entry.id, account.service)?;
         let Tie::Linked { media, .. } = &listing.tie else {
             return None;
         };
@@ -324,8 +430,9 @@ impl SyncState {
         {
             return None;
         }
+        let checking = self.checks.contains(&(account.service, entry.id));
         let base = listing.base_for(account.user);
-        if base.is_some_and(|base| base.state == wanted) {
+        if !checking && base.is_some_and(|base| base.state == wanted) {
             return None;
         }
         Some(Job {
@@ -335,7 +442,7 @@ impl SyncState {
                 wanted,
                 base: base.map(|base| base.state),
             },
-            when: When::Settled,
+            when: if checking { When::Now } else { When::Settled },
         })
     }
 }
@@ -345,8 +452,9 @@ impl AppState {
     /// and the listings rather than kept anywhere: a show is pending while
     /// what the library wants differs from its base, so nothing on the
     /// recording, undo or status paths needs to know a list exists. One
-    /// entry per signed-in account, each with the jobs its shows give it;
-    /// the shell posts the whole thing whenever it changes.
+    /// entry per signed-in account, each with the jobs its shows give it,
+    /// at most one search and one reconcile per show; the shell posts the
+    /// whole thing whenever it changes.
     pub fn work(&self) -> Work {
         let services = self
             .sync
@@ -359,7 +467,12 @@ impl AppState {
                 jobs: self
                     .library
                     .iter()
-                    .filter_map(|entry| self.sync.job(entry, account))
+                    .flat_map(|entry| {
+                        self.sync
+                            .find(entry, account.service)
+                            .into_iter()
+                            .chain(self.sync.reconcile(entry, account))
+                    })
                     .collect(),
             })
             .collect();
@@ -532,7 +645,11 @@ mod tests {
     fn app(accounts: Vec<Account>, library: Vec<LibraryEntry>, listings: Vec<Listing>) -> AppState {
         AppState {
             library,
-            sync: SyncState { accounts, listings },
+            sync: SyncState {
+                accounts,
+                listings,
+                ..SyncState::default()
+            },
             ..AppState::default()
         }
     }
@@ -709,6 +826,7 @@ mod tests {
             SyncState {
                 accounts: accounts.to_vec(),
                 listings,
+                ..SyncState::default()
             }
             .link_state(&entry, Service::AniList)
         };
@@ -775,6 +893,90 @@ mod tests {
         assert_eq!(
             state_of(&signed_in, vec![listing(1, Tie::Off, None)]),
             Some(LinkState::Off)
+        );
+    }
+
+    /// The check is the read: a show in step is reconciled anyway, at once,
+    /// and a pending one moves up from Settled. A check on a show that is
+    /// not linked has nothing to read.
+    #[test]
+    fn a_checked_show_is_reconciled_at_once_even_in_step() {
+        let wanted = state(ListStatus::Watching, 4, 3);
+        let in_step = based(7, LISTED, wanted);
+        let behind = based(7, LISTED, state(ListStatus::Watching, 3, 3));
+        let mut app = app(
+            vec![account(Signed::In)],
+            vec![show(1, 4), show(2, 4), show(3, 4)],
+            vec![
+                linked(1, in_step),
+                linked(2, behind),
+                listing(3, Tie::Unpicked { found: 2 }, None),
+            ],
+        );
+        app.sync.checks = vec![
+            (Service::AniList, EntryId(1)),
+            (Service::AniList, EntryId(2)),
+            (Service::AniList, EntryId(3)),
+        ];
+        let now = |job: Job| Job {
+            when: When::Now,
+            ..job
+        };
+        assert_eq!(
+            app.work().services[0].jobs,
+            vec![
+                now(reconcile(1, wanted, in_step)),
+                now(reconcile(2, wanted, behind)),
+            ]
+        );
+    }
+
+    /// The picker's query goes out at once and in place of the background
+    /// search, so one show is never searched for twice over; once answered
+    /// it asks nothing more, and a reconcile the show has stands beside it.
+    #[test]
+    fn an_open_picker_asks_its_query_at_once_in_place_of_the_background_search() {
+        let mut app = app(
+            vec![account(Signed::In)],
+            vec![show(1, 4), show(2, 4)],
+            vec![linked(2, None)],
+        );
+        let picker = |entry, found| Picker {
+            entry: EntryId(entry),
+            service: Service::AniList,
+            query: "Sousou no Frieren".into(),
+            found,
+        };
+        let asked = |entry| Job {
+            entry: EntryId(entry),
+            task: Task::Find {
+                title: "Sousou no Frieren".into(),
+            },
+            when: When::Now,
+        };
+        let background = Job {
+            entry: EntryId(1),
+            task: Task::Find {
+                title: "Show 1".into(),
+            },
+            when: When::Background,
+        };
+        let wanted = state(ListStatus::Watching, 4, 1);
+
+        app.sync.picker = Some(picker(1, None));
+        assert_eq!(
+            app.work().services[0].jobs,
+            vec![asked(1), reconcile(2, wanted, None)]
+        );
+        app.sync.picker = Some(picker(2, None));
+        assert_eq!(
+            app.work().services[0].jobs,
+            vec![background.clone(), asked(2), reconcile(2, wanted, None)]
+        );
+        app.sync.picker = Some(picker(1, Some(vec![])));
+        assert_eq!(
+            app.work().services[0].jobs,
+            vec![background, reconcile(2, wanted, None)]
         );
     }
 }
