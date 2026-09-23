@@ -15,6 +15,7 @@ mod playback;
 mod players;
 mod settings;
 mod store;
+mod sync;
 mod tagged;
 mod user_file;
 mod watch;
@@ -38,7 +39,11 @@ pub use players::{MIN_PATTERN_LEN, PlayerRow, too_short};
 // Shells depend on this crate alone, so the parser reaches them through here.
 pub use ryuuji_parse::{Certainty, ElementKind, Options, parse};
 pub use store::{
-    Added, DbError, Moved, Opened, Recording, Recovered, SchemaVersion, Store, StoreError,
+    Added, DbError, Moved, Opened, Recording, Recovered, SchemaVersion, Store, StoreError, Tied,
+};
+pub use sync::{
+    Account, Candidate, LinkedBy, ListBase, ListEntryId, ListState, Listing, Media, MediaId,
+    Parked, Remote, Service, Signed, SyncState, Tie, UserId,
 };
 use tagged::tagged_enum;
 pub use user_file::{FileWatch, UserFile, watch_files};
@@ -446,6 +451,9 @@ pub struct AppState {
     pub players: Vec<PlayerRow>,
     /// Oldest first; the shell shows the front one.
     pub notices: Vec<Notice>,
+    /// The accounts signed in and the shows tied to them, read once at
+    /// open.
+    pub sync: SyncState,
 }
 
 impl Default for AppState {
@@ -461,6 +469,7 @@ impl Default for AppState {
             settings: Settings::default(),
             players: Vec::new(),
             notices: Vec::new(),
+            sync: SyncState::default(),
         }
     }
 }
@@ -633,5 +642,6 @@ mod tests {
         assert_eq!(state.watch_progress, None);
         assert_eq!(state.settings.theme, ThemePreference::System);
         assert!(state.notices.is_empty());
+        assert_eq!(state.sync, SyncState::default());
     }
 }

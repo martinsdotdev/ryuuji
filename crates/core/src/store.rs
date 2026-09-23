@@ -10,8 +10,13 @@ use tracing::{debug, info, info_span, warn};
 
 use crate::{
     Confidence, DataDir, Decline, EntryId, HistoryId, HistoryPage, LibraryEntry, Link, ListStatus,
-    NewEntry, NewRecording, ProposedMatch, Recorded, StatusMove, Watch, WatchOutcome, WatchStatus,
+    NewEntry, NewRecording, ProposedMatch, Recorded, Service, StatusMove, Watch, WatchOutcome,
+    WatchStatus,
 };
+
+mod lists;
+
+pub use lists::Tied;
 
 /// The schema, compiled in from `migrations/`, one numbered directory per
 /// version.
@@ -114,6 +119,23 @@ pub enum StoreError {
     /// holding a recording, which nothing may overwrite.
     #[error("history row {id} is missing or has already recorded")]
     WatchClosed { id: HistoryId },
+    /// `service` is the stored tag, since the row may be invalid in it.
+    #[error("the {service} account row has an invalid {field}")]
+    InvalidAccount {
+        service: String,
+        field: &'static str,
+    },
+    /// `service` is the stored tag, since the row may be invalid in it.
+    #[error("the {service} listing of entry {entry} has an invalid {field}")]
+    InvalidListing {
+        entry: EntryId,
+        service: String,
+        field: &'static str,
+    },
+    /// A write aimed at a show's listing found the show never looked up on
+    /// that service.
+    #[error("entry {entry} has no {} listing", service.label())]
+    NotListed { entry: EntryId, service: Service },
 }
 
 impl StoreError {
@@ -130,7 +152,10 @@ impl StoreError {
             | StoreError::InvalidHistoryRow { .. }
             | StoreError::NothingToUndo { .. }
             | StoreError::MovedOn { .. }
-            | StoreError::WatchClosed { .. } => false,
+            | StoreError::WatchClosed { .. }
+            | StoreError::InvalidAccount { .. }
+            | StoreError::InvalidListing { .. }
+            | StoreError::NotListed { .. } => false,
         }
     }
 }
@@ -1294,13 +1319,13 @@ fn unix_time(secs: i64) -> Option<SystemTime> {
 mod tests {
     use super::*;
 
-    fn open_tmp() -> (tempfile::TempDir, DataDir) {
+    pub(super) fn open_tmp() -> (tempfile::TempDir, DataDir) {
         let tmp = tempfile::tempdir().unwrap();
         let dir = DataDir::at(tmp.path()).unwrap();
         (tmp, dir)
     }
 
-    fn open(dir: &DataDir) -> Store {
+    pub(super) fn open(dir: &DataDir) -> Store {
         let opened = Store::open(dir).unwrap();
         assert_eq!(opened.recovered, None);
         opened.store
@@ -1322,7 +1347,7 @@ mod tests {
         assert!(!stamp.is_empty() && stamp.bytes().all(|b| b.is_ascii_digit()));
     }
 
-    fn entry(title: &str) -> NewEntry {
+    pub(super) fn entry(title: &str) -> NewEntry {
         NewEntry {
             title: title.into(),
             status: WatchStatus::Watching,
@@ -1337,13 +1362,13 @@ mod tests {
     }
 
     #[test]
-    fn open_creates_the_database_at_schema_v10_without_recovery() {
+    fn open_creates_the_database_at_schema_v11_without_recovery() {
         let (_tmp, dir) = open_tmp();
         let store = open(&dir);
         assert!(dir.root().join("library.sqlite").is_file());
-        assert_eq!(schema_version(&store), SchemaVersion(10));
+        assert_eq!(schema_version(&store), SchemaVersion(11));
         drop(store);
-        assert_eq!(schema_version(&open(&dir)), SchemaVersion(10));
+        assert_eq!(schema_version(&open(&dir)), SchemaVersion(11));
     }
 
     #[test]
@@ -1370,7 +1395,7 @@ mod tests {
         let recovered = recovered.expect("recovery reported");
         assert_backup_name(&backup_name(&recovered));
         assert_eq!(fs::read(&recovered.backup).unwrap(), garbage);
-        assert_eq!(schema_version(&store), SchemaVersion(10));
+        assert_eq!(schema_version(&store), SchemaVersion(11));
         assert_eq!(store.entries().unwrap(), vec![]);
         drop(store);
 
@@ -1487,7 +1512,7 @@ mod tests {
         drop(conn);
 
         let store = open(&dir);
-        assert_eq!(schema_version(&store), SchemaVersion(10));
+        assert_eq!(schema_version(&store), SchemaVersion(11));
         let entries = store.entries().unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].title, "Show");
@@ -1517,7 +1542,7 @@ mod tests {
         drop(conn);
 
         let store = open(&dir);
-        assert_eq!(schema_version(&store), SchemaVersion(10));
+        assert_eq!(schema_version(&store), SchemaVersion(11));
         assert_eq!(store.last_match().unwrap(), Some(proposed("Show - 03.mkv")));
     }
 
@@ -1544,7 +1569,7 @@ mod tests {
         drop(conn);
 
         let store = open(&dir);
-        assert_eq!(schema_version(&store), SchemaVersion(10));
+        assert_eq!(schema_version(&store), SchemaVersion(11));
         assert_eq!(store.last_match().unwrap(), Some(proposed("Show - 03.mkv")));
     }
 
@@ -1578,7 +1603,7 @@ mod tests {
         drop(conn);
 
         let store = open(&dir);
-        assert_eq!(schema_version(&store), SchemaVersion(10));
+        assert_eq!(schema_version(&store), SchemaVersion(11));
         let entries = store.entries().unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].id, EntryId(7));
@@ -1619,7 +1644,7 @@ mod tests {
         drop(conn);
 
         let store = open(&dir);
-        assert_eq!(schema_version(&store), SchemaVersion(10));
+        assert_eq!(schema_version(&store), SchemaVersion(11));
         let at = |secs: u64| UNIX_EPOCH + Duration::from_secs(secs);
         let copied = |id: i64,
                       episode: RangeInclusive<u32>,
@@ -1703,7 +1728,7 @@ mod tests {
         drop(conn);
 
         let store = open(&dir);
-        assert_eq!(schema_version(&store), SchemaVersion(10));
+        assert_eq!(schema_version(&store), SchemaVersion(11));
         let entries = store.entries().unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].id, EntryId(7));
@@ -1745,7 +1770,7 @@ mod tests {
         drop(conn);
 
         let store = open(&dir);
-        assert_eq!(schema_version(&store), SchemaVersion(10));
+        assert_eq!(schema_version(&store), SchemaVersion(11));
         assert_eq!(store.entries().unwrap().len(), 1);
         let watches = watches(&store);
         assert_eq!(watches.len(), 1);
@@ -1790,7 +1815,7 @@ mod tests {
         drop(conn);
 
         let mut store = open(&dir);
-        assert_eq!(schema_version(&store), SchemaVersion(10));
+        assert_eq!(schema_version(&store), SchemaVersion(11));
         let entries = store.entries().unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].rewatched, 0);
@@ -1804,6 +1829,57 @@ mod tests {
         assert_eq!(entry.rewatched, 0);
         assert!(recorded(&watch).undone_at.is_some());
         assert_eq!(recorded(&watch).status, None);
+    }
+
+    #[test]
+    fn v10_library_migrates_to_v11_with_no_accounts_or_listings() {
+        let (_tmp, dir) = open_tmp();
+        let conn = Connection::open(dir.library_db()).unwrap();
+        for sql in [
+            include_str!("../migrations/01-entries/up.sql"),
+            include_str!("../migrations/02-last_match/up.sql"),
+            include_str!("../migrations/03-drop_outcome/up.sql"),
+            include_str!("../migrations/04-episode_range_and_rewatching/up.sql"),
+            include_str!("../migrations/05-watch_events/up.sql"),
+            include_str!("../migrations/06-history/up.sql"),
+            include_str!("../migrations/07-aliases/up.sql"),
+            include_str!("../migrations/08-ignored/up.sql"),
+            include_str!("../migrations/09-moved/up.sql"),
+            include_str!("../migrations/10-status_moves/up.sql"),
+        ] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO entries (id, title, status, progress, total, updated_at) \
+             VALUES (7, 'Show', 'watching', 1, 12, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO history (id, entry_id, episode, episode_end, progress_before, progress, \
+             raw_title, player, at, parsed_title, confidence, recorded_at) \
+             VALUES (1, 7, 1, 1, 0, 1, 'Show - 01.mkv', 'mpv', 100, 'Show', 'exact', 100)",
+            [],
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 10).unwrap();
+        drop(conn);
+
+        let store = open(&dir);
+        assert_eq!(schema_version(&store), SchemaVersion(11));
+        let entries = store.entries().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, EntryId(7));
+        let watches = watches(&store);
+        assert_eq!(watches.len(), 1);
+        assert_eq!(recorded(&watches[0]).progress, 1);
+        assert_eq!(store.accounts().unwrap(), vec![]);
+        assert_eq!(store.listings().unwrap(), vec![]);
+        let updates: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM updates", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(updates, 0);
     }
 
     fn watching(id: EntryId, episode: RangeInclusive<u32>) -> NewRecording {

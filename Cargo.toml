@@ -20,7 +20,9 @@ windows-reactor-setup = { git = "https://github.com/microsoft/windows-rs", rev =
 # windows-interface into the lock for an #[implement] nothing here uses.
 windows = { git = "https://github.com/microsoft/windows-rs", rev = "acaaa37be53e68f8c1be575d24dcbebce1e92b1a", default-features = false, features = ["std", "Media_Control", "Foundation_Collections", "handleapi", "processthreadsapi", "psapi", "winuser"] }
 windows-registry = { git = "https://github.com/microsoft/windows-rs", rev = "acaaa37be53e68f8c1be575d24dcbebce1e92b1a" }
-rusqlite = { version = "0.40", features = ["bundled"] }
+# fallible_uint: a service's ids are u64, and an id past i64::MAX fails the
+# write as a conversion error rather than being clamped.
+rusqlite = { version = "0.40", features = ["bundled", "fallible_uint"] }
 rusqlite_migration = { version = "2.6", features = ["from-directory"] }
 include_dir = "0.7.4"
 # Default features bundle the IANA database where the platform has none
