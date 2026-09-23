@@ -207,6 +207,29 @@ fn notice(notices: &[Notice], dispatch: Dispatch<Command>) -> Element {
                 backup.display()
             ),
         ),
+        // The InfoBar has no action button, so each message names its fix.
+        Some(Notice::SignInRefused { service }) => (
+            InfoBarSeverity::Error,
+            format!("{} refused the sign-in", service.label()),
+            format!(
+                "Nothing is sent to {} until you paste a new token in Settings.",
+                service.label()
+            ),
+        ),
+        Some(Notice::ListRejected {
+            service,
+            show,
+            message,
+        }) => (
+            InfoBarSeverity::Warning,
+            format!("{} refused a change to {show}", service.label()),
+            format!("{message}. It is sent again when the show next changes."),
+        ),
+        Some(Notice::ListGone { service, show }) => (
+            InfoBarSeverity::Warning,
+            format!("{} no longer has {show}", service.label()),
+            "Pick the show again to keep it in step.".to_owned(),
+        ),
         None => return Element::Empty,
     };
     InfoBar::new(title)

@@ -282,7 +282,7 @@ impl Store {
     /// writing the same settlement twice changes nothing the second time
     /// and adds no second row. `rewatched` stays as it was: a repeat taken
     /// from the list moves the listing's offset, never the entry's count.
-    pub fn settle(
+    pub(crate) fn settle(
         &mut self,
         entry: EntryId,
         service: Service,
@@ -369,6 +369,21 @@ impl Store {
             listing,
             update,
         }))
+    }
+
+    /// Every value the library took from a list, oldest first.
+    pub fn updates(&self) -> Result<Vec<ListUpdate>, StoreError> {
+        let _span = info_span!("store.updates").entered();
+        let mut stmt = self
+            .conn
+            .prepare(&format!("{SELECT_UPDATE} ORDER BY id"))
+            .map_err(query_failed)?;
+        let rows = stmt.query_map([], RawUpdate::read).map_err(query_failed)?;
+        let updates = rows
+            .map(|row| row.map_err(query_failed)?.parse())
+            .collect::<Result<Vec<_>, _>>()?;
+        debug!(count = updates.len(), "updates loaded");
+        Ok(updates)
     }
 }
 
@@ -1104,6 +1119,7 @@ mod tests {
         assert_eq!(store.entries().unwrap(), vec![settled.entry.clone()]);
         assert_eq!(store.listings().unwrap(), vec![settled.listing.clone()]);
         assert_eq!(updates(&store), 1);
+        assert_eq!(store.updates().unwrap(), vec![update]);
 
         // The same report again: nothing moves, and no second row.
         let again = store

@@ -1,11 +1,13 @@
-use std::collections::HashMap;
+mod sync;
+
+use std::collections::{HashMap, HashSet};
 use std::time::SystemTime;
 
 use crate::watch::{Accrual, Logged, WatchSession};
 use crate::{
     Added, AppState, Command, DataDir, Decline, Diagnostics, EntryId, HistoryId, HistoryPage,
     LibraryEntry, Link, Moved, NewEntry, NewRecording, Notice, NowPlaying, Opened, PlaybackEvent,
-    ProposedMatch, RecordOutcome, Recording, Settings, Store, StoreError, SyncState,
+    ProposedMatch, RecordOutcome, Recording, Service, Settings, Store, StoreError, SyncState,
     ThemePreference, UserFile, WatchProgress, WatchStatus, error_chain, matching,
 };
 use crate::{players, settings};
@@ -34,6 +36,10 @@ pub struct Ryuuji {
     /// What the last read of each file the person edits was reported to
     /// have dropped, so the same problems are not said twice.
     said: HashMap<UserFile, Vec<String>>,
+    /// The `(service, show, episode)` the watched-ahead rule has asked a
+    /// list about this run, so a file played on does not ask again with
+    /// every event. Not in [`AppState`]: nothing renders it.
+    asked_ahead: HashSet<(Service, EntryId, u32)>,
 }
 
 impl Ryuuji {
@@ -74,6 +80,7 @@ impl Ryuuji {
                 tracing::warn!(error = %error_chain(&err), "listings unreadable");
                 Vec::new()
             }),
+            ..SyncState::default()
         };
         let notices = recovered
             .map(|recovered| Notice::LibraryReset {
@@ -98,6 +105,7 @@ impl Ryuuji {
             },
             ignored,
             said: HashMap::new(),
+            asked_ahead: HashSet::new(),
         };
         // Read the way a save is, over the built-ins the state starts with.
         app.reload_all();
@@ -160,6 +168,20 @@ impl Ryuuji {
             Command::StopIgnoring => self.stop_ignoring_standing(),
             Command::PickShow(entry) => self.pick_show(entry),
             Command::UndoRecording(id) => self.undo_recording(id),
+            Command::Synced(report) => self.synced(report),
+            Command::SearchList {
+                entry,
+                service,
+                query,
+            } => self.search_list(entry, service, query),
+            Command::LinkShow {
+                entry,
+                service,
+                media,
+            } => self.link_show(entry, service, media),
+            Command::StopSyncing { entry, service } => self.stop_syncing(entry, service),
+            Command::RetrySync { entry, service } => self.retry_sync(entry, service),
+            Command::ClosePicker => self.state.sync.picker = None,
         }
     }
 
@@ -210,11 +232,20 @@ impl Ryuuji {
         }
         match self.earned() {
             Ok(write) => self.record(write),
-            Err(decline) => {
-                self.log_decline(decline);
-                RecordOutcome::Declined(decline)
-            }
+            Err(decline) => self.declined(decline),
         }
+    }
+
+    /// Says the gates refused the episode, and logs it. A file ahead of the
+    /// library first asks the lists, which may know the person watched on
+    /// elsewhere; the refusal stands meanwhile, and the gates run again if
+    /// a list answers with more.
+    fn declined(&mut self, decline: Decline) -> RecordOutcome {
+        if decline == Decline::NotNext {
+            self.ask_lists_ahead();
+        }
+        self.log_decline(decline);
+        RecordOutcome::Declined(decline)
     }
 
     /// Writes the earned episode, into the viewing's own row when it has
@@ -701,10 +732,7 @@ impl Ryuuji {
         }
         let outcome = match self.earned() {
             Ok(write) => self.record(write),
-            Err(decline) => {
-                self.log_decline(decline);
-                RecordOutcome::Declined(decline)
-            }
+            Err(decline) => self.declined(decline),
         };
         if let Some(progress) = self.state.watch_progress.as_mut() {
             progress.outcome = outcome;
@@ -755,13 +783,13 @@ mod tests {
         Tie, UserId, Watch, WatchOutcome,
     };
 
-    fn open_tmp() -> (tempfile::TempDir, DataDir) {
+    pub(super) fn open_tmp() -> (tempfile::TempDir, DataDir) {
         let tmp = tempfile::tempdir().unwrap();
         let dir = DataDir::at(tmp.path()).unwrap();
         (tmp, dir)
     }
 
-    fn entry(title: &str) -> NewEntry {
+    pub(super) fn entry(title: &str) -> NewEntry {
         NewEntry {
             title: title.into(),
             status: WatchStatus::PlanToWatch,
@@ -826,6 +854,7 @@ mod tests {
             SyncState {
                 accounts: vec![account.clone()],
                 listings: vec![tied.listing],
+                ..SyncState::default()
             }
         );
         drop(app);
@@ -840,6 +869,7 @@ mod tests {
             SyncState {
                 accounts: vec![account],
                 listings: vec![],
+                ..SyncState::default()
             }
         );
         assert!(app.state().notices.is_empty());
@@ -1611,7 +1641,7 @@ mod tests {
 
     /// The same title `secs` later and `secs` further in, so the credit is
     /// the full gap. The viewing's threshold is 710 s.
-    fn later(title: &str, secs: u64) -> PlaybackEvent {
+    pub(super) fn later(title: &str, secs: u64) -> PlaybackEvent {
         PlaybackEvent {
             position: Duration::from_secs(305 + secs),
             observed_at: SystemTime::UNIX_EPOCH + Duration::from_secs(secs),
@@ -1629,7 +1659,7 @@ mod tests {
         }
     }
 
-    fn watch_past_threshold(app: &mut Ryuuji, title: &str) {
+    pub(super) fn watch_past_threshold(app: &mut Ryuuji, title: &str) {
         app.dispatch(Command::Playback(playing(title)));
         app.dispatch(Command::Playback(later(title, 720)));
     }
@@ -1658,7 +1688,7 @@ mod tests {
         watches
     }
 
-    fn outcome(app: &Ryuuji) -> RecordOutcome {
+    pub(super) fn outcome(app: &Ryuuji) -> RecordOutcome {
         app.state().watch_progress.unwrap().outcome
     }
 
@@ -1671,7 +1701,7 @@ mod tests {
 
     /// The `(episode, progress_before, progress)` of every stored recording,
     /// oldest first, which is what a recording test cares about.
-    fn stored_writes(dir: &DataDir) -> Vec<(RangeInclusive<u32>, u32, u32)> {
+    pub(super) fn stored_writes(dir: &DataDir) -> Vec<(RangeInclusive<u32>, u32, u32)> {
         stored_watches(dir)
             .iter()
             .filter_map(|watch| match watch.outcome {

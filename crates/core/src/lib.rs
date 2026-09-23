@@ -43,11 +43,11 @@ pub use store::{
     Tied,
 };
 pub use sync::{
-    Account, Asked, AutoLink, Candidate, Job, LinkState, LinkedBy, ListBase, ListEntryId,
-    ListState, ListUpdate, ListUpdateId, Listing, Media, MediaId, Merge, Parked, Patch, Remote,
-    Service, ServiceWork, Settlement, Signed, SyncState, Task, Tie, UserId, When, Work, Write,
-    auto_link, merge, settlement,
+    Account, Asked, Attempt, Candidate, Job, LinkState, LinkedBy, ListBase, ListEntryId, ListState,
+    ListUpdate, ListUpdateId, Listing, Media, MediaId, Merge, Parked, Patch, Picker, Remote,
+    Report, Service, ServiceWork, Signed, SyncState, Task, Tie, UserId, When, Work, Write, merge,
 };
+pub(crate) use sync::{AutoLink, Settlement, auto_link, settlement};
 use tagged::tagged_enum;
 pub use user_file::{FileWatch, UserFile, watch_files};
 
@@ -407,6 +407,36 @@ pub enum Command {
     /// the chosen show, leaving both rows; one that has not runs the gates
     /// at once, exactly as confirming a guess does.
     PickShow(EntryId),
+    /// The sync worker says what it did or found. Every report comes through
+    /// here, so what a list says reaches the library by the one reducer,
+    /// like every other change.
+    Synced(Report),
+    /// Opens the picker over a show with the words to search the service
+    /// for. The search itself is the worker's, asked through
+    /// [`AppState::work`] until it answers.
+    SearchList {
+        entry: EntryId,
+        service: Service,
+        query: String,
+    },
+    /// The person's pick: ties the show to `media` and closes the picker.
+    LinkShow {
+        entry: EntryId,
+        service: Service,
+        media: Media,
+    },
+    /// Says not to keep this show in step with the service. Closes the
+    /// picker if it was open.
+    StopSyncing {
+        entry: EntryId,
+        service: Service,
+    },
+    /// Sends a parked show's change again.
+    RetrySync {
+        entry: EntryId,
+        service: Service,
+    },
+    ClosePicker,
 }
 
 /// Something the shell should surface to the user until dismissed.
@@ -425,6 +455,26 @@ pub enum Notice {
     /// `backup` and a fresh one created.
     LibraryReset {
         backup: PathBuf,
+    },
+    /// The service refused the kept token, so nothing goes out until a new
+    /// one is pasted. Said once per refusal; signing in or out takes it
+    /// away.
+    SignInRefused {
+        service: Service,
+    },
+    /// The service refused a change to `show`, which is parked with the
+    /// message until it next changes or is retried. A settle or a retry
+    /// takes it away.
+    ListRejected {
+        service: Service,
+        show: String,
+        message: String,
+    },
+    /// The media `show` was tied to is no longer on the service, so it is
+    /// back under Pick. Picking again, or stopping, takes it away.
+    ListGone {
+        service: Service,
+        show: String,
     },
 }
 
