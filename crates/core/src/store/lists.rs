@@ -1,15 +1,19 @@
 //! The tables a show's standing with a list service lives in: `accounts`,
-//! one row per service, and `listings`, one row per show and service. Both
+//! one row per service, `listings`, one row per show and service, and
+//! `updates`, one row per value the library took from a list. The first two
 //! are replaced in place and never deleted: signing out marks the account
 //! row, and a show taken out of step keeps its row saying so.
 
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use tracing::{debug, info, info_span};
 
-use super::{Store, StoreError, fetch, query_failed, set_column, unix_now, unix_secs, unix_time};
+use super::{
+    Store, StoreError, fetch, query_failed, set_column, unix_now, unix_secs, unix_time,
+    write_standing,
+};
 use crate::{
-    Account, EntryId, LibraryEntry, LinkedBy, ListBase, ListState, ListStatus, Listing, Media,
-    MediaId, Parked, Service, Signed, Tie, UserId,
+    Account, EntryId, LibraryEntry, LinkedBy, ListBase, ListState, ListStatus, ListUpdate,
+    ListUpdateId, Listing, Media, MediaId, Parked, Service, Settlement, Signed, Tie, UserId,
 };
 
 const SELECT_ACCOUNT: &str = "SELECT service, user_id, name, expires_at, refused_at, refusal, \
@@ -20,6 +24,9 @@ const SELECT_LISTING: &str = "SELECT entry_id, service, tie, found, media_id, me
                               base_status, base_progress, base_repeat, based_at, repeat_offset, \
                               parked_status, parked_progress, parked_repeat, parked, parked_at \
                               FROM listings";
+
+const SELECT_UPDATE: &str = "SELECT id, entry_id, service, progress_before, progress, \
+                             status_before, status, at FROM updates";
 
 /// The `tie` column's values, one per [`Tie`] variant.
 const TIE_UNPICKED: &str = "unpicked";
@@ -35,6 +42,15 @@ pub struct Tied {
     /// The entry with the media's episode count as its total, when it had
     /// none before; `None` when the entry was left alone.
     pub entry: Option<LibraryEntry>,
+}
+
+/// A settlement as stored: the entry with what it took, the listing with
+/// its new base, and the row that says what was taken, when something was.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Settled {
+    pub entry: LibraryEntry,
+    pub listing: Listing,
+    pub update: Option<ListUpdate>,
 }
 
 impl Store {
@@ -254,6 +270,106 @@ impl Store {
         info!("show unparked");
         Ok(listing)
     }
+
+    /// Writes what a report settled into, in one transaction: the fields
+    /// the library takes from the list, the base the next merge measures
+    /// against, and the row History reads the take from. The base moves
+    /// here and nowhere else, after the list confirmed what it holds, so a
+    /// crash or a duplicate send re-asks the same question. A show tied
+    /// elsewhere since the job was built is left alone, with `None` back:
+    /// its report describes a media it no longer stands with. The parked
+    /// group goes, since the list has answered. Every value is absolute, so
+    /// writing the same settlement twice changes nothing the second time
+    /// and adds no second row. `rewatched` stays as it was: a repeat taken
+    /// from the list moves the listing's offset, never the entry's count.
+    pub fn settle(
+        &mut self,
+        entry: EntryId,
+        service: Service,
+        media: MediaId,
+        settlement: &Settlement,
+    ) -> Result<Option<Settled>, StoreError> {
+        let _span = info_span!(
+            "store.settle",
+            entry = %entry,
+            service = service.tag(),
+            media = media.0
+        )
+        .entered();
+        let tx = self.conn.transaction().map_err(query_failed)?;
+        let listing = fetch_listing(&tx, entry, service)?;
+        if !matches!(&listing.tie, Tie::Linked { media: linked, .. } if linked.id == media) {
+            info!("show tied elsewhere since; nothing settled");
+            return Ok(None);
+        }
+        let before = fetch(&tx, entry)?;
+        let mut taken = before.clone();
+        if let Some(status) = settlement.take_status {
+            (taken.status, taken.rewatching) = status.columns();
+        }
+        if let Some(progress) = settlement.take_progress {
+            taken.progress = progress;
+        }
+        let stored = if taken == before {
+            before.clone()
+        } else {
+            write_standing(&tx, &taken)?
+        };
+        let now = unix_now();
+        let base = &settlement.base;
+        tx.execute(
+            "UPDATE listings SET base_user = ?1, base_listed = ?2, base_status = ?3, \
+             base_progress = ?4, base_repeat = ?5, based_at = ?6, repeat_offset = ?7, \
+             parked_status = NULL, parked_progress = NULL, parked_repeat = NULL, \
+             parked = NULL, parked_at = NULL \
+             WHERE entry_id = ?8 AND service = ?9",
+            params![
+                base.user.0,
+                base.listed,
+                base.state.status.tag(),
+                base.state.progress,
+                base.state.repeat,
+                now,
+                settlement.repeat_offset,
+                entry.0,
+                service.tag(),
+            ],
+        )
+        .map_err(query_failed)?;
+        let (status_before, status) = (ListStatus::of(&before), ListStatus::of(&stored));
+        let update = if stored.progress != before.progress || status != status_before {
+            tx.execute(
+                "INSERT INTO updates (entry_id, service, progress_before, progress, \
+                 status_before, status, at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    entry.0,
+                    service.tag(),
+                    before.progress,
+                    stored.progress,
+                    status_before.tag(),
+                    status.tag(),
+                    now,
+                ],
+            )
+            .map_err(query_failed)?;
+            Some(fetch_update(&tx, ListUpdateId(tx.last_insert_rowid()))?)
+        } else {
+            None
+        };
+        let listing = fetch_listing(&tx, entry, service)?;
+        tx.commit().map_err(query_failed)?;
+        info!(
+            progress = stored.progress,
+            status = status.tag(),
+            taken = update.is_some(),
+            "settled"
+        );
+        Ok(Some(Settled {
+            entry: stored,
+            listing,
+            update,
+        }))
+    }
 }
 
 fn fetch_account(conn: &Connection, service: Service) -> Result<Account, StoreError> {
@@ -279,6 +395,16 @@ fn fetch_listing(
     .optional()
     .map_err(query_failed)?
     .ok_or(StoreError::NotListed { entry, service })?
+    .parse()
+}
+
+fn fetch_update(conn: &Connection, id: ListUpdateId) -> Result<ListUpdate, StoreError> {
+    conn.query_row(
+        &format!("{SELECT_UPDATE} WHERE id = ?1"),
+        [id.0],
+        RawUpdate::read,
+    )
+    .map_err(query_failed)?
     .parse()
 }
 
@@ -524,13 +650,59 @@ fn list_state(status: &str, progress: i64, repeat: i64) -> Option<ListState> {
     })
 }
 
+/// An update row as SQLite hands it over, before the domain checks in
+/// `parse`.
+struct RawUpdate {
+    id: i64,
+    entry_id: i64,
+    service: String,
+    progress_before: i64,
+    progress: i64,
+    status_before: String,
+    status: String,
+    at: i64,
+}
+
+impl RawUpdate {
+    // Positional, so `SELECT_UPDATE` only ever appends a column.
+    fn read(row: &Row<'_>) -> rusqlite::Result<RawUpdate> {
+        Ok(RawUpdate {
+            id: row.get(0)?,
+            entry_id: row.get(1)?,
+            service: row.get(2)?,
+            progress_before: row.get(3)?,
+            progress: row.get(4)?,
+            status_before: row.get(5)?,
+            status: row.get(6)?,
+            at: row.get(7)?,
+        })
+    }
+
+    fn parse(self) -> Result<ListUpdate, StoreError> {
+        let id = ListUpdateId(self.id);
+        let invalid = |field| StoreError::InvalidUpdate { id, field };
+        let count = |value: i64, field| u32::try_from(value).map_err(|_| invalid(field));
+        Ok(ListUpdate {
+            id,
+            entry: EntryId(self.entry_id),
+            service: Service::from_tag(&self.service).ok_or_else(|| invalid("service"))?,
+            progress_before: count(self.progress_before, "progress_before")?,
+            progress: count(self.progress, "progress")?,
+            status_before: ListStatus::from_tag(&self.status_before)
+                .ok_or_else(|| invalid("status_before"))?,
+            status: ListStatus::from_tag(&self.status).ok_or_else(|| invalid("status"))?,
+            at: unix_time(self.at).ok_or_else(|| invalid("at"))?,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, UNIX_EPOCH};
 
     use super::super::tests::{entry, open, open_tmp};
     use super::*;
-    use crate::NewEntry;
+    use crate::{NewEntry, WatchStatus};
 
     fn account(signed: Signed) -> Account {
         Account {
@@ -849,6 +1021,284 @@ mod tests {
         let back = store.unpark(id, Service::AniList).unwrap();
         assert_eq!(back, tied);
         assert_eq!(store.listings().unwrap(), vec![back]);
+    }
+
+    fn settlement(
+        take_status: Option<ListStatus>,
+        take_progress: Option<u32>,
+        base_state: ListState,
+    ) -> Settlement {
+        Settlement {
+            take_status,
+            take_progress,
+            base: ListBase {
+                user: UserId(7),
+                listed: true,
+                state: base_state,
+            },
+            repeat_offset: 2,
+        }
+    }
+
+    fn updates(store: &Store) -> i64 {
+        store
+            .conn
+            .query_row("SELECT COUNT(*) FROM updates", [], |row| row.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn settling_takes_the_lists_fields_and_writes_one_updates_row() {
+        let (_tmp, dir) = open_tmp();
+        let mut store = open(&dir);
+        let id = store
+            .add(NewEntry {
+                progress: 3,
+                ..entry("Show")
+            })
+            .unwrap()
+            .id;
+        store.set_tie(id, Service::AniList, &linked(5)).unwrap();
+        let held = ListState {
+            status: ListStatus::Completed,
+            progress: 12,
+            repeat: 3,
+        };
+        let taken = settlement(Some(ListStatus::Completed), Some(12), held);
+
+        let settled = store
+            .settle(id, Service::AniList, MediaId(5), &taken)
+            .unwrap()
+            .expect("the show is still linked to media 5");
+        assert_eq!(
+            (
+                settled.entry.status,
+                settled.entry.progress,
+                settled.entry.rewatching,
+                settled.entry.rewatched
+            ),
+            (WatchStatus::Completed, 12, false, 0)
+        );
+        assert_eq!(settled.listing.base, Some(taken.base));
+        assert_eq!(settled.listing.repeat_offset, 2);
+        let update = settled.update.expect("progress and status were taken");
+        assert_eq!(
+            (
+                update.entry,
+                update.service,
+                update.progress_before,
+                update.progress,
+                update.status_before,
+                update.status
+            ),
+            (
+                id,
+                Service::AniList,
+                3,
+                12,
+                ListStatus::Watching,
+                ListStatus::Completed
+            )
+        );
+        assert!(update.at > UNIX_EPOCH);
+        assert_eq!(store.entries().unwrap(), vec![settled.entry.clone()]);
+        assert_eq!(store.listings().unwrap(), vec![settled.listing.clone()]);
+        assert_eq!(updates(&store), 1);
+
+        // The same report again: nothing moves, and no second row.
+        let again = store
+            .settle(id, Service::AniList, MediaId(5), &taken)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            again,
+            Settled {
+                update: None,
+                ..settled
+            }
+        );
+        assert_eq!(updates(&store), 1);
+    }
+
+    #[test]
+    fn settling_a_rewatch_taken_from_the_list_moves_the_flag_not_the_count() {
+        let (_tmp, dir) = open_tmp();
+        let mut store = open(&dir);
+        let id = store
+            .add(NewEntry {
+                status: WatchStatus::Completed,
+                progress: 12,
+                total: Some(12),
+                ..entry("Show")
+            })
+            .unwrap()
+            .id;
+        store.set_tie(id, Service::AniList, &linked(5)).unwrap();
+        let held = ListState {
+            status: ListStatus::Rewatching,
+            progress: 2,
+            repeat: 1,
+        };
+        let settled = store
+            .settle(
+                id,
+                Service::AniList,
+                MediaId(5),
+                &settlement(Some(ListStatus::Rewatching), Some(2), held),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (
+                settled.entry.status,
+                settled.entry.rewatching,
+                settled.entry.progress,
+                settled.entry.rewatched
+            ),
+            (WatchStatus::Completed, true, 2, 0)
+        );
+        let update = settled.update.unwrap();
+        assert_eq!(
+            (update.status_before, update.status),
+            (ListStatus::Completed, ListStatus::Rewatching)
+        );
+        // A base alone, with nothing taken, writes no row.
+        let base_only = store
+            .settle(
+                id,
+                Service::AniList,
+                MediaId(5),
+                &settlement(None, None, held),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(base_only.update, None);
+        assert_eq!(base_only.entry, settled.entry);
+        assert_eq!(updates(&store), 1);
+    }
+
+    #[test]
+    fn settling_a_show_tied_elsewhere_since_writes_nothing() {
+        let (_tmp, dir) = open_tmp();
+        let mut store = open(&dir);
+        let id = store.add(entry("Show")).unwrap().id;
+        let tied = store
+            .set_tie(id, Service::AniList, &linked(6))
+            .unwrap()
+            .listing;
+        let held = ListState {
+            status: ListStatus::Completed,
+            progress: 12,
+            repeat: 0,
+        };
+        let stale = settlement(Some(ListStatus::Completed), Some(12), held);
+        assert_eq!(
+            store
+                .settle(id, Service::AniList, MediaId(5), &stale)
+                .unwrap(),
+            None
+        );
+        let gone = store
+            .set_tie(id, Service::AniList, &Tie::Gone { media: media(5) })
+            .unwrap()
+            .listing;
+        assert_eq!(
+            store
+                .settle(id, Service::AniList, MediaId(5), &stale)
+                .unwrap(),
+            None
+        );
+        assert_eq!(store.entries().unwrap()[0].progress, 0);
+        assert_eq!(
+            store.listings().unwrap(),
+            vec![Listing {
+                tie: gone.tie,
+                ..tied
+            }]
+        );
+        assert_eq!(updates(&store), 0);
+        assert!(matches!(
+            store.settle(EntryId(999), Service::AniList, MediaId(5), &stale),
+            Err(StoreError::NotListed { .. })
+        ));
+    }
+
+    #[test]
+    fn settling_takes_a_show_out_of_the_park() {
+        let (_tmp, dir) = open_tmp();
+        let mut store = open(&dir);
+        let id = store.add(entry("Show")).unwrap().id;
+        store.set_tie(id, Service::AniList, &linked(5)).unwrap();
+        store.park(id, Service::AniList, &parked()).unwrap();
+        let unlisted = Settlement {
+            base: ListBase {
+                listed: false,
+                ..settlement(None, None, parked().wanted).base
+            },
+            repeat_offset: -1,
+            ..settlement(None, None, parked().wanted)
+        };
+        let settled = store
+            .settle(id, Service::AniList, MediaId(5), &unlisted)
+            .unwrap()
+            .unwrap();
+        assert_eq!(settled.listing.parked, None);
+        assert_eq!(settled.listing.base, Some(unlisted.base));
+        assert_eq!(settled.listing.repeat_offset, -1);
+        assert_eq!(settled.update, None);
+    }
+
+    #[test]
+    fn garbage_update_rows_surface_as_invalid() {
+        let (_tmp, dir) = open_tmp();
+        let mut store = open(&dir);
+        let id = store.add(entry("Show")).unwrap().id;
+        store.set_tie(id, Service::AniList, &linked(5)).unwrap();
+        let held = ListState {
+            status: ListStatus::Watching,
+            progress: 1,
+            repeat: 0,
+        };
+        let update = store
+            .settle(
+                id,
+                Service::AniList,
+                MediaId(5),
+                &settlement(None, Some(1), held),
+            )
+            .unwrap()
+            .unwrap()
+            .update
+            .unwrap();
+        for (broken, field) in [
+            ("UPDATE updates SET service = 'mal'", "service"),
+            (
+                "UPDATE updates SET service = 'anilist', progress_before = -1",
+                "progress_before",
+            ),
+            (
+                "UPDATE updates SET progress_before = 0, progress = -1",
+                "progress",
+            ),
+            (
+                "UPDATE updates SET progress = 1, status_before = 'bogus'",
+                "status_before",
+            ),
+            (
+                "UPDATE updates SET status_before = 'watching', status = 'bogus'",
+                "status",
+            ),
+            ("UPDATE updates SET status = 'watching', at = -1", "at"),
+        ] {
+            store.execute_raw(broken);
+            assert!(
+                matches!(
+                    fetch_update(&store.conn, update.id),
+                    Err(StoreError::InvalidUpdate { id, field: got }) if id == update.id && got == field
+                ),
+                "{broken}"
+            );
+        }
     }
 
     #[test]

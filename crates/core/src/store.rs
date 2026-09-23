@@ -10,13 +10,13 @@ use tracing::{debug, info, info_span, warn};
 
 use crate::{
     Confidence, DataDir, Decline, EntryId, HistoryId, HistoryPage, LibraryEntry, Link, ListStatus,
-    NewEntry, NewRecording, ProposedMatch, Recorded, Service, StatusMove, Watch, WatchOutcome,
-    WatchStatus,
+    ListUpdateId, NewEntry, NewRecording, ProposedMatch, Recorded, Service, StatusMove, Watch,
+    WatchOutcome, WatchStatus,
 };
 
 mod lists;
 
-pub use lists::Tied;
+pub use lists::{Settled, Tied};
 
 /// The schema, compiled in from `migrations/`, one numbered directory per
 /// version.
@@ -136,6 +136,11 @@ pub enum StoreError {
     /// that service.
     #[error("entry {entry} has no {} listing", service.label())]
     NotListed { entry: EntryId, service: Service },
+    #[error("update row {id} has an invalid {field}")]
+    InvalidUpdate {
+        id: ListUpdateId,
+        field: &'static str,
+    },
 }
 
 impl StoreError {
@@ -155,7 +160,8 @@ impl StoreError {
             | StoreError::WatchClosed { .. }
             | StoreError::InvalidAccount { .. }
             | StoreError::InvalidListing { .. }
-            | StoreError::NotListed { .. } => false,
+            | StoreError::NotListed { .. }
+            | StoreError::InvalidUpdate { .. } => false,
         }
     }
 }

@@ -39,11 +39,14 @@ pub use players::{MIN_PATTERN_LEN, PlayerRow, too_short};
 // Shells depend on this crate alone, so the parser reaches them through here.
 pub use ryuuji_parse::{Certainty, ElementKind, Options, parse};
 pub use store::{
-    Added, DbError, Moved, Opened, Recording, Recovered, SchemaVersion, Store, StoreError, Tied,
+    Added, DbError, Moved, Opened, Recording, Recovered, SchemaVersion, Settled, Store, StoreError,
+    Tied,
 };
 pub use sync::{
-    Account, Candidate, LinkedBy, ListBase, ListEntryId, ListState, Listing, Media, MediaId,
-    Parked, Remote, Service, Signed, SyncState, Tie, UserId,
+    Account, Asked, AutoLink, Candidate, Job, LinkState, LinkedBy, ListBase, ListEntryId,
+    ListState, ListUpdate, ListUpdateId, Listing, Media, MediaId, Merge, Parked, Patch, Remote,
+    Service, ServiceWork, Settlement, Signed, SyncState, Task, Tie, UserId, When, Work, Write,
+    auto_link, merge, settlement,
 };
 use tagged::tagged_enum;
 pub use user_file::{FileWatch, UserFile, watch_files};

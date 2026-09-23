@@ -1,12 +1,18 @@
 //! What keeping a show in step with a list service looks like from the
-//! core: the account signed in, the media a show is tied to, and the base
-//! a merge measures both sides against. The rows live in `store::lists`;
-//! the merge rule and the commands that drive it come later.
+//! core: the account signed in, the media a show is tied to, the base a
+//! merge measures both sides against, and the work that follows from them.
+//! The rows live in `store::lists`, the rule that settles a difference in
+//! `merge`; the commands that drive it come later.
 
+mod merge;
+
+use std::fmt;
 use std::time::SystemTime;
 
 use crate::tagged::tagged_enum;
-use crate::{EntryId, ListStatus};
+use crate::{AppState, EntryId, LibraryEntry, ListStatus};
+
+pub use merge::{Asked, AutoLink, Merge, Patch, Settlement, Write, auto_link, merge, settlement};
 
 tagged_enum! {
     /// A list service a show can be kept in step with. Tags are stored in
@@ -151,6 +157,66 @@ pub struct Listing {
     pub(crate) parked: Option<Parked>,
 }
 
+impl Listing {
+    /// The state the library wants `user`'s list to hold for `entry`: its
+    /// status, its progress, and the rewatches it counted plus the offset,
+    /// as the list's repeat count. The offset was taken from the list the
+    /// base describes, so it counts only while the base is this user's:
+    /// another account's list says nothing about this one's count, and a
+    /// first merge asks with Ryuuji's own.
+    pub fn wanted(&self, entry: &LibraryEntry, user: UserId) -> ListState {
+        let offset = if self.base_for(user).is_some() {
+            self.repeat_offset
+        } else {
+            0
+        };
+        let repeat = (i64::from(entry.rewatched) + offset).max(0);
+        ListState {
+            status: ListStatus::of(entry),
+            progress: entry.progress,
+            repeat: u32::try_from(repeat).unwrap_or(u32::MAX),
+        }
+    }
+
+    /// The base when it is `user`'s. Another account's base says nothing
+    /// about this one's list, so that user starts from a first merge.
+    pub fn base_for(&self, user: UserId) -> Option<&ListBase> {
+        self.base.as_ref().filter(|base| base.user == user)
+    }
+}
+
+/// Identity of a stored update row. Only [`Store`](crate::Store) mints
+/// these.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ListUpdateId(pub(crate) i64);
+
+impl ListUpdateId {
+    pub fn as_i64(self) -> i64 {
+        self.0
+    }
+}
+
+impl fmt::Display for ListUpdateId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// A value the library took from a list, as stored: where the show stood
+/// before and after. Kept apart from the watch log so a relaunch reading the
+/// newest history row still finds the viewing's own.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ListUpdate {
+    pub id: ListUpdateId,
+    pub entry: EntryId,
+    pub service: Service,
+    pub progress_before: u32,
+    pub progress: u32,
+    pub status_before: ListStatus,
+    pub status: ListStatus,
+    pub at: SystemTime,
+}
+
 /// An account signed in to a service, as stored.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Account {
@@ -175,9 +241,540 @@ pub enum Signed {
     Out,
 }
 
-/// The sync side of [`AppState`](crate::AppState).
+/// The sync side of [`AppState`].
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct SyncState {
     pub accounts: Vec<Account>,
     pub listings: Vec<Listing>,
+}
+
+impl SyncState {
+    /// Where a show stands with a service, for the Library row to say;
+    /// `None` while no account is signed in to that service.
+    pub fn link_state(&self, entry: &LibraryEntry, service: Service) -> Option<LinkState> {
+        let account = self.signed_in(service)?;
+        let Some(listing) = self.listing(entry.id, service) else {
+            return Some(LinkState::Looking);
+        };
+        Some(match &listing.tie {
+            Tie::Unpicked { found } => LinkState::Unpicked { found: *found },
+            Tie::Gone { media } => LinkState::Gone {
+                show: media.title.clone(),
+            },
+            Tie::Off => LinkState::Off,
+            Tie::Linked { media, .. } => {
+                let show = media.title.clone();
+                if let Some(parked) = &listing.parked {
+                    return Some(LinkState::Refused {
+                        show,
+                        message: parked.message.clone(),
+                    });
+                }
+                match listing.base_for(account.user) {
+                    None => LinkState::Merging { show },
+                    Some(base) if base.state == listing.wanted(entry, account.user) => {
+                        LinkState::InStep {
+                            show,
+                            listed: base.listed,
+                        }
+                    }
+                    Some(_) => LinkState::Waiting { show },
+                }
+            }
+        })
+    }
+
+    fn signed_in(&self, service: Service) -> Option<&Account> {
+        self.accounts
+            .iter()
+            .find(|account| account.service == service && matches!(account.signed, Signed::In))
+    }
+
+    fn listing(&self, entry: EntryId, service: Service) -> Option<&Listing> {
+        self.listings
+            .iter()
+            .find(|listing| listing.entry == entry && listing.service == service)
+    }
+
+    /// The job one show gives one account, if any. A show never looked up
+    /// is searched for in the background. A linked show is reconciled when
+    /// what the library wants differs from its base, or from a first merge
+    /// when this user has no base for it, which asks with Ryuuji's own
+    /// repeat count; one parked on the very state it still wants is left
+    /// alone, since sending it again would meet the same refusal. An
+    /// unpicked, gone or off show has nothing to send.
+    fn job(&self, entry: &LibraryEntry, account: &Account) -> Option<Job> {
+        let Some(listing) = self.listing(entry.id, account.service) else {
+            return Some(Job {
+                entry: entry.id,
+                task: Task::Find {
+                    title: entry.title.clone(),
+                },
+                when: When::Background,
+            });
+        };
+        let Tie::Linked { media, .. } = &listing.tie else {
+            return None;
+        };
+        let wanted = listing.wanted(entry, account.user);
+        if listing
+            .parked
+            .as_ref()
+            .is_some_and(|parked| parked.wanted == wanted)
+        {
+            return None;
+        }
+        let base = listing.base_for(account.user);
+        if base.is_some_and(|base| base.state == wanted) {
+            return None;
+        }
+        Some(Job {
+            entry: entry.id,
+            task: Task::Reconcile {
+                media: media.id,
+                wanted,
+                base: base.map(|base| base.state),
+            },
+            when: When::Settled,
+        })
+    }
+}
+
+impl AppState {
+    /// What the sync worker should be doing now, derived from the library
+    /// and the listings rather than kept anywhere: a show is pending while
+    /// what the library wants differs from its base, so nothing on the
+    /// recording, undo or status paths needs to know a list exists. One
+    /// entry per signed-in account, each with the jobs its shows give it;
+    /// the shell posts the whole thing whenever it changes.
+    pub fn work(&self) -> Work {
+        let services = self
+            .sync
+            .accounts
+            .iter()
+            .filter(|account| matches!(account.signed, Signed::In))
+            .map(|account| ServiceWork {
+                service: account.service,
+                user: account.user,
+                jobs: self
+                    .library
+                    .iter()
+                    .filter_map(|entry| self.sync.job(entry, account))
+                    .collect(),
+            })
+            .collect();
+        Work { services }
+    }
+}
+
+/// Where a show stands with a service, as the Library row says it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LinkState {
+    /// Not looked up yet.
+    Looking,
+    /// The search found `found` candidates and none was the one clear match.
+    Unpicked {
+        found: u32,
+    },
+    /// Linked, and this user has no base for it yet: the first merge is
+    /// still to come.
+    Merging {
+        show: String,
+    },
+    /// Linked, and the library wants something the base does not hold.
+    Waiting {
+        show: String,
+    },
+    /// The base holds what the library wants; `listed` is false while the
+    /// show is not on the list yet, which its next change will fix.
+    InStep {
+        show: String,
+        listed: bool,
+    },
+    /// The service refused the last write.
+    Refused {
+        show: String,
+        message: String,
+    },
+    Gone {
+        show: String,
+    },
+    Off,
+}
+
+/// Everything the worker has to do, one entry per signed-in account.
+/// Derived from [`AppState`] on every read, never stored.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Work {
+    pub services: Vec<ServiceWork>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServiceWork {
+    pub service: Service,
+    pub user: UserId,
+    pub jobs: Vec<Job>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Job {
+    pub entry: EntryId,
+    pub task: Task,
+    pub when: When,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Task {
+    /// Look the show up by its title.
+    Find { title: String },
+    /// Read what the list holds, merge, and write what differs. `base` is
+    /// `None` for a first merge.
+    Reconcile {
+        media: MediaId,
+        wanted: ListState,
+        base: Option<ListState>,
+    },
+}
+
+/// How soon a job runs: at once, after the last edit settles, or when
+/// nothing else is waiting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum When {
+    Now,
+    Settled,
+    Background,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::UNIX_EPOCH;
+
+    use super::*;
+    use crate::WatchStatus;
+
+    fn account(signed: Signed) -> Account {
+        Account {
+            service: Service::AniList,
+            user: UserId(7),
+            name: "someone".into(),
+            expires: None,
+            signed,
+        }
+    }
+
+    fn show(id: i64, progress: u32) -> LibraryEntry {
+        LibraryEntry {
+            id: EntryId(id),
+            title: format!("Show {id}"),
+            status: WatchStatus::Watching,
+            progress,
+            total: Some(12),
+            rewatching: false,
+            rewatched: 1,
+        }
+    }
+
+    fn media() -> Media {
+        Media {
+            id: MediaId(5),
+            title: "Show on AniList".into(),
+            episodes: Some(12),
+            mal_id: None,
+        }
+    }
+
+    fn state(status: ListStatus, progress: u32, repeat: u32) -> ListState {
+        ListState {
+            status,
+            progress,
+            repeat,
+        }
+    }
+
+    fn based(user: u64, listed: bool, state: ListState) -> Option<ListBase> {
+        Some(ListBase {
+            user: UserId(user),
+            listed,
+            state,
+        })
+    }
+
+    fn listing(entry: i64, tie: Tie, base: Option<ListBase>) -> Listing {
+        Listing {
+            entry: EntryId(entry),
+            service: Service::AniList,
+            tie,
+            base,
+            repeat_offset: 2,
+            parked: None,
+        }
+    }
+
+    fn linked(entry: i64, base: Option<ListBase>) -> Listing {
+        listing(
+            entry,
+            Tie::Linked {
+                media: media(),
+                by: LinkedBy::Title,
+            },
+            base,
+        )
+    }
+
+    fn parked(wanted: ListState) -> Option<Parked> {
+        Some(Parked {
+            wanted,
+            message: "Validation error".into(),
+            at: UNIX_EPOCH,
+        })
+    }
+
+    fn app(accounts: Vec<Account>, library: Vec<LibraryEntry>, listings: Vec<Listing>) -> AppState {
+        AppState {
+            library,
+            sync: SyncState { accounts, listings },
+            ..AppState::default()
+        }
+    }
+
+    fn reconcile(entry: i64, wanted: ListState, base: Option<ListBase>) -> Job {
+        Job {
+            entry: EntryId(entry),
+            task: Task::Reconcile {
+                media: MediaId(5),
+                wanted,
+                base: base.map(|base| base.state),
+            },
+            when: When::Settled,
+        }
+    }
+
+    const LISTED: bool = true;
+
+    #[test]
+    fn what_a_listing_wants_is_the_entry_plus_the_offset_while_the_base_is_the_users() {
+        let entry = show(1, 4);
+        let base = based(7, LISTED, state(ListStatus::Watching, 3, 3));
+        let wanted = linked(1, base).wanted(&entry, UserId(7));
+        assert_eq!(wanted, state(ListStatus::Watching, 4, 3));
+        // The offset came from user 7's list. Another user, or none with a
+        // base yet, gets the entry's own count.
+        assert_eq!(linked(1, base).wanted(&entry, UserId(8)).repeat, 1);
+        assert_eq!(linked(1, None).wanted(&entry, UserId(7)).repeat, 1);
+        let negative = Listing {
+            repeat_offset: -5,
+            ..linked(1, base)
+        };
+        assert_eq!(negative.wanted(&entry, UserId(7)).repeat, 0);
+        let rewatch = LibraryEntry {
+            rewatching: true,
+            status: WatchStatus::Completed,
+            ..entry
+        };
+        assert_eq!(
+            linked(1, base).wanted(&rewatch, UserId(7)).status,
+            ListStatus::Rewatching
+        );
+    }
+
+    #[test]
+    fn a_base_is_only_its_own_users() {
+        let base = based(7, LISTED, state(ListStatus::Watching, 4, 3));
+        let listing = linked(1, base);
+        assert_eq!(listing.base_for(UserId(7)), base.as_ref());
+        assert_eq!(listing.base_for(UserId(8)), None);
+        assert_eq!(linked(1, None).base_for(UserId(7)), None);
+    }
+
+    #[test]
+    fn a_signed_out_or_refused_account_gives_no_work() {
+        let library = vec![show(1, 4)];
+        assert_eq!(
+            app(vec![account(Signed::Out)], library.clone(), vec![]).work(),
+            Work { services: vec![] }
+        );
+        let refused = Signed::Refused {
+            message: "Invalid token".into(),
+        };
+        assert_eq!(
+            app(vec![account(refused)], library, vec![]).work(),
+            Work { services: vec![] }
+        );
+    }
+
+    #[test]
+    fn a_show_never_looked_up_is_found_in_the_background() {
+        let work = app(vec![account(Signed::In)], vec![show(1, 4)], vec![]).work();
+        assert_eq!(
+            work,
+            Work {
+                services: vec![ServiceWork {
+                    service: Service::AniList,
+                    user: UserId(7),
+                    jobs: vec![Job {
+                        entry: EntryId(1),
+                        task: Task::Find {
+                            title: "Show 1".into()
+                        },
+                        when: When::Background,
+                    }],
+                }]
+            }
+        );
+    }
+
+    /// A first merge, this user's first or after another's, asks with the
+    /// entry's own repeat count: the offset was that other list's.
+    #[test]
+    fn a_linked_show_is_reconciled_while_its_base_differs_from_what_it_wants() {
+        let wanted = state(ListStatus::Watching, 4, 3);
+        let own = state(ListStatus::Watching, 4, 1);
+        let in_step = based(7, LISTED, wanted);
+        let behind = based(7, LISTED, state(ListStatus::Watching, 3, 3));
+        let unlisted = based(7, false, state(ListStatus::PlanToWatch, 0, 3));
+        let someone_elses = based(8, LISTED, wanted);
+        let library = vec![show(1, 4), show(2, 4), show(3, 4), show(4, 4), show(5, 4)];
+        let listings = vec![
+            linked(1, None),
+            linked(2, behind),
+            linked(3, in_step),
+            linked(4, unlisted),
+            linked(5, someone_elses),
+        ];
+        let work = app(vec![account(Signed::In)], library, listings).work();
+        assert_eq!(
+            work.services[0].jobs,
+            vec![
+                reconcile(1, own, None),
+                reconcile(2, wanted, behind),
+                reconcile(4, wanted, unlisted),
+                reconcile(5, own, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_parked_show_is_sent_again_only_once_it_wants_something_else() {
+        let wanted = state(ListStatus::Watching, 4, 3);
+        let base = based(7, LISTED, state(ListStatus::Watching, 3, 3));
+        let same = Listing {
+            parked: parked(wanted),
+            ..linked(1, base)
+        };
+        let other = Listing {
+            parked: parked(state(ListStatus::Watching, 5, 3)),
+            ..linked(2, base)
+        };
+        let work = app(
+            vec![account(Signed::In)],
+            vec![show(1, 4), show(2, 4)],
+            vec![same, other],
+        )
+        .work();
+        assert_eq!(work.services[0].jobs, vec![reconcile(2, wanted, base)]);
+    }
+
+    #[test]
+    fn an_unpicked_gone_or_off_show_gives_nothing() {
+        let listings = vec![
+            listing(1, Tie::Unpicked { found: 3 }, None),
+            listing(2, Tie::Gone { media: media() }, None),
+            listing(3, Tie::Off, None),
+        ];
+        let work = app(
+            vec![account(Signed::In)],
+            vec![show(1, 4), show(2, 4), show(3, 4)],
+            listings,
+        )
+        .work();
+        assert_eq!(
+            work,
+            Work {
+                services: vec![ServiceWork {
+                    service: Service::AniList,
+                    user: UserId(7),
+                    jobs: vec![],
+                }]
+            }
+        );
+    }
+
+    #[test]
+    fn a_link_state_says_where_each_show_stands() {
+        let entry = show(1, 4);
+        let wanted = state(ListStatus::Watching, 4, 3);
+        let show = || "Show on AniList".to_owned();
+        let signed_in = vec![account(Signed::In)];
+        let state_of = |accounts: &[Account], listings: Vec<Listing>| {
+            SyncState {
+                accounts: accounts.to_vec(),
+                listings,
+            }
+            .link_state(&entry, Service::AniList)
+        };
+        assert_eq!(state_of(&[account(Signed::Out)], vec![]), None);
+        assert_eq!(state_of(&[], vec![linked(1, None)]), None);
+        assert_eq!(state_of(&signed_in, vec![]), Some(LinkState::Looking));
+        assert_eq!(
+            state_of(
+                &signed_in,
+                vec![listing(1, Tie::Unpicked { found: 3 }, None)]
+            ),
+            Some(LinkState::Unpicked { found: 3 })
+        );
+        assert_eq!(
+            state_of(&signed_in, vec![linked(1, None)]),
+            Some(LinkState::Merging { show: show() })
+        );
+        assert_eq!(
+            state_of(&signed_in, vec![linked(1, based(8, LISTED, wanted))]),
+            Some(LinkState::Merging { show: show() })
+        );
+        assert_eq!(
+            state_of(
+                &signed_in,
+                vec![linked(
+                    1,
+                    based(7, LISTED, state(ListStatus::Watching, 3, 3))
+                )]
+            ),
+            Some(LinkState::Waiting { show: show() })
+        );
+        assert_eq!(
+            state_of(&signed_in, vec![linked(1, based(7, LISTED, wanted))]),
+            Some(LinkState::InStep {
+                show: show(),
+                listed: true
+            })
+        );
+        assert_eq!(
+            state_of(&signed_in, vec![linked(1, based(7, false, wanted))]),
+            Some(LinkState::InStep {
+                show: show(),
+                listed: false
+            })
+        );
+        let refused = Listing {
+            parked: parked(wanted),
+            ..linked(1, based(7, LISTED, wanted))
+        };
+        assert_eq!(
+            state_of(&signed_in, vec![refused]),
+            Some(LinkState::Refused {
+                show: show(),
+                message: "Validation error".into()
+            })
+        );
+        assert_eq!(
+            state_of(
+                &signed_in,
+                vec![listing(1, Tie::Gone { media: media() }, None)]
+            ),
+            Some(LinkState::Gone { show: show() })
+        );
+        assert_eq!(
+            state_of(&signed_in, vec![listing(1, Tie::Off, None)]),
+            Some(LinkState::Off)
+        );
+    }
 }
