@@ -27,8 +27,8 @@ pub use app::Ryuuji;
 pub use data_dir::{DataDir, DataDirError, DataDirSource};
 pub use diagnostics::{ByteSize, Diagnostics, FileFacts, FileStat, ProbeFailed};
 pub use history::{
-    Day, HistoryId, HistoryPage, NewRecording, Recorded, Watch, WatchOutcome, date_time, days,
-    time_of_day, week_start,
+    Day, HistoryId, HistoryPage, NewRecording, Recorded, StatusMove, Watch, WatchOutcome,
+    date_time, days, time_of_day, week_start,
 };
 // The zone history reads its local days in; a shell passes the system's.
 pub use jiff::tz::TimeZone;
@@ -83,6 +83,51 @@ tagged_enum! {
         OnHold => "on-hold", "On hold",
         Dropped => "dropped", "Dropped",
         PlanToWatch => "plan-to-watch", "Plan to watch",
+    }
+}
+
+tagged_enum! {
+    /// Where a show stands, with a rewatch folded in as a status of its own.
+    /// A list service keeps a rewatch that way (AniList's REPEATING), so the
+    /// [`WatchStatus`] and the rewatch flag read as one value here, and it
+    /// is this value a recording moves and an undo puts back. Tags are
+    /// stored in the history table's `status_before` and `status` columns.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum ListStatus {
+        Watching => "watching", "Watching",
+        Rewatching => "rewatching", "Rewatching",
+        Completed => "completed", "Completed",
+        OnHold => "on-hold", "On hold",
+        Dropped => "dropped", "Dropped",
+        PlanToWatch => "plan-to-watch", "Plan to watch",
+    }
+}
+
+impl ListStatus {
+    /// The status an entry stands at: a rewatch under way, else its shelf.
+    pub fn of(entry: &LibraryEntry) -> ListStatus {
+        if entry.rewatching {
+            return ListStatus::Rewatching;
+        }
+        match entry.status {
+            WatchStatus::Watching => ListStatus::Watching,
+            WatchStatus::Completed => ListStatus::Completed,
+            WatchStatus::OnHold => ListStatus::OnHold,
+            WatchStatus::Dropped => ListStatus::Dropped,
+            WatchStatus::PlanToWatch => ListStatus::PlanToWatch,
+        }
+    }
+
+    /// The `(status, rewatching)` pair an entry stores this as.
+    pub(crate) fn columns(self) -> (WatchStatus, bool) {
+        match self {
+            ListStatus::Watching => (WatchStatus::Watching, false),
+            ListStatus::Rewatching => (WatchStatus::Completed, true),
+            ListStatus::Completed => (WatchStatus::Completed, false),
+            ListStatus::OnHold => (WatchStatus::OnHold, false),
+            ListStatus::Dropped => (WatchStatus::Dropped, false),
+            ListStatus::PlanToWatch => (WatchStatus::PlanToWatch, false),
+        }
     }
 }
 
@@ -148,6 +193,62 @@ pub struct LibraryEntry {
     /// Watching again after Completed; lets a recorded episode land on a
     /// finished show. Set from M5, never here.
     pub rewatching: bool,
+    /// Rewatches of this show that reached their last episode while Ryuuji
+    /// kept it.
+    pub rewatched: u32,
+}
+
+impl LibraryEntry {
+    /// The entry as recording an episode through `last` leaves it: the rule
+    /// for where a recording moves a show. Plan to watch, On hold and
+    /// Dropped move to Watching, as both Taiga versions do. The last episode
+    /// of a known total completes the show, and when a rewatch reaches it
+    /// the rewatch ends and is counted. Anything else keeps its status: a
+    /// Watching show stays Watching, and a rewatch short of its end stays
+    /// one.
+    pub(crate) fn after_episode(&self, last: u32) -> LibraryEntry {
+        let mut entry = LibraryEntry {
+            progress: last,
+            ..self.clone()
+        };
+        if self.total == Some(last) {
+            entry.status = WatchStatus::Completed;
+            if self.rewatching {
+                entry.rewatching = false;
+                entry.rewatched = self.rewatched.saturating_add(1);
+            }
+        } else if !self.rewatching
+            && matches!(
+                self.status,
+                WatchStatus::PlanToWatch | WatchStatus::OnHold | WatchStatus::Dropped
+            )
+        {
+            entry.status = WatchStatus::Watching;
+        }
+        entry
+    }
+
+    /// The entry as undoing `recorded` leaves it: the inverse of
+    /// [`LibraryEntry::after_episode`]. Progress goes back to what stood
+    /// before. The status goes back too, but only while the show still holds
+    /// the one the recording set: a status set by hand since is the person's
+    /// later word, and undoing the write does not take it back. A rewatch the
+    /// recording ended was counted, so putting it back uncounts it.
+    pub(crate) fn after_undo(&self, recorded: &Recorded) -> LibraryEntry {
+        let mut entry = LibraryEntry {
+            progress: recorded.progress_before,
+            ..self.clone()
+        };
+        if let Some(moved) = recorded.status
+            && ListStatus::of(self) == moved.after
+        {
+            (entry.status, entry.rewatching) = moved.before.columns();
+            if moved.before == ListStatus::Rewatching && moved.after == ListStatus::Completed {
+                entry.rewatched = self.rewatched.saturating_sub(1);
+            }
+        }
+        entry
+    }
 }
 
 /// What the detection side currently reports.
@@ -378,7 +479,120 @@ pub fn error_chain(err: &dyn std::error::Error) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::time::UNIX_EPOCH;
+
     use super::*;
+
+    fn show(
+        status: WatchStatus,
+        progress: u32,
+        total: Option<u32>,
+        rewatching: bool,
+    ) -> LibraryEntry {
+        LibraryEntry {
+            id: EntryId(1),
+            title: "Show".into(),
+            status,
+            progress,
+            total,
+            rewatching,
+            rewatched: 2,
+        }
+    }
+
+    fn standing(entry: &LibraryEntry) -> (WatchStatus, bool, u32, u32) {
+        (
+            entry.status,
+            entry.rewatching,
+            entry.rewatched,
+            entry.progress,
+        )
+    }
+
+    #[test]
+    fn a_list_status_folds_the_shelf_and_the_rewatch_flag_into_one() {
+        assert_eq!(
+            ListStatus::of(&show(WatchStatus::Completed, 3, Some(12), true)),
+            ListStatus::Rewatching
+        );
+        assert_eq!(
+            ListStatus::of(&show(WatchStatus::Completed, 12, Some(12), false)),
+            ListStatus::Completed
+        );
+        for status in ListStatus::ALL {
+            let (shelf, rewatching) = status.columns();
+            assert_eq!(ListStatus::of(&show(shelf, 0, None, rewatching)), status);
+        }
+        assert_eq!(ListStatus::Rewatching.label(), "Rewatching");
+        assert_eq!(
+            ListStatus::PlanToWatch.tag(),
+            WatchStatus::PlanToWatch.tag()
+        );
+    }
+
+    /// Every status, with and without a rewatch under way, through an
+    /// episode short of the total, one with no total to be short of, and
+    /// the last one.
+    #[test]
+    fn an_episode_moves_the_show_by_the_recording_rule() {
+        use WatchStatus::*;
+        for status in WatchStatus::ALL {
+            for rewatching in [false, true] {
+                let case = format!("{status:?}, rewatching {rewatching}");
+                // Short of the end, the shelf statuses move to Watching and
+                // a rewatch stays one wherever it is shelved.
+                let expected = match status {
+                    PlanToWatch | OnHold | Dropped if !rewatching => Watching,
+                    _ => status,
+                };
+                let short = show(status, 4, Some(12), rewatching).after_episode(5);
+                assert_eq!(standing(&short), (expected, rewatching, 2, 5), "{case}");
+                let open_ended = show(status, 4, None, rewatching).after_episode(5);
+                assert_eq!(
+                    standing(&open_ended),
+                    (expected, rewatching, 2, 5),
+                    "{case}"
+                );
+                // The last episode finishes the show, and a rewatch with it.
+                let last = show(status, 11, Some(12), rewatching).after_episode(12);
+                let rewatched = if rewatching { 3 } else { 2 };
+                assert_eq!(standing(&last), (Completed, false, rewatched, 12), "{case}");
+            }
+        }
+    }
+
+    #[test]
+    fn undoing_puts_the_status_back_only_while_the_show_still_holds_it() {
+        let moved = |before, after| Recorded {
+            progress_before: 4,
+            progress: 5,
+            at: UNIX_EPOCH,
+            undone_at: None,
+            status: Some(StatusMove { before, after }),
+        };
+        let planned = moved(ListStatus::PlanToWatch, ListStatus::Watching);
+        let back = show(WatchStatus::Watching, 5, Some(12), false).after_undo(&planned);
+        assert_eq!(standing(&back), (WatchStatus::PlanToWatch, false, 2, 4));
+        // Set On hold by hand since: the later word stands, the episode
+        // still comes off.
+        let held = show(WatchStatus::OnHold, 5, Some(12), false).after_undo(&planned);
+        assert_eq!(standing(&held), (WatchStatus::OnHold, false, 2, 4));
+        // A rewatch the recording ended comes back, and its count with it.
+        let ended = Recorded {
+            progress_before: 11,
+            progress: 12,
+            ..moved(ListStatus::Rewatching, ListStatus::Completed)
+        };
+        let again = show(WatchStatus::Completed, 12, Some(12), false).after_undo(&ended);
+        assert_eq!(standing(&again), (WatchStatus::Completed, true, 1, 11));
+        // A recording that moved nothing puts back progress alone.
+        let plain = Recorded {
+            status: None,
+            ..planned
+        };
+        let alone = show(WatchStatus::Watching, 5, None, false).after_undo(&plain);
+        assert_eq!(standing(&alone), (WatchStatus::Watching, false, 2, 4));
+    }
 
     #[test]
     fn playback_status_labels() {

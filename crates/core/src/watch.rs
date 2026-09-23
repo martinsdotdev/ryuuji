@@ -544,6 +544,7 @@ mod tests {
                 progress: 3,
                 at: at(800),
                 undone_at,
+                status: None,
             }),
         )
     }

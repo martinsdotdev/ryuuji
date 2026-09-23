@@ -1,0 +1,3 @@
+ALTER TABLE entries ADD COLUMN rewatched INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE history ADD COLUMN status_before TEXT;
+ALTER TABLE history ADD COLUMN status TEXT;

@@ -10,7 +10,7 @@ use std::time::SystemTime;
 use jiff::tz::TimeZone;
 use jiff::{Timestamp, ToSpan, Zoned};
 
-use crate::{Decline, EntryId, LibraryEntry, Link};
+use crate::{Decline, EntryId, LibraryEntry, Link, ListStatus};
 
 /// Identity of a stored history row. Only [`Store`](crate::Store) mints
 /// these.
@@ -92,6 +92,28 @@ pub struct Recorded {
     pub at: SystemTime,
     /// Undoing marks the row and puts `progress_before` back.
     pub undone_at: Option<SystemTime>,
+    /// Where the recording moved the show, when it moved it. Undoing puts
+    /// `before` back while the show still stands at `after`. `None` for a
+    /// recording that moved nothing, and for every row from before the
+    /// columns existed.
+    pub status: Option<StatusMove>,
+}
+
+/// A status a recording moved: where the show stood and where the episode
+/// put it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StatusMove {
+    pub before: ListStatus,
+    pub after: ListStatus,
+}
+
+impl StatusMove {
+    /// The move from one standing of a show to another, or `None` when the
+    /// status did not change.
+    pub(crate) fn between(before: &LibraryEntry, after: &LibraryEntry) -> Option<StatusMove> {
+        let (before, after) = (ListStatus::of(before), ListStatus::of(after));
+        (before != after).then_some(StatusMove { before, after })
+    }
 }
 
 /// The newest watches, and whether older ones lie past the limit.
@@ -336,6 +358,7 @@ mod tests {
             progress,
             total: None,
             rewatching: false,
+            rewatched: 0,
         }
     }
 
@@ -353,6 +376,7 @@ mod tests {
                 progress,
                 at: secs(160),
                 undone_at,
+                status: None,
             }),
             added_at: None,
             moved_to: None,

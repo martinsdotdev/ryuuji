@@ -2213,7 +2213,7 @@ mod tests {
     }
 
     #[test]
-    fn stopping_a_rewatch_leaves_the_count_and_refuses_the_next_episode() {
+    fn stopping_a_rewatch_puts_the_count_back_at_the_total_and_refuses_the_next_episode() {
         let (_tmp, dir) = open_tmp();
         let mut app = Ryuuji::open(&dir).unwrap();
         let id = finished_show(&mut app);
@@ -2228,10 +2228,11 @@ mod tests {
             id,
             rewatching: false,
         });
-        // The episode was watched, so the count stays where it reached.
-        assert_eq!(app.state().library[0].progress, 1);
+        // The show is finished again, so it stands at its total rather than
+        // where the rewatch broke off.
+        assert_eq!(app.state().library[0].progress, 12);
         watch_past_threshold(&mut app, "Show - 02.mkv");
-        assert_eq!(app.state().library[0].progress, 1);
+        assert_eq!(app.state().library[0].progress, 12);
         assert_eq!(outcome(&app), RecordOutcome::Declined(Decline::Completed));
     }
 
