@@ -1,0 +1,8 @@
+{
+  "status": 429,
+  "headers": { "Retry-After": "30", "X-RateLimit-Limit": "90", "X-RateLimit-Remaining": "0" },
+  "body": {
+    "data": null,
+    "errors": [{ "message": "Too Many Requests.", "status": 429 }]
+  }
+}

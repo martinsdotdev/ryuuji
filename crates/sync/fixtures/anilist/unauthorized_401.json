@@ -1,0 +1,8 @@
+{
+  "status": 401,
+  "headers": { "X-RateLimit-Limit": "90", "X-RateLimit-Remaining": "88" },
+  "body": {
+    "data": null,
+    "errors": [{ "message": "Unauthorized.", "status": 401 }]
+  }
+}

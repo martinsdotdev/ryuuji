@@ -1,0 +1,776 @@
+//! The thread the wire runs on. It owns the engine, the vault and the
+//! transport; the shell reaches it through [`Syncer`] and hears from it
+//! through the report queue, whose counter is what a shell holding only the
+//! latest value acts on: when the number moves, it drains `take_reports`.
+//! Diagnostics reads the lanes from a mirror the worker publishes after
+//! each step. No token leaves this module except inside a request.
+
+use std::collections::HashMap;
+use std::io;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::thread::{self, JoinHandle};
+use std::time::{Instant, SystemTime};
+
+use ryuuji_core::{Account, Report, Service, Signed, Task, Work};
+use tracing::{info, warn};
+
+use crate::engine::{Engine, Key, Next, Outcome, Pause, SPACING};
+use crate::http::{Http, Request, Response};
+use crate::reconcile::{self, Call, Reconcile};
+use crate::service::{Failure, Session};
+use crate::vault::Tokens;
+use crate::{Credentials, Token};
+
+type Transport = Box<dyn FnMut(&Request, Option<&Token>) -> Result<Response, Failure> + Send>;
+type OnReport = Box<dyn Fn(u64) + Send>;
+
+#[derive(Debug, thiserror::Error)]
+pub enum SyncError {
+    #[error("could not spawn the sync worker thread")]
+    Thread(#[source] io::Error),
+}
+
+/// Starts the worker. `on_report` is called on the worker thread with a
+/// number that never repeats, each time reports are queued; the shell then
+/// drains them with [`Syncer::take_reports`].
+pub fn start(on_report: impl Fn(u64) + Send + 'static) -> Result<Syncer, SyncError> {
+    let http = Http::new();
+    start_with(
+        Box::new(move |request, token| http.send(request, token)),
+        Box::new(on_report),
+    )
+}
+
+fn start_with(transport: Transport, on_report: OnReport) -> Result<Syncer, SyncError> {
+    let (tx, rx) = mpsc::channel();
+    let reports = Reports::default();
+    let mirror = Mirror::default();
+    let worker = Worker {
+        engine: Engine::default(),
+        vault: Tokens::default(),
+        calls: HashMap::new(),
+        transport,
+        last_sent: None,
+        run_remaining: None,
+        reports: reports.clone(),
+        on_report,
+        mirror: mirror.clone(),
+    };
+    let thread = thread::Builder::new()
+        .name("ryuuji-sync".to_owned())
+        .spawn(move || worker.run(rx))
+        .map_err(SyncError::Thread)?;
+    Ok(Syncer {
+        tx,
+        thread: Some(thread),
+        reports,
+        mirror,
+    })
+}
+
+/// The shell's handle on the worker. Dropping it stops the worker and
+/// waits for it.
+pub struct Syncer {
+    tx: Sender<Msg>,
+    thread: Option<JoinHandle<()>>,
+    reports: Reports,
+    mirror: Mirror,
+}
+
+impl Syncer {
+    /// Hands the worker everything to do. An equal post changes nothing: a
+    /// job already posted keeps its clock, one whose content changed starts
+    /// over, and one left out is dropped.
+    pub fn post(&self, work: &Work) {
+        let _ = self.tx.send(Msg::Work(work.clone()));
+    }
+
+    /// Checks the credentials against the service and keeps them when they
+    /// work. The answer comes as `Checking`, then `SignedIn` or
+    /// `NotSignedIn`.
+    pub fn sign_in(&self, service: Service, credentials: Credentials) {
+        let _ = self.tx.send(Msg::SignIn(service, credentials));
+    }
+
+    /// Forgets the token. The answer is `SignedOut`.
+    pub fn sign_out(&self, service: Service) {
+        let _ = self.tx.send(Msg::SignOut(service));
+    }
+
+    /// Every report queued since the last take, oldest first.
+    pub fn take_reports(&self) -> Vec<Report> {
+        self.reports.take()
+    }
+
+    /// Each lane as of the worker's last step. Never a token.
+    pub fn facts(&self) -> Vec<ServiceFacts> {
+        self.mirror.read()
+    }
+}
+
+impl Drop for Syncer {
+    fn drop(&mut self) {
+        let _ = self.tx.send(Msg::Stop);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// One lane as Diagnostics shows it: what the worker alone knows. The
+/// account is the core's, and the facts never come from the vault, so
+/// publishing them touches no credential store.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServiceFacts {
+    pub service: Service,
+    /// The message the service refused the kept token with, while nothing
+    /// runs until a sign-in.
+    pub stopped: Option<String>,
+    pub paused: Option<Paused>,
+    /// `X-RateLimit-Remaining` from the last answer that carried it.
+    pub rate_remaining: Option<u32>,
+    pub last_call: Option<LastCall>,
+    /// Jobs due now.
+    pub due: usize,
+    /// Jobs waiting on a settle or a backoff.
+    pub waiting: usize,
+    /// The run under way, if one is.
+    pub running: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Paused {
+    pub why: Pause,
+    pub until: SystemTime,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LastCall {
+    pub at: SystemTime,
+    /// The HTTP status, or `None` when the service could not be reached.
+    pub status: Option<u16>,
+}
+
+enum Msg {
+    Work(Work),
+    SignIn(Service, Credentials),
+    SignOut(Service),
+    Stop,
+}
+
+/// The reports waiting for the shell, and the count that tells it there
+/// are some.
+#[derive(Clone, Default)]
+struct Reports(Arc<Mutex<Queue>>);
+
+#[derive(Default)]
+struct Queue {
+    reports: Vec<Report>,
+    counter: u64,
+}
+
+impl Reports {
+    /// Queues `report` and returns the count, which never repeats.
+    fn queue(&self, report: Report) -> u64 {
+        let mut queue = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        queue.reports.push(report);
+        queue.counter += 1;
+        queue.counter
+    }
+
+    fn take(&self) -> Vec<Report> {
+        std::mem::take(
+            &mut self
+                .0
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .reports,
+        )
+    }
+}
+
+/// The facts Diagnostics reads. One writer; a poisoned lock is taken
+/// anyway, because the facts are a display copy nothing decides on.
+#[derive(Clone, Default)]
+struct Mirror(Arc<Mutex<Vec<ServiceFacts>>>);
+
+impl Mirror {
+    fn publish(&self, facts: Vec<ServiceFacts>) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = facts;
+    }
+
+    fn read(&self) -> Vec<ServiceFacts> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+}
+
+/// The last call to a service and the budget it named.
+#[derive(Default)]
+struct Calls {
+    last: Option<LastCall>,
+    remaining: Option<u32>,
+}
+
+struct Worker {
+    engine: Engine,
+    vault: Tokens,
+    calls: HashMap<Service, Calls>,
+    transport: Transport,
+    /// When the last request went out, so the next keeps its distance.
+    last_sent: Option<Instant>,
+    /// `X-RateLimit-Remaining` from the run under way.
+    run_remaining: Option<u32>,
+    reports: Reports,
+    on_report: OnReport,
+    mirror: Mirror,
+}
+
+impl Worker {
+    fn run(mut self, rx: Receiver<Msg>) {
+        self.publish();
+        loop {
+            let now = Instant::now();
+            let first = match self.engine.next(now) {
+                Next::Run(key) => {
+                    self.run_job(key);
+                    None
+                }
+                Next::Wait(until) => match rx.recv_timeout(until.saturating_duration_since(now)) {
+                    Ok(msg) => Some(msg),
+                    Err(RecvTimeoutError::Timeout) => None,
+                    Err(RecvTimeoutError::Disconnected) => return,
+                },
+                Next::Idle => match rx.recv() {
+                    Ok(msg) => Some(msg),
+                    Err(_) => return,
+                },
+            };
+            for msg in first.into_iter().chain(rx.try_iter()) {
+                match msg {
+                    Msg::Work(work) => self.engine.post(&work, Instant::now()),
+                    Msg::SignIn(service, credentials) => self.sign_in(service, credentials),
+                    Msg::SignOut(service) => self.sign_out(service),
+                    Msg::Stop => return,
+                }
+            }
+            self.publish();
+        }
+    }
+
+    /// Runs the job the engine picked and tells it how that went. What the
+    /// run found becomes a report; a refusal, a rejection and a missing
+    /// show become theirs; a throttle, an outage and a transient failure
+    /// are the engine's to wait out.
+    fn run_job(&mut self, key: Key) {
+        let Some(posted) = self.engine.posted(&key).cloned() else {
+            self.engine.finished(
+                key,
+                Outcome {
+                    failure: None,
+                    remaining: None,
+                },
+                Instant::now(),
+            );
+            return;
+        };
+        let service = key.service;
+        let entry = posted.job.entry;
+        self.run_remaining = None;
+        let session = Session::of(service);
+        let outcome = match &posted.job.task {
+            Task::Find { title } => session
+                .find(&mut |request| self.call(service, request), title)
+                .map(|candidates| Report::Found {
+                    service,
+                    entry,
+                    query: title.clone(),
+                    candidates,
+                }),
+            Task::Reconcile {
+                media,
+                wanted,
+                base,
+            } => {
+                let job = Reconcile {
+                    service,
+                    user: posted.user,
+                    entry,
+                    media: *media,
+                    wanted: *wanted,
+                    base: *base,
+                };
+                reconcile::run(&job, |call| match call {
+                    Call::Read { media } => {
+                        session.read(&mut |request| self.call(service, request), media)
+                    }
+                    Call::Save { media, id, write } => {
+                        session.save(&mut |request| self.call(service, request), media, id, write)
+                    }
+                })
+            }
+        };
+        let failure = outcome.as_ref().err().cloned();
+        match outcome {
+            Ok(report) => self.queue(report),
+            Err(Failure::Refused(message)) => {
+                warn!(service = service.tag(), %message, "token refused");
+                self.queue(Report::Refused { service, message });
+            }
+            Err(Failure::Rejected(message)) => match &posted.job.task {
+                Task::Reconcile { media, wanted, .. } => {
+                    warn!(
+                        service = service.tag(),
+                        entry = entry.as_i64(),
+                        %message,
+                        "write rejected"
+                    );
+                    self.queue(Report::Rejected {
+                        service,
+                        entry,
+                        media: *media,
+                        wanted: *wanted,
+                        message,
+                    });
+                }
+                Task::Find { title } => warn!(
+                    service = service.tag(),
+                    entry = entry.as_i64(),
+                    title = %title,
+                    %message,
+                    "search rejected"
+                ),
+            },
+            Err(Failure::NotFound) => match &posted.job.task {
+                Task::Reconcile { media, .. } => {
+                    info!(
+                        service = service.tag(),
+                        entry = entry.as_i64(),
+                        media = media.0,
+                        "media gone from the service"
+                    );
+                    self.queue(Report::Gone {
+                        service,
+                        entry,
+                        media: *media,
+                    });
+                }
+                Task::Find { title } => warn!(
+                    service = service.tag(),
+                    entry = entry.as_i64(),
+                    title = %title,
+                    "search answered not found"
+                ),
+            },
+            Err(failure @ (Failure::Throttled(_) | Failure::Offline | Failure::Transient)) => {
+                info!(
+                    service = service.tag(),
+                    entry = entry.as_i64(),
+                    %failure,
+                    "run held back"
+                );
+            }
+        }
+        self.engine.finished(
+            key,
+            Outcome {
+                failure,
+                remaining: self.run_remaining,
+            },
+            Instant::now(),
+        );
+    }
+
+    /// Checks a pasted token against the service. One that has already
+    /// passed its `exp` is not sent at all. One that works is kept, and the
+    /// lane runs again if a refusal had stopped it; one that does not is
+    /// kept nowhere.
+    fn sign_in(&mut self, service: Service, credentials: Credentials) {
+        self.queue(Report::Checking(service));
+        let Credentials::Token(token) = credentials;
+        let expires = token.expires();
+        if token.expired_at(SystemTime::now()) {
+            self.queue(Report::NotSignedIn {
+                service,
+                message: format!(
+                    "This {} token has already expired; get a new one from the site.",
+                    service.label()
+                ),
+            });
+            return;
+        }
+        let session = Session::of(service);
+        let checked = session.viewer(&mut |request| self.send(service, request, Some(&token)));
+        match checked {
+            Ok((user, name)) => {
+                self.vault.keep(service, token);
+                self.engine.signed_in(service);
+                info!(service = service.tag(), user = user.0, "signed in");
+                self.queue(Report::SignedIn(Account {
+                    service,
+                    user,
+                    name,
+                    expires,
+                    signed: Signed::In,
+                }));
+            }
+            Err(failure) => {
+                warn!(service = service.tag(), %failure, "sign-in failed");
+                self.queue(Report::NotSignedIn {
+                    service,
+                    message: failure.to_string(),
+                });
+            }
+        }
+    }
+
+    /// Forgets the token, and the work posted for it: a job that ran on
+    /// before the core posts again would meet the empty vault and report
+    /// a refusal for an account that is only signed out.
+    fn sign_out(&mut self, service: Service) {
+        self.vault.forget(service);
+        self.engine.signed_out(service);
+        info!(service = service.tag(), "signed out");
+        self.queue(Report::SignedOut(service));
+    }
+
+    fn queue(&self, report: Report) {
+        let count = self.reports.queue(report);
+        (self.on_report)(count);
+    }
+
+    /// Sends a request on `service`'s behalf with the kept token, or
+    /// refuses before sending when there is none or it has passed.
+    fn call(&mut self, service: Service, request: &Request) -> Result<Response, Failure> {
+        let token = if request.signed {
+            Some(self.token_for(service)?)
+        } else {
+            None
+        };
+        self.send(service, request, token.as_ref())
+    }
+
+    fn token_for(&self, service: Service) -> Result<Token, Failure> {
+        let Some(token) = self.vault.token(service) else {
+            return Err(Failure::Refused(format!(
+                "No {} token is kept on this computer; paste one in Settings.",
+                service.label()
+            )));
+        };
+        if token.expired_at(SystemTime::now()) {
+            return Err(Failure::Refused(format!(
+                "The {} token has expired; paste a new one in Settings.",
+                service.label()
+            )));
+        }
+        Ok(token)
+    }
+
+    /// The one way out: paced to the spacing, and noted for the facts.
+    fn send(
+        &mut self,
+        service: Service,
+        request: &Request,
+        token: Option<&Token>,
+    ) -> Result<Response, Failure> {
+        if let Some(last) = self.last_sent {
+            let until = last + SPACING;
+            let now = Instant::now();
+            if until > now {
+                thread::sleep(until - now);
+            }
+        }
+        self.last_sent = Some(Instant::now());
+        let result = (self.transport)(request, token);
+        let calls = self.calls.entry(service).or_default();
+        calls.last = Some(LastCall {
+            at: SystemTime::now(),
+            status: result.as_ref().ok().map(|response| response.status),
+        });
+        if let Ok(Response {
+            rate_remaining: Some(remaining),
+            ..
+        }) = &result
+        {
+            calls.remaining = Some(*remaining);
+            self.run_remaining = Some(*remaining);
+        }
+        result
+    }
+
+    fn publish(&self) {
+        let now = Instant::now();
+        let clock = SystemTime::now();
+        let facts = Service::ALL
+            .into_iter()
+            .map(|service| {
+                let lane = self.engine.facts(service, now);
+                let calls = self.calls.get(&service);
+                ServiceFacts {
+                    service,
+                    stopped: lane.stopped,
+                    paused: lane.paused.map(|(why, until)| Paused {
+                        why,
+                        until: clock + until.saturating_duration_since(now),
+                    }),
+                    rate_remaining: calls.and_then(|calls| calls.remaining),
+                    last_call: calls.and_then(|calls| calls.last),
+                    due: lane.due,
+                    waiting: lane.waiting,
+                    running: lane.running,
+                }
+            })
+            .collect();
+        self.mirror.publish(facts);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc::channel;
+    use std::time::Duration;
+
+    use ryuuji_core::{
+        Asked, Job, ListEntryId, ListState, ListStatus, MediaId, Remote, ServiceWork, UserId, When,
+    };
+    use serde_json::{Value, json};
+
+    use super::*;
+    use crate::engine::tests::entries;
+    use crate::tests::token_until;
+
+    const VIEWER: &str = include_str!("../fixtures/anilist/viewer.json");
+    const SEARCH: &str = include_str!("../fixtures/anilist/search.json");
+    const READ_LISTED: &str = include_str!("../fixtures/anilist/read_listed.json");
+    const SAVED: &str = include_str!("../fixtures/anilist/save.json");
+
+    const ANILIST: Service = Service::AniList;
+
+    /// What one request looked like to the fake transport.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct Seen {
+        operation: &'static str,
+        variables: Value,
+        signed: bool,
+    }
+
+    /// A transport answering from the fixtures by the operation asked, and
+    /// recording what it was asked.
+    fn fake(seen: Arc<Mutex<Vec<Seen>>>) -> Transport {
+        Box::new(move |request: &Request, token: Option<&Token>| {
+            let query = request.body["query"].as_str().expect("a query");
+            let operation = if query.contains("Viewer") {
+                "viewer"
+            } else if query.contains("SaveMediaListEntry") {
+                "save"
+            } else if query.contains("mediaListEntry") {
+                "read"
+            } else {
+                "find"
+            };
+            seen.lock().unwrap().push(Seen {
+                operation,
+                variables: request.body["variables"].clone(),
+                signed: token.is_some(),
+            });
+            Ok(Response::fixture(match operation {
+                "viewer" => VIEWER,
+                "save" => SAVED,
+                "read" => READ_LISTED,
+                _ => SEARCH,
+            }))
+        })
+    }
+
+    fn started(transport: Transport) -> (Syncer, Receiver<u64>) {
+        let (tx, rx) = channel();
+        let syncer = start_with(
+            transport,
+            Box::new(move |count| {
+                let _ = tx.send(count);
+            }),
+        )
+        .unwrap();
+        (syncer, rx)
+    }
+
+    fn next_count(counts: &Receiver<u64>) -> u64 {
+        counts
+            .recv_timeout(Duration::from_secs(30))
+            .expect("a report in time")
+    }
+
+    /// Polls until `probe` answers; the mirror is published a step after
+    /// the report that a test waited on.
+    fn wait_for<T>(mut probe: impl FnMut() -> Option<T>) -> T {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(found) = probe() {
+                return found;
+            }
+            assert!(Instant::now() < deadline, "not in time");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn state(status: ListStatus, progress: u32, repeat: u32) -> ListState {
+        ListState {
+            status,
+            progress,
+            repeat,
+        }
+    }
+
+    fn reconcile_now(entry: ryuuji_core::EntryId, wanted: ListState, base: ListState) -> Work {
+        Work {
+            services: vec![ServiceWork {
+                service: ANILIST,
+                user: UserId(7),
+                jobs: vec![Job {
+                    entry,
+                    task: Task::Reconcile {
+                        media: MediaId(154587),
+                        wanted,
+                        base: Some(base),
+                    },
+                    when: When::Now,
+                }],
+            }],
+        }
+    }
+
+    #[test]
+    fn a_sign_in_is_checked_then_kept_and_a_posted_reconcile_is_reported() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (syncer, counts) = started(fake(seen.clone()));
+        let token = token_until(4_102_444_800);
+        syncer.sign_in(ANILIST, Credentials::Token(token.clone()));
+        assert_eq!(next_count(&counts), 1);
+        assert_eq!(next_count(&counts), 2);
+        let account = Account {
+            service: ANILIST,
+            user: UserId(7),
+            name: "someone".into(),
+            expires: token.expires(),
+            signed: Signed::In,
+        };
+        assert_eq!(
+            syncer.take_reports(),
+            vec![Report::Checking(ANILIST), Report::SignedIn(account)]
+        );
+        assert_eq!(syncer.take_reports(), vec![]);
+
+        let [entry] = entries(1)[..] else {
+            unreachable!()
+        };
+        let base = state(ListStatus::Watching, 3, 0);
+        let wanted = state(ListStatus::Watching, 4, 0);
+        syncer.post(&reconcile_now(entry, wanted, base));
+        assert_eq!(next_count(&counts), 3);
+        assert_eq!(
+            syncer.take_reports(),
+            vec![Report::Reconciled {
+                service: ANILIST,
+                user: UserId(7),
+                entry,
+                media: MediaId(154587),
+                asked: Asked { wanted, base },
+                remote: Remote::Listed {
+                    id: Some(ListEntryId(381_234_567)),
+                    state: wanted,
+                },
+            }]
+        );
+
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(
+            seen.iter()
+                .map(|call| (call.operation, call.signed))
+                .collect::<Vec<_>>(),
+            vec![("viewer", true), ("read", true), ("save", true)]
+        );
+        assert_eq!(
+            seen[2].variables,
+            json!({ "id": 381_234_567, "mediaId": 154587, "progress": 4 })
+        );
+
+        let facts = wait_for(|| {
+            syncer
+                .facts()
+                .into_iter()
+                .find(|facts| facts.service == ANILIST && facts.running == 0 && facts.due == 0)
+        });
+        assert_eq!(facts.stopped, None);
+        assert_eq!(facts.rate_remaining, Some(89));
+        assert_eq!(facts.last_call.map(|call| call.status), Some(Some(200)));
+        assert_eq!(facts.paused, None);
+        assert_eq!((facts.due, facts.waiting, facts.running), (0, 0, 0));
+    }
+
+    #[test]
+    fn a_passed_token_is_refused_before_any_request_and_so_is_a_lane_with_none() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (syncer, counts) = started(fake(seen.clone()));
+        assert_eq!(
+            wait_for(|| syncer.facts().into_iter().find(|f| f.service == ANILIST)).stopped,
+            None
+        );
+        syncer.sign_in(ANILIST, Credentials::Token(token_until(1)));
+        assert_eq!(next_count(&counts), 1);
+        assert_eq!(next_count(&counts), 2);
+        assert_eq!(
+            syncer.take_reports(),
+            vec![
+                Report::Checking(ANILIST),
+                Report::NotSignedIn {
+                    service: ANILIST,
+                    message: "This AniList token has already expired; get a new one from the site."
+                        .into(),
+                },
+            ]
+        );
+
+        let [entry] = entries(1)[..] else {
+            unreachable!()
+        };
+        let held = state(ListStatus::Watching, 3, 0);
+        syncer.post(&reconcile_now(
+            entry,
+            state(ListStatus::Watching, 4, 0),
+            held,
+        ));
+        assert_eq!(next_count(&counts), 3);
+        let message = "No AniList token is kept on this computer; paste one in Settings.";
+        assert_eq!(
+            syncer.take_reports(),
+            vec![Report::Refused {
+                service: ANILIST,
+                message: message.into(),
+            }]
+        );
+        assert!(seen.lock().unwrap().is_empty(), "a request went out");
+        let facts = wait_for(|| {
+            syncer
+                .facts()
+                .into_iter()
+                .find(|facts| facts.service == ANILIST && facts.stopped.is_some())
+        });
+        assert_eq!(facts.stopped.as_deref(), Some(message));
+        assert_eq!(facts.last_call, None);
+
+        // The sign-out lifts the refusal with the job it stopped.
+        syncer.sign_out(ANILIST);
+        assert_eq!(next_count(&counts), 4);
+        assert_eq!(syncer.take_reports(), vec![Report::SignedOut(ANILIST)]);
+        let facts = wait_for(|| {
+            syncer
+                .facts()
+                .into_iter()
+                .find(|facts| facts.service == ANILIST && facts.stopped.is_none())
+        });
+        assert_eq!((facts.due, facts.waiting, facts.running), (0, 0, 0));
+    }
+}
