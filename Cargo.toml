@@ -47,3 +47,11 @@ ureq = { version = "3", default-features = false, features = ["rustls"] }
 # The JWT payload of a pasted token. The version and features are the ones
 # ureq already brings, so nothing new lands in the lock.
 base64 = { version = "0.23", default-features = false, features = ["std"] }
+# The token in Windows' Credential Manager. An entry is built with its
+# `persistence` modifier set to Local, since the store's default is
+# Enterprise, which roams with a domain profile; the token goes in as UTF-8
+# through `set_secret`, since `set_password` stores UTF-16 and halves the
+# 2560-byte blob. No `search`: it would bring regex in for an enumeration
+# nothing here does.
+keyring-core = "1"
+windows-native-keyring-store = { version = "1.1", default-features = false }

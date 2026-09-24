@@ -10,6 +10,9 @@ mod engine;
 mod http;
 mod reconcile;
 mod service;
+// The vault's helpers for Credential Manager are portable so their tests run
+// everywhere; where memory is the store they are compiled and idle.
+#[cfg_attr(not(windows), allow(dead_code))]
 mod vault;
 mod worker;
 
