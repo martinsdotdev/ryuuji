@@ -37,18 +37,23 @@ pub enum SyncError {
 pub fn start(on_report: impl Fn(u64) + Send + 'static) -> Result<Syncer, SyncError> {
     let http = Http::new();
     start_with(
+        Tokens::default(),
         Box::new(move |request, token| http.send(request, token)),
         Box::new(on_report),
     )
 }
 
-fn start_with(transport: Transport, on_report: OnReport) -> Result<Syncer, SyncError> {
+fn start_with(
+    vault: Tokens,
+    transport: Transport,
+    on_report: OnReport,
+) -> Result<Syncer, SyncError> {
     let (tx, rx) = mpsc::channel();
     let reports = Reports::default();
     let mirror = Mirror::default();
     let worker = Worker {
         engine: Engine::default(),
-        vault: Tokens::default(),
+        vault,
         calls: HashMap::new(),
         transport,
         last_sent: None,
@@ -387,7 +392,9 @@ impl Worker {
     /// Checks a pasted token against the service. One that has already
     /// passed its `exp` is not sent at all. One that works is kept, and the
     /// lane runs again if a refusal had stopped it; one that does not is
-    /// kept nowhere.
+    /// kept nowhere. One the vault would not keep is not signed in either:
+    /// every signed request reads the vault, so a token that is not there
+    /// would fail the first of them.
     fn sign_in(&mut self, service: Service, credentials: Credentials) {
         self.queue(Report::Checking(service));
         let Credentials::Token(token) = credentials;
@@ -406,7 +413,16 @@ impl Worker {
         let checked = session.viewer(&mut |request| self.send(service, request, Some(&token)));
         match checked {
             Ok((user, name)) => {
-                self.vault.keep(service, token);
+                if let Err(error) = self.vault.keep(service, token) {
+                    warn!(service = service.tag(), %error, "token not kept");
+                    self.queue(Report::NotSignedIn {
+                        service,
+                        message: format!(
+                            "Couldn't keep the token in Windows Credential Manager: {error}"
+                        ),
+                    });
+                    return;
+                }
                 self.engine.signed_in(service);
                 info!(service = service.tag(), user = user.0, "signed in");
                 self.queue(Report::SignedIn(Account {
@@ -429,9 +445,13 @@ impl Worker {
 
     /// Forgets the token, and the work posted for it: a job that ran on
     /// before the core posts again would meet the empty vault and report
-    /// a refusal for an account that is only signed out.
+    /// a refusal for an account that is only signed out. A vault that
+    /// would not let go is logged and the sign-out reported anyway; the
+    /// next sign-in overwrites what stayed.
     fn sign_out(&mut self, service: Service) {
-        self.vault.forget(service);
+        if let Err(error) = self.vault.forget(service) {
+            warn!(service = service.tag(), %error, "token not forgotten");
+        }
         self.engine.signed_out(service);
         info!(service = service.tag(), "signed out");
         self.queue(Report::SignedOut(service));
@@ -454,7 +474,13 @@ impl Worker {
     }
 
     fn token_for(&self, service: Service) -> Result<Token, Failure> {
-        let Some(token) = self.vault.token(service) else {
+        let kept = self.vault.token(service).map_err(|error| {
+            Failure::Refused(format!(
+                "Couldn't read the {} token from Windows Credential Manager: {error}",
+                service.label()
+            ))
+        })?;
+        let Some(token) = kept else {
             return Err(Failure::Refused(format!(
                 "No {} token is kept on this computer; paste one in Settings.",
                 service.label()
@@ -541,6 +567,7 @@ mod tests {
     use super::*;
     use crate::engine::tests::entries;
     use crate::tests::token_until;
+    use crate::vault::{Doing, VaultError};
 
     const VIEWER: &str = include_str!("../fixtures/anilist/viewer.json");
     const SEARCH: &str = include_str!("../fixtures/anilist/search.json");
@@ -586,8 +613,13 @@ mod tests {
     }
 
     fn started(transport: Transport) -> (Syncer, Receiver<u64>) {
+        started_with(Tokens::default(), transport)
+    }
+
+    fn started_with(vault: Tokens, transport: Transport) -> (Syncer, Receiver<u64>) {
         let (tx, rx) = channel();
         let syncer = start_with(
+            vault,
             transport,
             Box::new(move |count| {
                 let _ = tx.send(count);
@@ -772,5 +804,56 @@ mod tests {
                 .find(|facts| facts.service == ANILIST && facts.stopped.is_none())
         });
         assert_eq!((facts.due, facts.waiting, facts.running), (0, 0, 0));
+    }
+
+    #[test]
+    fn a_token_the_vault_will_not_keep_is_not_signed_in_and_never_used() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let vault = Tokens::refusing(|| VaultError::Store {
+            doing: Doing::Write,
+            message: "Platform failure: Windows error code 5".into(),
+        });
+        let (syncer, counts) = started_with(vault, fake(seen.clone()));
+        syncer.sign_in(ANILIST, Credentials::Token(token_until(4_102_444_800)));
+        assert_eq!(next_count(&counts), 1);
+        assert_eq!(next_count(&counts), 2);
+        assert_eq!(
+            syncer.take_reports(),
+            vec![
+                Report::Checking(ANILIST),
+                Report::NotSignedIn {
+                    service: ANILIST,
+                    message: "Couldn't keep the token in Windows Credential Manager: writing \
+                              the credential failed: Platform failure: Windows error code 5"
+                        .into(),
+                },
+            ]
+        );
+
+        let [entry] = entries(1)[..] else {
+            unreachable!()
+        };
+        syncer.post(&reconcile_now(
+            entry,
+            state(ListStatus::Watching, 4, 0),
+            state(ListStatus::Watching, 3, 0),
+        ));
+        assert_eq!(next_count(&counts), 3);
+        assert_eq!(
+            syncer.take_reports(),
+            vec![Report::Refused {
+                service: ANILIST,
+                message: "No AniList token is kept on this computer; paste one in Settings.".into(),
+            }]
+        );
+        // The check went out with the pasted token; nothing after it did.
+        assert_eq!(
+            seen.lock()
+                .unwrap()
+                .iter()
+                .map(|call| (call.operation, call.signed))
+                .collect::<Vec<_>>(),
+            vec![("viewer", true)]
+        );
     }
 }
