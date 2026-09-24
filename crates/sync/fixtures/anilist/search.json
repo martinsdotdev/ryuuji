@@ -1,0 +1,47 @@
+{
+  "status": 200,
+  "headers": { "X-RateLimit-Limit": "90", "X-RateLimit-Remaining": "89" },
+  "body": {
+    "data": {
+      "Page": {
+        "media": [
+          {
+            "id": 154587,
+            "idMal": 52991,
+            "title": {
+              "romaji": "Sousou no Frieren",
+              "english": "Frieren: Beyond Journey's End",
+              "native": "葬送のフリーレン"
+            },
+            "synonyms": ["Frieren at the Funeral", "Frieren"],
+            "episodes": 28,
+            "format": "TV",
+            "seasonYear": 2023
+          },
+          {
+            "id": 182255,
+            "idMal": null,
+            "title": {
+              "romaji": "Sousou no Frieren 2nd Season",
+              "english": null,
+              "native": "葬送のフリーレン 第2期"
+            },
+            "synonyms": [],
+            "episodes": null,
+            "format": "TV",
+            "seasonYear": null
+          },
+          {
+            "id": 900001,
+            "idMal": null,
+            "title": { "romaji": null, "english": null, "native": "フリーレン" },
+            "synonyms": null,
+            "episodes": 1,
+            "format": null,
+            "seasonYear": 2024
+          }
+        ]
+      }
+    }
+  }
+}

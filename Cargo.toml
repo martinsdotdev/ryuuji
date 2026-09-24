@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/core", "crates/detect", "crates/parse", "crates/win"]
+members = ["crates/core", "crates/detect", "crates/parse", "crates/sync", "crates/win"]
 
 [workspace.package]
 version = "0.1.0"
@@ -12,6 +12,7 @@ repository = "https://github.com/martinsdotdev/ryuuji"
 ryuuji-core = { path = "crates/core" }
 ryuuji-detect = { path = "crates/detect" }
 ryuuji-parse = { path = "crates/parse" }
+ryuuji-sync = { path = "crates/sync" }
 # windows-reactor is not published yet (crates.io holds 0.0.0 placeholders),
 # so pin a specific windows-rs commit. This one includes Windows App SDK 2.4.0.
 windows-reactor = { git = "https://github.com/microsoft/windows-rs", rev = "acaaa37be53e68f8c1be575d24dcbebce1e92b1a" }
@@ -39,3 +40,10 @@ serde_json = "1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 clipboard-win = { version = "5", features = ["std"] }
+# rustls alone: TLS with webpki's bundled roots and no system library, so the
+# ubuntu job needs nothing installed; gzip is left off because nothing here
+# asks for compressed answers.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+# The JWT payload of a pasted token. The version and features are the ones
+# ureq already brings, so nothing new lands in the lock.
+base64 = { version = "0.23", default-features = false, features = ["std"] }

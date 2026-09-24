@@ -1,0 +1,9 @@
+{
+  "status": 200,
+  "headers": { "X-RateLimit-Limit": "90", "X-RateLimit-Remaining": "89" },
+  "body": {
+    "data": {
+      "Viewer": { "id": 7, "name": "someone" }
+    }
+  }
+}
