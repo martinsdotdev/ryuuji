@@ -29,7 +29,7 @@ pub use data_dir::{DataDir, DataDirError, DataDirSource};
 pub use diagnostics::{ByteSize, Diagnostics, FileFacts, FileStat, ProbeFailed};
 pub use history::{
     Day, HistoryId, HistoryPage, Line, NewRecording, Recorded, StatusMove, Watch, WatchOutcome,
-    date_time, days, time_of_day, week_start,
+    date, date_time, days, time_of_day, week_start,
 };
 // The zone history reads its local days in; a shell passes the system's.
 pub use jiff::tz::TimeZone;

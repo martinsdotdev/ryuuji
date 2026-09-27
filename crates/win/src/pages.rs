@@ -1,11 +1,11 @@
 //! Page bodies. The Library lists real entries, Settings is laid out in the
-//! Windows Settings idiom (section headers and cards) with the theme picker,
-//! the data folder and the way into Diagnostics, and Now playing shows the
-//! last playback observation on a card, or a placeholder in the symbolic
-//! empty-state style the UI-direction research settled on (heading required,
-//! neutral tone). History lives in its own module and is the one page handed
-//! the core handle, since it reads its rows on demand. Details are built by
-//! the shell, so this module never sees the log buffer.
+//! Windows Settings idiom (section headers and cards) with the accounts, the
+//! theme picker, the data folder and the way into Diagnostics, and Now
+//! playing shows the last playback observation on a card, or a placeholder
+//! in the symbolic empty-state style the UI-direction research settled on
+//! (heading required, neutral tone). History lives in its own module and is
+//! the one page handed the core handle, since it reads its rows on demand.
+//! Details are built by the shell, so this module never sees the log buffer.
 
 use std::cell::RefCell;
 use std::ops::RangeInclusive;
@@ -14,16 +14,18 @@ use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 
 use ryuuji_core::{
-    AppState, Certainty, Command, DataDir, Detail, ElementKind, EntryId, LibraryEntry, Link,
-    Notice, NowPlaying, Options, Page, ProposedMatch, RecordOutcome, Ryuuji, StoreError,
-    ThemePreference, WatchProgress, WatchStatus, error_chain, normalize_title, parse,
+    Account, AppState, Attempt, Certainty, Command, DataDir, Detail, ElementKind, EntryId,
+    LibraryEntry, Link, Notice, NowPlaying, Options, Page, ProposedMatch, RecordOutcome, Ryuuji,
+    Service, Signed, StoreError, ThemePreference, TimeZone, WatchProgress, WatchStatus, date,
+    error_chain, normalize_title, parse,
 };
+use ryuuji_sync::{Credentials, SyncError, Syncer, Token, TokenError, authorize_url};
 use windows_reactor::*;
 
 use crate::history::{self, HistoryProps};
 use crate::ui::{
     self, APP_VERSION, BUILD_PROFILE, CONTENT_MAX_WIDTH, FOLDER_GLYPH, REPAIR_GLYPH, age_of,
-    caption, card, card_frame, enum_picker, episode_text, placeholder, section, table,
+    caption, card, card_frame, enum_picker, episode_text, heading, placeholder, section, table,
 };
 
 const PAGE_PADDING: f64 = 24.0;
@@ -99,6 +101,7 @@ pub fn body(
     dir: &DataDir,
     detection_down: bool,
     core: &Rc<RefCell<Ryuuji>>,
+    syncer: &Rc<std::result::Result<Syncer, SyncError>>,
 ) -> Element {
     match page {
         Page::Library => component(
@@ -140,6 +143,9 @@ pub fn body(
                 dispatch,
                 theme: state.settings.theme,
                 root: dir.root().to_path_buf(),
+                accounts: state.sync.accounts.clone(),
+                attempt: state.sync.attempt.clone(),
+                syncer: syncer.clone(),
             },
         ),
     }
@@ -830,11 +836,29 @@ fn duration_text(value: Duration) -> String {
 
 /// What Settings shows. The outcome of the last folder action is the page's
 /// own, so it lives in the page rather than in the shell.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone)]
 struct SettingsProps {
     dispatch: Dispatch<Command>,
     theme: ThemePreference,
     root: PathBuf,
+    accounts: Vec<Account>,
+    attempt: Option<Attempt>,
+    /// The sync worker, or why it is not running; the cards sign in and out
+    /// through it.
+    syncer: Rc<std::result::Result<Syncer, SyncError>>,
+}
+
+/// Identity for the worker handle, contents for the rest. `dispatch` is
+/// fresh every render, so this never holds today.
+impl PartialEq for SettingsProps {
+    fn eq(&self, other: &SettingsProps) -> bool {
+        self.dispatch == other.dispatch
+            && self.theme == other.theme
+            && self.root == other.root
+            && self.accounts == other.accounts
+            && self.attempt == other.attempt
+            && Rc::ptr_eq(&self.syncer, &other.syncer)
+    }
 }
 
 fn settings(props: &SettingsProps, cx: &mut RenderCx) -> Element {
@@ -845,8 +869,28 @@ fn settings(props: &SettingsProps, cx: &mut RenderCx) -> Element {
         let dispatch = dispatch.clone();
         move || dispatch.call(Command::OpenDetail(Detail::Diagnostics))
     };
+    // One card per service, whatever its standing, so the way in is always
+    // where it was.
+    let accounts: Vec<Element> = std::iter::once(section("Accounts").into())
+        .chain(Service::ALL.into_iter().map(|service| {
+            component(
+                account_card,
+                AccountCardProps {
+                    service,
+                    account: props
+                        .accounts
+                        .iter()
+                        .find(|account| account.service == service)
+                        .cloned(),
+                    attempt: props.attempt.clone(),
+                    syncer: props.syncer.clone(),
+                },
+            )
+        }))
+        .collect();
     scroll_viewer(
         vstack((
+            vstack(accounts).spacing(8.0),
             vstack((section("Appearance"), theme_card(props.theme, dispatch))).spacing(8.0),
             vstack((
                 section("Your data"),
@@ -878,6 +922,207 @@ fn settings(props: &SettingsProps, cx: &mut RenderCx) -> Element {
     .into()
 }
 
+/// What one service's card on Settings is handed. The card is a component of
+/// its own because the paste belongs to the card that takes it: it lives in
+/// the card's state until Sign in is pressed and goes nowhere else, never
+/// into a command, the app state, a notice or a log.
+#[derive(Clone)]
+struct AccountCardProps {
+    service: Service,
+    account: Option<Account>,
+    attempt: Option<Attempt>,
+    syncer: Rc<std::result::Result<Syncer, SyncError>>,
+}
+
+/// Identity for the worker handle, contents for the rest.
+impl PartialEq for AccountCardProps {
+    fn eq(&self, other: &AccountCardProps) -> bool {
+        self.service == other.service
+            && self.account == other.account
+            && self.attempt == other.attempt
+            && Rc::ptr_eq(&self.syncer, &other.syncer)
+    }
+}
+
+fn account_card(props: &AccountCardProps, cx: &mut RenderCx) -> Element {
+    let (pasted, set_pasted) = cx.use_state(String::new());
+    let (problem, set_problem) = cx.use_state(None::<&'static str>);
+    let service = props.service;
+    let shown = account_card_state(
+        service,
+        props.account.as_ref(),
+        props.attempt.as_ref(),
+        props.syncer.is_ok(),
+        &ui::local_zone(),
+    );
+    let body: Element = match shown {
+        AccountCard::Unavailable(text) => heading(service.label(), text).into(),
+        // A ring, not a bar: the person waits on this one.
+        AccountCard::Checking(text) => vstack((
+            text_block(service.label()),
+            hstack((
+                ProgressRing::indeterminate().width(20.0).height(20.0),
+                caption(text).vertical_alignment(VerticalAlignment::Center),
+            ))
+            .spacing(12.0),
+        ))
+        .spacing(8.0)
+        .into(),
+        AccountCard::SignedIn { who, until } => {
+            let syncer = props.syncer.clone();
+            vstack((
+                text_block(service.label()),
+                text_block(who),
+                caption(until),
+                button("Sign out")
+                    .on_click(move || {
+                        if let Ok(syncer) = &*syncer {
+                            syncer.sign_out(service);
+                        }
+                    })
+                    .horizontal_alignment(HorizontalAlignment::Left),
+            ))
+            .spacing(4.0)
+            .into()
+        }
+        AccountCard::Paste {
+            caption: why,
+            refused,
+            failed,
+        } => {
+            let mut lines: Vec<Element> = vec![heading(service.label(), why).into()];
+            if let Some(refused) = refused {
+                lines.push(caption(refused).wrap().into());
+            }
+            lines.push(
+                HyperlinkButton::new("Get a token")
+                    .navigate_uri(token_page(service))
+                    .into(),
+            );
+            let sign_in = {
+                let syncer = props.syncer.clone();
+                let set_pasted = set_pasted.clone();
+                let set_problem = set_problem.clone();
+                let pasted = pasted.clone();
+                move || match parse_paste(service, &pasted) {
+                    Ok(token) => {
+                        set_problem.call(None);
+                        set_pasted.call(String::new());
+                        if let Ok(syncer) = &*syncer {
+                            syncer.sign_in(service, Credentials::Token(token));
+                        }
+                    }
+                    Err(problem) => set_problem.call(Some(problem)),
+                }
+            };
+            lines.push(
+                hstack((
+                    PasswordBox::new()
+                        .value(pasted.clone())
+                        .placeholder_text("Token")
+                        .on_password_changed(set_pasted.clone())
+                        // A row gives the box all the width it asks for, and a
+                        // pasted token is about a thousand characters: a fixed
+                        // width keeps Sign in on the card.
+                        .width(360.0),
+                    button("Sign in").accent().on_click(sign_in),
+                ))
+                .spacing(8.0)
+                .into(),
+            );
+            // The paste's own problem is the newer word, so it stands in
+            // for a failed check's message until the next Sign in.
+            if let Some(under) = problem.map(str::to_owned).or(failed) {
+                lines.push(caption(under).wrap().into());
+            }
+            vstack(lines).spacing(8.0).into()
+        }
+    };
+    card_frame(body).into()
+}
+
+/// What the account card shows for one service, decided from the state
+/// alone so it can be pinned without WinUI.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AccountCard {
+    /// The worker never started, so nothing can be checked or sent.
+    Unavailable(String),
+    /// A pasted token is being checked; the person waits on the answer.
+    Checking(String),
+    /// The paste controls under `caption`: before any sign-in, after a
+    /// sign-out, after a refusal (`refused` says why, above the controls)
+    /// and after a failed check (`failed` says why, under the box).
+    Paste {
+        caption: String,
+        refused: Option<String>,
+        failed: Option<String>,
+    },
+    /// Signed in: who, and until when the token works.
+    SignedIn { who: String, until: String },
+}
+
+fn account_card_state(
+    service: Service,
+    account: Option<&Account>,
+    attempt: Option<&Attempt>,
+    available: bool,
+    zone: &TimeZone,
+) -> AccountCard {
+    let label = service.label();
+    if !available {
+        return AccountCard::Unavailable(format!(
+            "Sync isn't running, so nothing can be sent to {label} this time. Diagnostics says what went wrong."
+        ));
+    }
+    if matches!(attempt, Some(Attempt::Checking(checking)) if *checking == service) {
+        return AccountCard::Checking(format!("Checking with {label}\u{2026}"));
+    }
+    let failed = match attempt {
+        Some(Attempt::Failed {
+            service: failed,
+            message,
+        }) if *failed == service => Some(message.clone()),
+        _ => None,
+    };
+    let caption = format!("Paste the token {label} shows after you allow Ryuuji.");
+    match account.map(|account| (&account.signed, account)) {
+        Some((Signed::In, account)) => AccountCard::SignedIn {
+            who: format!("Signed in as {}", account.name),
+            until: match account.expires {
+                Some(at) => format!("Token works until {}", date(at, zone)),
+                None => "No expiry date in the token".to_owned(),
+            },
+        },
+        Some((Signed::Refused { message }, _)) => AccountCard::Paste {
+            caption,
+            refused: Some(format!("{label} refused the token: {message}")),
+            failed,
+        },
+        Some((Signed::Out, _)) | None => AccountCard::Paste {
+            caption,
+            refused: None,
+            failed,
+        },
+    }
+}
+
+/// The token in a paste, or what to say under the box instead. [`Token::parse`]
+/// is the one judge, so a paste it refuses is never sent; the words are the
+/// card's.
+fn parse_paste(service: Service, pasted: &str) -> std::result::Result<Token, &'static str> {
+    Token::parse(pasted).map_err(|error| match (service, error) {
+        (Service::AniList, TokenError::Empty) => "Paste the token first.",
+        (Service::AniList, TokenError::NotAToken) => "That doesn't look like an AniList token.",
+    })
+}
+
+/// Where the person is sent for a token.
+fn token_page(service: Service) -> String {
+    match service {
+        Service::AniList => authorize_url(),
+    }
+}
+
 /// The theme picker, a drop-down like Windows Settings' "Choose your mode".
 fn theme_card(theme: ThemePreference, dispatch: Dispatch<Command>) -> Border {
     let combo = enum_picker(
@@ -897,9 +1142,162 @@ fn theme_card(theme: ThemePreference, dispatch: Dispatch<Command>) -> Border {
 
 #[cfg(test)]
 mod tests {
-    use ryuuji_core::{Decline, Link, NewEntry, NewRecording, Opened, Store, WatchStatus};
+    use std::time::UNIX_EPOCH;
+
+    use ryuuji_core::{Decline, Link, NewEntry, NewRecording, Opened, Store, UserId, WatchStatus};
 
     use super::*;
+
+    /// A JWT with a fixed header, the payload `{"exp":1790121600,"sub":"7"}`
+    /// and a signature nothing verifies: what a good paste looks like.
+    const GOOD_PASTE: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3OTAxMjE2MDAsInN1YiI6IjcifQ.bm90IGEgcmVhbCBzaWduYXR1cmU";
+
+    fn account(signed: Signed, expires: Option<SystemTime>) -> Account {
+        Account {
+            service: Service::AniList,
+            user: UserId(7),
+            name: "someone".into(),
+            expires,
+            signed,
+        }
+    }
+
+    fn paste(refused: Option<&str>, failed: Option<&str>) -> AccountCard {
+        AccountCard::Paste {
+            caption: "Paste the token AniList shows after you allow Ryuuji.".into(),
+            refused: refused.map(str::to_owned),
+            failed: failed.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn the_account_card_says_where_the_sign_in_stands() {
+        let card = |account: Option<&Account>, attempt: Option<&Attempt>| {
+            account_card_state(Service::AniList, account, attempt, true, &TimeZone::UTC)
+        };
+        assert_eq!(card(None, None), paste(None, None));
+        assert_eq!(
+            card(Some(&account(Signed::Out, None)), None),
+            paste(None, None)
+        );
+        assert_eq!(
+            card(None, Some(&Attempt::Checking(Service::AniList))),
+            AccountCard::Checking("Checking with AniList\u{2026}".into())
+        );
+        let failed = Attempt::Failed {
+            service: Service::AniList,
+            message: "Invalid token".into(),
+        };
+        assert_eq!(
+            card(None, Some(&failed)),
+            paste(None, Some("Invalid token"))
+        );
+        let refused = account(
+            Signed::Refused {
+                message: "Unauthorized.".into(),
+            },
+            None,
+        );
+        assert_eq!(
+            card(Some(&refused), None),
+            paste(Some("AniList refused the token: Unauthorized."), None)
+        );
+        // A paste that failed after a refusal is the newer word, and both
+        // are said in their places.
+        assert_eq!(
+            card(Some(&refused), Some(&failed)),
+            paste(
+                Some("AniList refused the token: Unauthorized."),
+                Some("Invalid token")
+            )
+        );
+    }
+
+    #[test]
+    fn a_signed_in_card_names_the_person_and_the_local_day_the_token_works_until() {
+        // 2026-09-23T00:00:00Z: the 22nd three hours west of Greenwich.
+        let expires = UNIX_EPOCH + Duration::from_secs(1_790_121_600);
+        let signed_in = account(Signed::In, Some(expires));
+        assert_eq!(
+            account_card_state(
+                Service::AniList,
+                Some(&signed_in),
+                None,
+                true,
+                &TimeZone::UTC
+            ),
+            AccountCard::SignedIn {
+                who: "Signed in as someone".into(),
+                until: "Token works until 2026-09-23".into(),
+            }
+        );
+        let west = TimeZone::posix("<-03>3").unwrap();
+        assert_eq!(
+            account_card_state(Service::AniList, Some(&signed_in), None, true, &west),
+            AccountCard::SignedIn {
+                who: "Signed in as someone".into(),
+                until: "Token works until 2026-09-22".into(),
+            }
+        );
+        assert_eq!(
+            account_card_state(
+                Service::AniList,
+                Some(&account(Signed::In, None)),
+                None,
+                true,
+                &TimeZone::UTC
+            ),
+            AccountCard::SignedIn {
+                who: "Signed in as someone".into(),
+                until: "No expiry date in the token".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_worker_that_never_started_leaves_one_caption_whatever_the_account() {
+        let unavailable = AccountCard::Unavailable(
+            "Sync isn't running, so nothing can be sent to AniList this time. Diagnostics says what went wrong.".into(),
+        );
+        assert_eq!(
+            account_card_state(Service::AniList, None, None, false, &TimeZone::UTC),
+            unavailable
+        );
+        assert_eq!(
+            account_card_state(
+                Service::AniList,
+                Some(&account(Signed::In, None)),
+                Some(&Attempt::Checking(Service::AniList)),
+                false,
+                &TimeZone::UTC
+            ),
+            unavailable
+        );
+    }
+
+    #[test]
+    fn a_paste_is_judged_by_token_parse_and_a_bad_one_is_named_under_the_box() {
+        assert_eq!(
+            parse_paste(Service::AniList, "abc"),
+            Err("That doesn't look like an AniList token.")
+        );
+        assert_eq!(
+            parse_paste(Service::AniList, "a.b.c.d"),
+            Err("That doesn't look like an AniList token.")
+        );
+        assert_eq!(
+            parse_paste(Service::AniList, "  \n"),
+            Err("Paste the token first.")
+        );
+        let token = parse_paste(Service::AniList, &format!(" {GOOD_PASTE}\r\n")).unwrap();
+        assert_eq!(token, Token::parse(GOOD_PASTE).unwrap());
+    }
+
+    #[test]
+    fn the_token_page_is_the_services_authorize_url() {
+        assert_eq!(token_page(Service::AniList), authorize_url());
+        assert!(token_page(Service::AniList).contains(ryuuji_sync::CLIENT_ID));
+    }
 
     #[test]
     fn clock_text_formats_minutes_and_hours() {

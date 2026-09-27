@@ -806,6 +806,58 @@ mod tests {
         assert_eq!((facts.due, facts.waiting, facts.running), (0, 0, 0));
     }
 
+    /// After a relaunch the core still holds the account and the vault the
+    /// token, and this process saw no sign-in: the work the core posts
+    /// runs, and the reconcile's signed requests read the token from the
+    /// vault.
+    #[test]
+    fn work_posted_for_an_account_this_process_never_saw_sign_in_runs_on_the_kept_token() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut vault = Tokens::default();
+        vault.keep(ANILIST, token_until(4_102_444_800)).unwrap();
+        let (syncer, counts) = started_with(vault, fake(seen.clone()));
+
+        let [entry] = entries(1)[..] else {
+            unreachable!()
+        };
+        let base = state(ListStatus::Watching, 3, 0);
+        let wanted = state(ListStatus::Watching, 4, 0);
+        syncer.post(&reconcile_now(entry, wanted, base));
+        assert_eq!(next_count(&counts), 1);
+        assert_eq!(
+            syncer.take_reports(),
+            vec![Report::Reconciled {
+                service: ANILIST,
+                user: UserId(7),
+                entry,
+                media: MediaId(154587),
+                asked: Asked { wanted, base },
+                remote: Remote::Listed {
+                    id: Some(ListEntryId(381_234_567)),
+                    state: wanted,
+                },
+            }]
+        );
+        // Both requests went out signed, and nothing was pasted: the token
+        // was the vault's.
+        assert_eq!(
+            seen.lock()
+                .unwrap()
+                .iter()
+                .map(|call| (call.operation, call.signed))
+                .collect::<Vec<_>>(),
+            vec![("read", true), ("save", true)]
+        );
+        let facts = wait_for(|| {
+            syncer
+                .facts()
+                .into_iter()
+                .find(|facts| facts.service == ANILIST && facts.running == 0 && facts.due == 0)
+        });
+        assert_eq!(facts.stopped, None);
+        assert_eq!(facts.last_call.map(|call| call.status), Some(Some(200)));
+    }
+
     #[test]
     fn a_token_the_vault_will_not_keep_is_not_signed_in_and_never_used() {
         let seen = Arc::new(Mutex::new(Vec::new()));

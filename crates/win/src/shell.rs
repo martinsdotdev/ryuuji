@@ -11,6 +11,7 @@ use ryuuji_core::{
     ThemePreference, error_chain, watch_files,
 };
 use ryuuji_detect::{WatchError, Watcher};
+use ryuuji_sync::{SyncError, Syncer};
 use windows_reactor::{
     Component, Element, NavViewItem, NavigationView, NavigationViewPaneDisplayMode, RenderCx,
     RequestedTheme, Symbol, component, set_requested_theme,
@@ -111,6 +112,40 @@ impl Component for Shell {
                 }
             }
         });
+        // The sync worker lives for the Shell's life too. Its reports reach
+        // the core the way playback events do: the count moves, and the
+        // effect drains what queued. A worker that failed to start leaves
+        // sync off for the run, which the Settings card says.
+        let (synced, set_synced) = cx.use_async_state::<u64>(0);
+        let syncer: Rc<Result<Syncer, SyncError>> = cx.use_memo((), move || {
+            let started = ryuuji_sync::start(move |count| set_synced.call(count));
+            if let Err(err) = &started {
+                tracing::error!(error = %error_chain(err), "sync not started; nothing is sent to a list this run");
+            }
+            Rc::new(started)
+        });
+        cx.use_effect(synced, {
+            let syncer = syncer.clone();
+            let dispatch = dispatch.clone();
+            move || {
+                if let Ok(syncer) = &*syncer {
+                    for report in syncer.take_reports() {
+                        dispatch.call(Command::Synced(report));
+                    }
+                }
+            }
+        });
+        // Posted at mount as well, which is the sync at launch: the work is
+        // derived from the accounts and shows the core opened with.
+        let work = state.work();
+        cx.use_effect(work.clone(), {
+            let syncer = syncer.clone();
+            move || {
+                if let Ok(syncer) = &*syncer {
+                    syncer.post(&work);
+                }
+            }
+        });
 
         let menu_items = Page::ALL.into_iter().map(|page| {
             NavViewItem::new(page.label())
@@ -130,9 +165,11 @@ impl Component for Shell {
                 &self.dir,
                 detection_down,
                 core,
+                &syncer,
             ),
             // Built here rather than in `pages`: the props carry the core
-            // handle, the log buffer and the watcher, all owned by `Shell`.
+            // handle, the log buffer, the watcher and the sync worker, all
+            // owned by `Shell`.
             Body::Detail(Detail::Diagnostics) => component(
                 debug::diagnostics,
                 debug::DiagnosticsProps {
@@ -140,6 +177,7 @@ impl Component for Shell {
                     core: core.clone(),
                     recent: self.recent.clone(),
                     watcher: watcher.clone(),
+                    syncer: syncer.clone(),
                 },
             ),
         };
