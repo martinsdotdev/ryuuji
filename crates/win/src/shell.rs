@@ -13,8 +13,8 @@ use ryuuji_core::{
 use ryuuji_detect::{WatchError, Watcher};
 use ryuuji_sync::{SyncError, Syncer};
 use windows_reactor::{
-    Component, Element, NavViewItem, NavigationView, NavigationViewPaneDisplayMode, RenderCx,
-    RequestedTheme, Symbol, component, set_requested_theme,
+    Component, Element, Icon, NavViewItem, NavigationView, NavigationViewPaneDisplayMode, RenderCx,
+    RequestedTheme, component, set_requested_theme,
 };
 
 use crate::debug;
@@ -150,7 +150,7 @@ impl Component for Shell {
         let menu_items = Page::ALL.into_iter().map(|page| {
             NavViewItem::new(page.label())
                 .tag(page.tag())
-                .icon(icon_for(page))
+                .icon(Icon::font(glyph_for(page)))
         });
 
         let detection_down = watcher.is_err();
@@ -219,12 +219,14 @@ fn requested_theme(theme: ThemePreference) -> RequestedTheme {
     }
 }
 
-fn icon_for(page: Page) -> Symbol {
+/// Each page's Segoe Fluent Icons glyph, as the hi-fi design draws the pane.
+fn glyph_for(page: Page) -> &'static str {
     match page {
-        Page::Library => Symbol::Library,
-        Page::NowPlaying => Symbol::Play,
-        // The Symbol set has no History glyph; the clock is the nearest.
-        Page::History => Symbol::Clock,
-        Page::Settings => Symbol::Setting,
+        Page::Library => "\u{E8F1}",
+        Page::NowPlaying => "\u{E768}",
+        Page::History => "\u{E81C}",
+        Page::Seasons => "\u{E787}",
+        Page::Statistics => "\u{E9D9}",
+        Page::Settings => "\u{E713}",
     }
 }

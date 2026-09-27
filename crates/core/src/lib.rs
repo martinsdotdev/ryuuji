@@ -55,11 +55,15 @@ tagged_enum! {
     /// Every destination in the navigation pane, in pane order, so the
     /// variant list is the pane list. A view reached from a page rather than
     /// from the pane is a [`Detail`]. Tags are the navigation item tags.
+    /// Seasons and Statistics hold a place in the pane before their pages
+    /// are built.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum Page {
         Library => "library", "Library",
         NowPlaying => "now-playing", "Now playing",
         History => "history", "History",
+        Seasons => "seasons", "Seasons",
+        Statistics => "statistics", "Statistics",
         Settings => "settings", "Settings",
     }
 }
