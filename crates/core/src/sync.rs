@@ -184,6 +184,11 @@ impl Listing {
     pub fn base_for(&self, user: UserId) -> Option<&ListBase> {
         self.base.as_ref().filter(|base| base.user == user)
     }
+
+    /// The refusal the show is set aside with, while it is.
+    pub fn parked(&self) -> Option<&Parked> {
+        self.parked.as_ref()
+    }
 }
 
 /// Identity of a stored update row. Only [`Store`](crate::Store) mints

@@ -9,11 +9,13 @@ use std::rc::Rc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ryuuji_core::{
-    Command, DataDirSource, Diagnostics, FileFacts, FileStat, Link, PlaybackEvent, PlaybackSource,
-    PlaybackStatus, ProbeFailed, ProposedMatch, Recorded, Ryuuji, SchemaVersion, TimeZone, Watch,
-    WatchOutcome, date_time, error_chain,
+    Account, AppState, Command, DataDirSource, Diagnostics, FileFacts, FileStat, Link, Listing,
+    PlaybackEvent, PlaybackSource, PlaybackStatus, ProbeFailed, ProposedMatch, Recorded, Ryuuji,
+    SchemaVersion, Service, Signed, Task, Tie, TimeZone, Watch, WatchOutcome, Work, date_time,
+    error_chain,
 };
 use ryuuji_detect::{SessionFacts, WatchError, Watcher};
+use ryuuji_sync::{LastCall, Pause, Paused, ServiceFacts, SyncError, Syncer};
 use tracing::{Level, warn};
 use windows_reactor::*;
 
@@ -86,6 +88,10 @@ pub struct Report {
     pub events: Vec<EventRecord>,
     /// Every SMTC session at the last refresh, or why detection is off.
     pub sessions: std::result::Result<Vec<SessionFacts>, String>,
+    /// Each list service: its lane, its account and its shows.
+    pub lists: Vec<ListFacts>,
+    /// Why the sync worker is not running, while it is not.
+    pub sync_down: Option<String>,
     /// The zone the watches' times are printed in.
     pub zone: TimeZone,
 }
@@ -97,16 +103,20 @@ impl Report {
         core: &Ryuuji,
         recent: &RecentEvents,
         watcher: &std::result::Result<Watcher, WatchError>,
+        syncer: &std::result::Result<Syncer, SyncError>,
     ) -> Report {
         let sessions = watcher
             .as_ref()
             .map(Watcher::sessions)
             .map_err(|err| error_chain(err));
+        let lanes = syncer.as_ref().map(Syncer::facts).unwrap_or_default();
         Report::new(
             core.diagnostics(),
             core.state().last_match.clone(),
             recent.snapshot(),
             sessions,
+            list_facts(core.state(), &lanes),
+            syncer.as_ref().err().map(|err| error_chain(err)),
             ui::local_zone(),
         )
     }
@@ -116,6 +126,8 @@ impl Report {
         last_match: Option<ProposedMatch>,
         events: Vec<EventRecord>,
         sessions: std::result::Result<Vec<SessionFacts>, String>,
+        lists: Vec<ListFacts>,
+        sync_down: Option<String>,
         zone: TimeZone,
     ) -> Report {
         Report {
@@ -124,6 +136,8 @@ impl Report {
             last_match,
             events,
             sessions,
+            lists,
+            sync_down,
             zone,
         }
     }
@@ -218,12 +232,182 @@ impl Report {
             }
         }
         let _ = writeln!(out);
+        let _ = writeln!(out, "Lists:");
+        if let Some(why) = &self.sync_down {
+            let _ = writeln!(out, "  sync not running: {why}");
+        }
+        for list in &self.lists {
+            let _ = writeln!(out, "  {}", list.service.label());
+            for (label, value) in list_rows(list, now, &self.zone) {
+                let _ = writeln!(out, "    {label}: {value}");
+            }
+        }
+        let _ = writeln!(out);
         let _ = writeln!(out, "Recent events ({}):", self.events.len());
         for event in &self.events {
             let _ = writeln!(out, "{}", event_line(event));
         }
         out
     }
+}
+
+/// One list service as the Lists section shows it: the worker's lane, the
+/// account the core holds, and where its shows stand. None of it is a
+/// token: the lane's facts never carry one, and the account is the stored
+/// row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ListFacts {
+    pub service: Service,
+    pub account: Option<Account>,
+    /// The lane as the worker last published it; `None` while the worker
+    /// is not running.
+    pub lane: Option<ServiceFacts>,
+    pub shows: ShowCounts,
+}
+
+/// How the shows tied to a service stand, counted.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ShowCounts {
+    pub linked: usize,
+    /// The reconciles the core posts now: linked shows whose list differs
+    /// from what the library wants, and the ones the watched-ahead rule
+    /// asked about. Nothing while no account is signed in.
+    pub waiting: usize,
+    pub parked: usize,
+    pub unpicked: usize,
+    pub gone: usize,
+    pub off: usize,
+}
+
+/// The Lists facts, one per service, from the core's state and the lanes
+/// the worker published.
+pub fn list_facts(state: &AppState, lanes: &[ServiceFacts]) -> Vec<ListFacts> {
+    let work = state.work();
+    Service::ALL
+        .into_iter()
+        .map(|service| ListFacts {
+            service,
+            account: state
+                .sync
+                .accounts
+                .iter()
+                .find(|account| account.service == service)
+                .cloned(),
+            lane: lanes.iter().find(|lane| lane.service == service).cloned(),
+            shows: show_counts(&state.sync.listings, &work, service),
+        })
+        .collect()
+}
+
+fn show_counts(listings: &[Listing], work: &Work, service: Service) -> ShowCounts {
+    let mut counts = ShowCounts::default();
+    for listing in listings.iter().filter(|listing| listing.service == service) {
+        match listing.tie {
+            Tie::Linked { .. } => {
+                counts.linked += 1;
+                if listing.parked().is_some() {
+                    counts.parked += 1;
+                }
+            }
+            Tie::Unpicked { .. } => counts.unpicked += 1,
+            Tie::Gone { .. } => counts.gone += 1,
+            Tie::Off => counts.off += 1,
+        }
+    }
+    counts.waiting = work
+        .services
+        .iter()
+        .filter(|posted| posted.service == service)
+        .flat_map(|posted| &posted.jobs)
+        .filter(|job| matches!(job.task, Task::Reconcile { .. }))
+        .count();
+    counts
+}
+
+/// The facts one service gets, as label and value, in the order the report
+/// and the card both show them. The lane's rows are left out while the
+/// worker is not running.
+fn list_rows(list: &ListFacts, now: SystemTime, zone: &TimeZone) -> Vec<(&'static str, String)> {
+    let mut rows = vec![("Standing", standing_text(list, now, zone))];
+    if let Some(lane) = &list.lane {
+        rows.push(("Paused", pause_text(lane.paused, zone)));
+        rows.push(("Rate remaining", count_text(lane.rate_remaining)));
+        rows.push(("Last call", last_call_text(lane.last_call, zone)));
+        rows.push((
+            "Jobs",
+            format!(
+                "{} due, {} waiting, {} running",
+                lane.due, lane.waiting, lane.running
+            ),
+        ));
+    }
+    rows.push(("Shows", shows_text(&list.shows)));
+    rows
+}
+
+/// The account as the core holds it, with the one thing the worker alone
+/// knows laid over a signed-in one: a refusal the core has not taken yet.
+/// The expiry is judged against `now` here, since the core keeps the time
+/// the service gave and not a verdict on it.
+fn standing_text(list: &ListFacts, now: SystemTime, zone: &TimeZone) -> String {
+    let Some(account) = &list.account else {
+        return "not signed in".to_owned();
+    };
+    match &account.signed {
+        Signed::Out => "signed out".to_owned(),
+        Signed::Refused { message } => format!("refused: {message}"),
+        Signed::In => {
+            if let Some(message) = list.lane.as_ref().and_then(|lane| lane.stopped.as_deref()) {
+                format!("refused: {message}")
+            } else if account.expires.is_some_and(|at| at <= now) {
+                "token expired".to_owned()
+            } else {
+                signed_in_text(account, zone)
+            }
+        }
+    }
+}
+
+/// `signed in as someone (user 7), token works until 2026-09-23 00:00`,
+/// with the expiry only where the service gave one.
+fn signed_in_text(account: &Account, zone: &TimeZone) -> String {
+    let mut text = format!("signed in as {} (user {})", account.name, account.user.0);
+    if let Some(at) = account.expires {
+        let _ = write!(text, ", token works until {}", date_time(at, zone));
+    }
+    text
+}
+
+fn pause_text(paused: Option<Paused>, zone: &TimeZone) -> String {
+    match paused {
+        Some(Paused { why, until }) => {
+            let why = match why {
+                Pause::Throttled => "throttled",
+                Pause::Budget => "rate budget spent",
+                Pause::Offline => "offline",
+            };
+            format!("{why} until {}", date_time(until, zone))
+        }
+        None => "no".to_owned(),
+    }
+}
+
+fn last_call_text(last: Option<LastCall>, zone: &TimeZone) -> String {
+    match last {
+        Some(LastCall {
+            at,
+            status: Some(status),
+        }) => format!("{} status {status}", date_time(at, zone)),
+        Some(LastCall { at, status: None }) => format!("{} unreachable", date_time(at, zone)),
+        None => "none".to_owned(),
+    }
+}
+
+fn shows_text(shows: &ShowCounts) -> String {
+    format!(
+        "linked {}, waiting to send {}, parked {}, unpicked {}, gone {}, off {}",
+        shows.linked, shows.waiting, shows.parked, shows.unpicked, shows.gone, shows.off
+    )
 }
 
 /// A count, or the em dash when absent.
@@ -426,6 +610,7 @@ pub struct DiagnosticsProps {
     pub core: Rc<RefCell<Ryuuji>>,
     pub recent: RecentEvents,
     pub watcher: Rc<std::result::Result<Watcher, WatchError>>,
+    pub syncer: Rc<std::result::Result<Syncer, SyncError>>,
 }
 
 /// Identity, not contents: two handles to the same core are the same
@@ -437,6 +622,7 @@ impl PartialEq for DiagnosticsProps {
             && Rc::ptr_eq(&self.core, &other.core)
             && self.recent.shares_buffer(&other.recent)
             && Rc::ptr_eq(&self.watcher, &other.watcher)
+            && Rc::ptr_eq(&self.syncer, &other.syncer)
     }
 }
 
@@ -445,7 +631,12 @@ pub fn diagnostics(props: &DiagnosticsProps, cx: &mut RenderCx) -> Element {
     let (last_action, set_last_action) = cx.use_state(None::<String>);
     ui::use_refresh(cx, true);
 
-    let report = Report::gather(&props.core.borrow(), &props.recent, &props.watcher);
+    let report = Report::gather(
+        &props.core.borrow(),
+        &props.recent,
+        &props.watcher,
+        &props.syncer,
+    );
     let dispatch = props.dispatch.clone();
     let core = &report.core;
     let copy = {
@@ -508,6 +699,7 @@ pub fn diagnostics(props: &DiagnosticsProps, cx: &mut RenderCx) -> Element {
             vstack((section("Watches · newest first"), watches_card(&report))).spacing(8.0),
             vstack((section("Playback"), playback_card)).spacing(8.0),
             vstack((section("Media sessions"), sessions_card(&report.sessions))).spacing(8.0),
+            vstack((section("Lists"), lists_cards(&report))).spacing(8.0),
             vstack((events_header, events_card(&report, filter))).spacing(8.0),
         ))
         .spacing(24.0)
@@ -657,6 +849,33 @@ fn session_cells(session: &SessionFacts) -> [TextBlock; 4] {
     ]
 }
 
+/// One card per service with the rows the report prints, under a card
+/// saying why the worker is off when it is.
+fn lists_cards(report: &Report) -> Element {
+    let mut cards: Vec<Element> = Vec::new();
+    if let Some(why) = &report.sync_down {
+        cards.push(card_frame(caption(format!("Sync isn't running: {why}")).wrap()).into());
+    }
+    for list in &report.lists {
+        let rows = list_rows(list, report.now, &report.zone)
+            .into_iter()
+            .map(|(label, value)| [caption(label), text_block(value).wrap().selectable()]);
+        cards.push(
+            card_frame(
+                vstack((
+                    text_block(list.service.label()).semibold(),
+                    table([GridLength::Auto, GridLength::STAR])
+                        .spacing(6.0, 16.0)
+                        .rows(rows),
+                ))
+                .spacing(8.0),
+            )
+            .into(),
+        );
+    }
+    vstack(cards).spacing(8.0).into()
+}
+
 /// `path` under `root`, or the whole path when it lives elsewhere.
 fn relative(path: &Path, root: &Path) -> String {
     path.strip_prefix(root)
@@ -714,8 +933,8 @@ fn level_brush(level: Level) -> ThemeRef {
 #[cfg(test)]
 mod tests {
     use ryuuji_core::{
-        ByteSize, DataDir, Decline, Link, NewEntry, NewRecording, Opened, ProposedMatch, Store,
-        WatchStatus,
+        ByteSize, DataDir, Decline, Link, Media, MediaId, NewEntry, NewRecording, Opened,
+        ProposedMatch, Store, UserId, WatchStatus,
     };
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
@@ -923,6 +1142,8 @@ mod tests {
             Some(last),
             events,
             Ok(sessions),
+            Vec::new(),
+            None,
             TimeZone::UTC,
         );
 
@@ -981,7 +1202,12 @@ mod tests {
             .set_default();
         tracing::info!("gathered");
 
-        let report = Report::gather(&core, &recent, &Err(WatchError::Exited("SMTC")));
+        let report = Report::gather(
+            &core,
+            &recent,
+            &Err(WatchError::Exited("SMTC")),
+            &Err(SyncError::Thread(std::io::Error::other("no thread"))),
+        );
 
         assert_eq!(report.core, core.diagnostics());
         assert_eq!(report.last_match, core.state().last_match);
@@ -990,6 +1216,13 @@ mod tests {
             report.sessions,
             Err("the SMTC worker exited before reporting".to_owned())
         );
+        assert_eq!(
+            report.sync_down,
+            Some("could not spawn the sync worker thread: no thread".to_owned())
+        );
+        assert_eq!(report.lists, list_facts(core.state(), &[]));
+        assert_eq!(report.lists.len(), Service::ALL.len());
+        assert_eq!(report.lists[0].lane, None);
     }
 
     #[test]
@@ -1004,21 +1237,230 @@ mod tests {
             None,
             Vec::new(),
             Ok(Vec::new()),
+            Vec::new(),
+            None,
             TimeZone::UTC,
         )
         .to_text();
         assert!(text.contains("Current log: none\nLast match: none\n\nWatches (0):\n\n"));
-        assert!(text.contains("Media sessions:\n  none\n\nRecent events (0):\n"));
+        assert!(text.contains("Media sessions:\n  none\n\nLists:\n\nRecent events (0):\n"));
 
         let text = Report::new(
             core,
             None,
             Vec::new(),
             Err("no manager".to_owned()),
+            Vec::new(),
+            None,
             TimeZone::UTC,
         )
         .to_text();
         assert!(text.contains("Media sessions:\n  unavailable: no manager\n"));
+    }
+
+    /// Whether `text` holds a word shaped like a JWT: three dot-separated
+    /// runs of base64url characters, each eight or more long, so a version
+    /// like `0.1.0` or a rolled log's name is not one.
+    fn has_token_shape(text: &str) -> bool {
+        text.split_whitespace().any(|word| {
+            let segments: Vec<&str> = word.split('.').collect();
+            segments.len() == 3
+                && segments.iter().all(|segment| {
+                    segment.len() >= 8
+                        && segment.bytes().all(|byte| {
+                            byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'
+                        })
+                })
+        })
+    }
+
+    #[test]
+    fn report_text_lists_each_service_and_never_a_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = DataDir::at(tmp.path()).unwrap();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        // 2026-09-23T00:00:00Z.
+        let expires = UNIX_EPOCH + Duration::from_secs(1_790_121_600);
+        let account = Account {
+            service: Service::AniList,
+            user: UserId(7),
+            name: "someone".into(),
+            expires: Some(expires),
+            signed: Signed::In,
+        };
+        app.dispatch(Command::Synced(ryuuji_core::Report::SignedIn(
+            account.clone(),
+        )));
+        for title in ["Frieren", "Dandadan"] {
+            app.dispatch(Command::AddEntry(NewEntry {
+                progress: 3,
+                ..show(title)
+            }));
+        }
+        let (frieren, dandadan) = (app.state().library[0].id, app.state().library[1].id);
+        app.dispatch(Command::LinkShow {
+            entry: frieren,
+            service: Service::AniList,
+            media: Media {
+                id: MediaId(154587),
+                title: "Sousou no Frieren".into(),
+                episodes: Some(28),
+                mal_id: None,
+            },
+        });
+        app.dispatch(Command::StopSyncing {
+            entry: dandadan,
+            service: Service::AniList,
+        });
+        let lane = ServiceFacts {
+            service: Service::AniList,
+            stopped: None,
+            paused: Some(Paused {
+                why: Pause::Throttled,
+                until: expires,
+            }),
+            rate_remaining: Some(89),
+            last_call: Some(LastCall {
+                at: expires,
+                status: Some(200),
+            }),
+            due: 1,
+            waiting: 2,
+            running: 0,
+        };
+        let lists = list_facts(app.state(), std::slice::from_ref(&lane));
+        assert_eq!(lists.len(), 1);
+        assert_eq!(lists[0].account.as_ref(), Some(&account));
+        assert_eq!(
+            lists[0].shows,
+            ShowCounts {
+                linked: 1,
+                waiting: 1,
+                parked: 0,
+                unpicked: 0,
+                gone: 0,
+                off: 1,
+            }
+        );
+
+        let core = app.diagnostics();
+        // The day before the token stops working.
+        let mut report = Report::new(
+            core.clone(),
+            None,
+            Vec::new(),
+            Ok(Vec::new()),
+            lists.clone(),
+            None,
+            TimeZone::UTC,
+        );
+        report.now = expires - Duration::from_secs(24 * 60 * 60);
+        let text = report.to_text();
+        assert!(
+            text.contains(
+                "Lists:\n  AniList\n    \
+                 Standing: signed in as someone (user 7), token works until 2026-09-23 00:00\n    \
+                 Paused: throttled until 2026-09-23 00:00\n    \
+                 Rate remaining: 89\n    \
+                 Last call: 2026-09-23 00:00 status 200\n    \
+                 Jobs: 1 due, 2 waiting, 0 running\n    \
+                 Shows: linked 1, waiting to send 1, parked 0, unpicked 0, gone 0, off 1\n\n\
+                 Recent events (0):\n"
+            ),
+            "{text}"
+        );
+        assert!(!has_token_shape(&text), "{text}");
+
+        // The token's time has come, and the core's row still says signed
+        // in: the expiry is judged here.
+        report.now = expires;
+        let text = report.to_text();
+        assert!(
+            text.contains("  AniList\n    Standing: token expired\n    Paused:"),
+            "{text}"
+        );
+
+        // The worker refused the kept token and the core has not heard
+        // yet: the lane says so first.
+        let stopped = list_facts(
+            app.state(),
+            &[ServiceFacts {
+                stopped: Some(
+                    "No AniList token is kept on this computer; paste one in Settings.".into(),
+                ),
+                ..lane.clone()
+            }],
+        );
+        let text = Report::new(
+            core.clone(),
+            None,
+            Vec::new(),
+            Ok(Vec::new()),
+            stopped,
+            None,
+            TimeZone::UTC,
+        )
+        .to_text();
+        assert!(
+            text.contains(
+                "  AniList\n    Standing: refused: No AniList token is kept on this computer; \
+                 paste one in Settings.\n    Paused:"
+            ),
+            "{text}"
+        );
+        // The scanner would have caught one, and passes the report's own
+        // dotted words.
+        assert!(has_token_shape(
+            "Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3OTAxMjE2MDB9.bm90IGEgcmVhbCBzaWduYXR1cmU"
+        ));
+        assert!(!has_token_shape(
+            "Ryuuji 0.1.0 (debug) logs\\ryuuji.log.2026-09-24"
+        ));
+
+        // The worker off: the account's standing alone, and why.
+        let mut report = Report::new(
+            core.clone(),
+            None,
+            Vec::new(),
+            Ok(Vec::new()),
+            list_facts(app.state(), &[]),
+            Some("could not spawn the sync worker thread: no thread".into()),
+            TimeZone::UTC,
+        );
+        report.now = expires - Duration::from_secs(24 * 60 * 60);
+        let text = report.to_text();
+        assert!(
+            text.contains(
+                "Lists:\n  sync not running: could not spawn the sync worker thread: no thread\n  \
+                 AniList\n    \
+                 Standing: signed in as someone (user 7), token works until 2026-09-23 00:00\n    \
+                 Shows: linked 1, waiting to send 1, parked 0, unpicked 0, gone 0, off 1\n"
+            ),
+            "{text}"
+        );
+
+        // Refused: the core's row says so while the worker, relaunched
+        // since, has nothing stopped, and nothing waits to be sent.
+        app.dispatch(Command::Synced(ryuuji_core::Report::Refused {
+            service: Service::AniList,
+            message: "Invalid token".into(),
+        }));
+        let refused = list_facts(app.state(), std::slice::from_ref(&lane));
+        assert_eq!(refused[0].shows.waiting, 0);
+        let text = Report::new(
+            core,
+            None,
+            Vec::new(),
+            Ok(Vec::new()),
+            refused,
+            None,
+            TimeZone::UTC,
+        )
+        .to_text();
+        assert!(
+            text.contains("  AniList\n    Standing: refused: Invalid token\n    Paused:"),
+            "{text}"
+        );
     }
 
     #[test]

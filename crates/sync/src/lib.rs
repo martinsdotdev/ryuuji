@@ -19,6 +19,7 @@ mod worker;
 use std::fmt;
 use std::time::SystemTime;
 
+pub use anilist::{CLIENT_ID, authorize_url};
 pub use engine::Pause;
 pub use worker::{LastCall, Paused, ServiceFacts, SyncError, Syncer, start};
 

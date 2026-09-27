@@ -17,8 +17,19 @@ use crate::http::{Request, Response};
 use crate::service::{Failure, Wire};
 
 pub(crate) const URL: &str = "https://graphql.anilist.co";
+/// Ryuuji's client id on AniList, registered as "Ryuuji" with the redirect
+/// `https://anilist.co/api/v2/oauth/pin`. Public by nature: the implicit
+/// grant has no secret, and the id is in the URL a person is sent to.
+pub const CLIENT_ID: &str = "36981";
 /// The pause when a 429 names no `Retry-After`.
 const DEFAULT_RETRY: Duration = Duration::from_secs(60);
+
+/// Where a person is sent to allow Ryuuji. With the pin redirect, AniList
+/// then shows the token on its own page for the person to paste into
+/// Settings.
+pub fn authorize_url() -> String {
+    format!("https://anilist.co/api/v2/oauth/authorize?client_id={CLIENT_ID}&response_type=token")
+}
 
 const VIEWER: &str = "query { Viewer { id name } }";
 const FIND: &str = "query ($search: String) { Page(perPage: 10) { media(search: $search, type: ANIME, sort: SEARCH_MATCH) { id idMal title { romaji english native } synonyms episodes format seasonYear } } }";
@@ -362,6 +373,19 @@ mod tests {
 
     fn data(text: &str) -> Value {
         classify(&Response::fixture(text)).unwrap().clone()
+    }
+
+    #[test]
+    fn the_authorize_url_carries_the_client_id_and_asks_for_a_token() {
+        let url = authorize_url();
+        assert_eq!(
+            url,
+            format!(
+                "https://anilist.co/api/v2/oauth/authorize?client_id={CLIENT_ID}&response_type=token"
+            )
+        );
+        assert!(url.contains(CLIENT_ID));
+        assert!(url.starts_with("https://anilist.co/api/v2/oauth/authorize?"));
     }
 
     #[test]

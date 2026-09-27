@@ -118,11 +118,30 @@ pub struct Logging {
     pub recent: RecentEvents,
 }
 
+/// The directives held under whatever `RUST_LOG` says. ureq logs each
+/// request's line and rustls the handshake, and the subscriber bridges the
+/// `log` crate, so without these `RUST_LOG=trace` would write the wire's
+/// details to the log files.
+const PINNED: [&str; 2] = ["ureq=warn", "rustls=warn"];
+
+/// The filter for `directives`, which is `RUST_LOG`'s value when it is
+/// set: those, or `info` when they are absent or malformed, with [`PINNED`]
+/// laid over them.
+fn filter(directives: Option<&str>) -> EnvFilter {
+    let mut filter = directives
+        .and_then(|directives| EnvFilter::try_new(directives).ok())
+        .unwrap_or_else(|| EnvFilter::new("info"));
+    for directive in PINNED.iter().filter_map(|pinned| pinned.parse().ok()) {
+        filter = filter.add_directive(directive);
+    }
+    filter
+}
+
 /// Installs the global subscriber: a daily-rolling file in `logs`, the
 /// in-memory ring buffer, plus stderr in debug builds. The filter sits first
 /// so every layer sees the same events.
 pub fn init(logs: &Path) -> Logging {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = filter(std::env::var(EnvFilter::DEFAULT_ENV).ok().as_deref());
     let (writer, guard) =
         tracing_appender::non_blocking(tracing_appender::rolling::daily(logs, "ryuuji.log"));
     let file = fmt_layer::layer().with_ansi(false).with_writer(writer);
@@ -190,6 +209,57 @@ mod tests {
                 (Level::ERROR, "also shown".to_owned()),
             ]
         );
+    }
+
+    #[test]
+    fn ureq_and_rustls_stay_at_warn_whatever_rust_log_says() {
+        let recent = RecentEvents::default();
+        let subscriber = tracing_subscriber::registry()
+            .with(filter(Some("trace")))
+            .with(recent.clone());
+        let _default = subscriber.set_default();
+
+        tracing::event!(
+            target: "ureq::unversioned::transport",
+            Level::DEBUG,
+            "POST https://graphql.anilist.co"
+        );
+        tracing::event!(target: "rustls::client::hs", Level::TRACE, "handshake");
+        tracing::event!(target: "ureq::pool", Level::WARN, "pool full");
+        tracing::event!(target: "ryuuji_win::shell", Level::TRACE, "rendered");
+
+        let seen: Vec<(String, String)> = recent
+            .snapshot()
+            .into_iter()
+            .map(|event| (event.target, event.message))
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                ("ureq::pool".to_owned(), "pool full".to_owned()),
+                ("ryuuji_win::shell".to_owned(), "rendered".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn no_rust_log_means_info() {
+        let recent = RecentEvents::default();
+        let subscriber = tracing_subscriber::registry()
+            .with(filter(None))
+            .with(recent.clone());
+        let _default = subscriber.set_default();
+
+        tracing::event!(target: "ryuuji_win::pages", Level::DEBUG, "hidden");
+        tracing::event!(target: "ryuuji_win::pages", Level::INFO, "shown");
+        tracing::event!(target: "ureq::unversioned::transport", Level::INFO, "hidden too");
+
+        let messages: Vec<String> = recent
+            .snapshot()
+            .into_iter()
+            .map(|event| event.message)
+            .collect();
+        assert_eq!(messages, ["shown".to_owned()]);
     }
 
     #[test]

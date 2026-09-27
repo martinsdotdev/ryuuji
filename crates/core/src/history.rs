@@ -240,6 +240,12 @@ pub fn date_time(at: SystemTime, zone: &TimeZone) -> String {
     local(at, zone).strftime("%Y-%m-%d %H:%M").to_string()
 }
 
+/// `2026-09-15`: the local date of `at` alone, for a day that matters
+/// without its clock time, such as the one a token stops working on.
+pub fn date(at: SystemTime, zone: &TimeZone) -> String {
+    local(at, zone).strftime("%Y-%m-%d").to_string()
+}
+
 /// The first instant of "the last 7 days": local midnight six days before
 /// today, so the span covers today and the six days before it, the same
 /// days the page groups under.
@@ -317,6 +323,18 @@ mod tests {
         assert_eq!(
             date_time(utc("2026-09-15T21:36:00Z"), &zone("UTC0")),
             "2026-09-15 21:36"
+        );
+    }
+
+    #[test]
+    fn a_date_is_the_local_day_alone() {
+        assert_eq!(
+            date(utc("2026-09-15T02:00:00Z"), &zone("<-03>3")),
+            "2026-09-14"
+        );
+        assert_eq!(
+            date(utc("2026-09-15T21:36:00Z"), &zone("UTC0")),
+            "2026-09-15"
         );
     }
 
