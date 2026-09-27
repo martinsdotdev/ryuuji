@@ -137,6 +137,15 @@ pub fn body(
                 library: state.library.clone(),
             },
         ),
+        Page::Seasons => placeholder(
+            "Seasons isn't built yet",
+            "This page will list each season's shows from AniList, so you can add them to your \
+             library.",
+        ),
+        Page::Statistics => placeholder(
+            "Statistics isn't built yet",
+            "This page will count the shows and episodes Ryuuji has recorded.",
+        ),
         Page::Settings => component(
             settings,
             SettingsProps {
