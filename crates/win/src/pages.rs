@@ -108,15 +108,21 @@ pub fn body(
 }
 
 /// Wraps a body in what every destination shows around it: the notice bar
-/// above, and the page padding.
-pub fn chrome(notices: &[Notice], dispatch: Dispatch<Command>, body: Element) -> Element {
+/// above, the page padding, and the status bar below.
+pub fn chrome(
+    notices: &[Notice],
+    dispatch: Dispatch<Command>,
+    body: Element,
+    status: Border,
+) -> Element {
     grid((
         notice(notices, dispatch),
         border(body)
             .padding(Thickness::uniform(PAGE_PADDING))
             .grid_row(1),
+        status.grid_row(2),
     ))
-    .rows([GridLength::Auto, GridLength::STAR])
+    .rows([GridLength::Auto, GridLength::STAR, GridLength::Auto])
     .into()
 }
 

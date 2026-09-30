@@ -3,8 +3,7 @@
 //! out everything the page needs from [`AppState`], so the page never carries
 //! the library.
 
-use std::ops::RangeInclusive;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use ryuuji_core::{
     AppState, Certainty, Command, ElementKind, EntryId, LibraryEntry, Link, NowPlaying, Options,
@@ -12,7 +11,10 @@ use ryuuji_core::{
 };
 use windows_reactor::*;
 
-use crate::ui::{self, age_of, caption, card_frame, episode_text, placeholder, table};
+use crate::standing::{Standing, standing};
+use crate::ui::{
+    self, age_of, caption, card_frame, clock_text, duration_text, episode_text, placeholder, table,
+};
 
 /// Builds the page from the state, resolving on the page's behalf what it
 /// must not reason about itself.
@@ -23,7 +25,7 @@ pub(crate) fn body(state: &AppState, dispatch: Dispatch<Command>, detection_down
             dispatch,
             now_playing: state.now_playing.clone(),
             last_match: state.last_match.clone(),
-            watch_progress: state.watch_progress,
+            standing: standing(state),
             title: state
                 .last_match
                 .as_ref()
@@ -79,7 +81,8 @@ struct NowPlayingProps {
     dispatch: Dispatch<Command>,
     now_playing: NowPlaying,
     last_match: Option<ProposedMatch>,
-    watch_progress: Option<WatchProgress>,
+    /// Where the viewing stands against its recording, while it plays.
+    standing: Option<Standing>,
     /// The proposal's title as the library knows it, resolved by the caller
     /// so the page never carries the library.
     title: Option<String>,
@@ -135,25 +138,24 @@ fn now_playing(props: &NowPlayingProps, cx: &mut RenderCx) -> Element {
                 ))
                 .into(),
             ];
-            if let Some(progress) = &props.watch_progress {
-                let episode = props.last_match.as_ref().and_then(|m| m.episode.as_ref());
-                let caption = caption(progress_text(progress, episode));
-                lines.push(match progress.outcome {
-                    RecordOutcome::Recorded(id) if props.undo_applies => {
+            if let Some(standing) = &props.standing {
+                let caption = caption(standing.header());
+                lines.push(match standing {
+                    Standing::Recorded { watch, .. } if props.undo_applies => {
                         let dispatch = props.dispatch.clone();
+                        let watch = *watch;
                         hstack((
                             button("Undo")
-                                .on_click(move || dispatch.call(Command::UndoRecording(id))),
+                                .on_click(move || dispatch.call(Command::UndoRecording(watch))),
                             caption.vertical_alignment(VerticalAlignment::Center),
                         ))
                         .spacing(12.0)
                         .into()
                     }
-                    RecordOutcome::Recorded(_)
-                    | RecordOutcome::Counting
-                    | RecordOutcome::Undone
-                    | RecordOutcome::Declined(_)
-                    | RecordOutcome::Ignored => caption.into(),
+                    Standing::Recorded { .. }
+                    | Standing::Counting { .. }
+                    | Standing::Undone { .. }
+                    | Standing::NotRecording { .. } => caption.into(),
                 });
             }
             card_frame(vstack(lines).spacing(4.0)).into()
@@ -517,25 +519,6 @@ fn episode_doubt(m: &ProposedMatch) -> Option<String> {
     (!doubts.is_empty()).then(|| format!("A guess: {}", doubts.join("; ")))
 }
 
-/// The countdown to the write, then what came of it.
-fn progress_text(progress: &WatchProgress, episode: Option<&RangeInclusive<u32>>) -> String {
-    let named = episode.map(|episode| episode_text(episode).to_lowercase());
-    match (progress.outcome, named) {
-        (RecordOutcome::Counting, _) => {
-            let remaining = progress.threshold.saturating_sub(progress.accrued);
-            format!("Recording in {}", clock_text(remaining))
-        }
-        (RecordOutcome::Recorded(_), Some(episode)) => format!("Recorded {episode}"),
-        (RecordOutcome::Recorded(_), None) => "Recorded".to_owned(),
-        (RecordOutcome::Undone, Some(episode)) => format!("Undid {episode}"),
-        (RecordOutcome::Undone, None) => "Undone".to_owned(),
-        (RecordOutcome::Declined(why), _) => why.label().to_owned(),
-        // No episode is named: nothing is being counted towards, so saying
-        // which one would suggest it still might be.
-        (RecordOutcome::Ignored, _) => "Ignored".to_owned(),
-    }
-}
-
 /// Every element the parser finds in the raw player title. Re-parsed here
 /// rather than carried on the proposal, so a reloaded one reads the same.
 fn fact_rows(m: &ProposedMatch) -> Vec<(String, String)> {
@@ -564,44 +547,13 @@ fn facts_grid(rows: &[(String, String)]) -> Element {
         .into()
 }
 
-/// `m:ss`, or `h:mm:ss` from one hour.
-fn clock_text(value: Duration) -> String {
-    let total = value.as_secs();
-    let (hours, minutes, seconds) = (total / 3600, total / 60 % 60, total % 60);
-    if hours > 0 {
-        format!("{hours}:{minutes:02}:{seconds:02}")
-    } else {
-        format!("{minutes}:{seconds:02}")
-    }
-}
-
-/// Like [`clock_text`], with an unknown length shown as `--:--`.
-fn duration_text(value: Duration) -> String {
-    if value.is_zero() {
-        "--:--".to_string()
-    } else {
-        clock_text(value)
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use ryuuji_core::{DataDir, Decline, NewEntry, NewRecording, Opened, Store, WatchStatus};
+    use std::time::Duration;
+
+    use ryuuji_core::{DataDir, NewEntry, NewRecording, Opened, Store, WatchStatus};
 
     use super::*;
-
-    #[test]
-    fn clock_text_formats_minutes_and_hours() {
-        assert_eq!(clock_text(Duration::ZERO), "0:00");
-        assert_eq!(clock_text(Duration::from_secs(305)), "5:05");
-        assert_eq!(clock_text(Duration::from_secs(3661)), "1:01:01");
-    }
-
-    #[test]
-    fn duration_text_marks_zero_unknown() {
-        assert_eq!(duration_text(Duration::ZERO), "--:--");
-        assert_eq!(duration_text(Duration::from_secs(1420)), "23:40");
-    }
 
     fn proposal() -> ProposedMatch {
         ProposedMatch {
@@ -748,10 +700,6 @@ mod tests {
             })
             .unwrap();
         (recording.entry, recording.watch.id)
-    }
-
-    fn recorded_watch_id() -> ryuuji_core::HistoryId {
-        recorded_show().1
     }
 
     #[test]
@@ -959,74 +907,6 @@ mod tests {
         assert!(!undo_applies(&state(2, RecordOutcome::Recorded(watch))));
         assert!(!undo_applies(&state(0, RecordOutcome::Undone)));
         assert!(!undo_applies(&AppState::default()));
-    }
-
-    #[test]
-    fn progress_text_counts_down_then_says_what_came_of_it() {
-        let counting = WatchProgress {
-            accrued: Duration::from_secs(510),
-            threshold: Duration::from_secs(710),
-            outcome: RecordOutcome::Counting,
-        };
-        assert_eq!(
-            progress_text(&counting, Some(&(3..=3))),
-            "Recording in 3:20"
-        );
-        assert_eq!(progress_text(&counting, None), "Recording in 3:20");
-        let overshot = WatchProgress {
-            accrued: Duration::from_secs(800),
-            ..counting
-        };
-        assert_eq!(progress_text(&overshot, None), "Recording in 0:00");
-
-        let recorded = WatchProgress {
-            outcome: RecordOutcome::Recorded(recorded_watch_id()),
-            ..counting
-        };
-        assert_eq!(
-            progress_text(&recorded, Some(&(3..=3))),
-            "Recorded episode 3"
-        );
-        assert_eq!(
-            progress_text(&recorded, Some(&(1..=12))),
-            "Recorded episodes 1\u{2013}12"
-        );
-        assert_eq!(progress_text(&recorded, None), "Recorded");
-
-        let undone = WatchProgress {
-            outcome: RecordOutcome::Undone,
-            ..counting
-        };
-        // An ignored file names no episode: nothing is being counted
-        // towards, so naming one would suggest it still might be.
-        let ignored = WatchProgress {
-            outcome: RecordOutcome::Ignored,
-            ..counting
-        };
-        assert_eq!(progress_text(&ignored, Some(&(3..=3))), "Ignored");
-        assert_eq!(progress_text(&ignored, None), "Ignored");
-
-        assert_eq!(progress_text(&undone, Some(&(3..=3))), "Undid episode 3");
-        assert_eq!(
-            progress_text(&undone, Some(&(1..=12))),
-            "Undid episodes 1\u{2013}12"
-        );
-        assert_eq!(progress_text(&undone, None), "Undone");
-
-        for (why, text) in [
-            (Decline::NotExact, "Not recorded: no exact match"),
-            (Decline::Completed, "Not recorded: show is completed"),
-            (Decline::NoEpisode, "Not recorded: no episode number"),
-            (Decline::NotNext, "Not recorded: not the next episode"),
-            (Decline::PastTotal, "Not recorded: past the show's total"),
-        ] {
-            let declined = WatchProgress {
-                outcome: RecordOutcome::Declined(why),
-                ..counting
-            };
-            assert_eq!(progress_text(&declined, Some(&(3..=3))), text);
-            assert_eq!(progress_text(&declined, None), text);
-        }
     }
 
     #[test]
