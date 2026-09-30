@@ -1327,6 +1327,7 @@ mod tests {
             due: 1,
             waiting: 2,
             running: 0,
+            next_send: None,
         };
         let lists = list_facts(app.state(), std::slice::from_ref(&lane));
         assert_eq!(lists.len(), 1);

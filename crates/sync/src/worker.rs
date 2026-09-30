@@ -142,6 +142,8 @@ pub struct ServiceFacts {
     pub waiting: usize,
     /// The run under way, if one is.
     pub running: usize,
+    /// When the soonest waiting send goes out, after any pause.
+    pub next_send: Option<SystemTime>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -547,6 +549,9 @@ impl Worker {
                     due: lane.due,
                     waiting: lane.waiting,
                     running: lane.running,
+                    next_send: lane
+                        .next_due
+                        .map(|at| clock + at.saturating_duration_since(now)),
                 }
             })
             .collect();
