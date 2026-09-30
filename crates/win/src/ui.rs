@@ -240,12 +240,17 @@ const REFRESH: Duration = Duration::from_secs(2);
 /// is a plain bool, so the timer is created on the flip to true and dropped
 /// by the cleanup on the flip to false or when the page unmounts.
 pub(crate) fn use_refresh(cx: &mut RenderCx, running: bool) {
+    use_refresh_every(cx, running, REFRESH);
+}
+
+/// Like [`use_refresh`], every `every`.
+pub(crate) fn use_refresh_every(cx: &mut RenderCx, running: bool, every: Duration) {
     let (_tick, bump) = cx.use_reducer(0u32);
     cx.use_effect_with_cleanup(running, move || {
         if !running {
             return None;
         }
-        match DispatcherTimer::new(REFRESH, move || {
+        match DispatcherTimer::new(every, move || {
             bump.call(|n| n.wrapping_add(1));
         }) {
             Ok(timer) => Some(move || drop(timer)),

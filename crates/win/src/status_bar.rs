@@ -1,15 +1,26 @@
-//! The strip along the bottom of every page: where the playing viewing
-//! stands against its recording, with the way to skip it, where the player
-//! is in the episode, and while nothing plays, whether tracking is on.
+//! The strip along the bottom of every page: sync in one line, where the
+//! playing viewing stands against its recording, with the way to skip it,
+//! where the player is in the episode, and while nothing plays, whether
+//! tracking is on. A service is named only when it needs the person.
 
-use ryuuji_core::{AppState, Command, NowPlaying};
+use std::rc::Rc;
+use std::time::{Duration, SystemTime};
+
+use ryuuji_core::{AppState, Command, NeedsYou, NowPlaying, Signed, SyncLine};
+use ryuuji_sync::{Pause, ServiceFacts, SyncError, Syncer};
 use windows_reactor::*;
 
 use crate::standing::{Standing, standing};
-use crate::ui::{clock_text, duration_text};
+use crate::ui::{self, ICON_FONT, clock_text, duration_text};
 
 const HEIGHT: f64 = 32.0;
 const CANCEL_GLYPH: &str = "\u{E711}";
+const SYNC_GLYPH: &str = "\u{E895}";
+const CAUTION_GLYPH: &str = "\u{E7BA}";
+
+/// How often the bar rereads the worker while sync is busy, so a countdown
+/// moves and a pause shows.
+const TICK: Duration = Duration::from_secs(1);
 
 /// The colour of the dot beside the recording's words.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -34,6 +45,11 @@ pub(crate) struct Recording {
 /// What the bar says, left to right.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct StatusBar {
+    /// Sync in one line, from the core; the worker's facts fill in the
+    /// seconds and whether a list is out of reach.
+    pub sync: Option<SyncLine>,
+    /// How many accounts are signed in, which decides "list" or "lists".
+    pub lists: usize,
     pub recording: Option<Recording>,
     /// `11:33 / 24:00` while something plays.
     pub position: Option<String>,
@@ -72,15 +88,123 @@ pub(crate) fn status_bar(state: &AppState, detection_down: bool) -> StatusBar {
         ),
     };
     StatusBar {
+        sync: state.sync_line(),
+        lists: state
+            .sync
+            .accounts
+            .iter()
+            .filter(|account| account.signed == Signed::In)
+            .count(),
         recording,
         position,
         tracking,
     }
 }
 
-/// Builds the bar for the bottom row of the chrome.
-pub(crate) fn bar(bar: &StatusBar, dispatch: Dispatch<Command>) -> Border {
+/// Sync's segment: the words, and whether they are a warning.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SyncSegment {
+    pub text: String,
+    pub warning: bool,
+}
+
+/// What sync's segment says, the worker's facts read at `now`. A list out
+/// of reach is said over anything short of a service needing the person.
+pub(crate) fn sync_segment(
+    line: Option<SyncLine>,
+    lists: usize,
+    facts: &[ServiceFacts],
+    now: SystemTime,
+) -> Option<SyncSegment> {
+    let line = line?;
+    let quiet = |text: String| {
+        Some(SyncSegment {
+            text,
+            warning: false,
+        })
+    };
+    let warn = |service: ryuuji_core::Service, what: &str| {
+        Some(SyncSegment {
+            text: format!("{} \u{b7} {what}", service.label()),
+            warning: true,
+        })
+    };
+    if !matches!(line, SyncLine::NeedsYou { .. })
+        && let Some(offline) = facts.iter().find(|facts| {
+            facts
+                .paused
+                .is_some_and(|paused| paused.why == Pause::Offline)
+        })
+    {
+        return warn(offline.service, "offline, retrying");
+    }
+    match line {
+        SyncLine::Synced => quiet("Synced".to_owned()),
+        SyncLine::Finding => quiet("Finding your shows".to_owned()),
+        SyncLine::Sending => {
+            let next = facts.iter().filter_map(|facts| facts.next_send).min();
+            quiet(match next.and_then(|at| at.duration_since(now).ok()) {
+                Some(left) => format!("Sending in {} s", left.as_secs().max(1)),
+                None => "Sending".to_owned(),
+            })
+        }
+        SyncLine::Checking => quiet(if lists > 1 {
+            "Checking your lists".to_owned()
+        } else {
+            "Checking your list".to_owned()
+        }),
+        SyncLine::NeedsYou { service, why } => warn(
+            service,
+            match why {
+                NeedsYou::SignIn => "sign in again",
+                NeedsYou::Pick => "pick the entry",
+                NeedsYou::PickAnother => "pick another",
+                NeedsYou::Rejected => "change refused",
+            },
+        ),
+    }
+}
+
+/// What the bar is handed. The worker is compared by identity, as History
+/// compares its core handle.
+#[derive(Clone)]
+pub(crate) struct StatusBarProps {
+    pub dispatch: Dispatch<Command>,
+    pub bar: StatusBar,
+    pub syncer: Rc<std::result::Result<Syncer, SyncError>>,
+}
+
+impl PartialEq for StatusBarProps {
+    fn eq(&self, other: &StatusBarProps) -> bool {
+        self.dispatch == other.dispatch
+            && self.bar == other.bar
+            && Rc::ptr_eq(&self.syncer, &other.syncer)
+    }
+}
+
+/// The bar for the bottom row of the chrome. A component, so its countdown
+/// redraws the bar alone rather than the window.
+pub(crate) fn view(props: &StatusBarProps, cx: &mut RenderCx) -> Element {
+    let facts = match &*props.syncer {
+        Ok(syncer) => syncer.facts(),
+        Err(_) => Vec::new(),
+    };
+    // The worker's facts change with no dispatch: a countdown's seconds,
+    // and a pause starting or ending while there is work.
+    let busy = matches!(
+        props.bar.sync,
+        Some(SyncLine::Finding | SyncLine::Sending | SyncLine::Checking)
+    ) || facts.iter().any(|facts| facts.paused.is_some());
+    ui::use_refresh_every(cx, busy, TICK);
+    let sync = sync_segment(props.bar.sync, props.bar.lists, &facts, SystemTime::now());
+    bar(&props.bar, sync.as_ref(), props.dispatch.clone()).into()
+}
+
+fn bar(bar: &StatusBar, sync: Option<&SyncSegment>, dispatch: Dispatch<Command>) -> Border {
     let mut segments: Vec<Element> = Vec::new();
+    if let Some(sync) = sync {
+        segments.push(sync_view(sync));
+    }
     if let Some(recording) = &bar.recording {
         segments.push(recording_segment(recording, dispatch));
     }
@@ -151,6 +275,24 @@ fn recording_segment(recording: &Recording, dispatch: Dispatch<Command>) -> Elem
     hstack(parts).spacing(6.0).into()
 }
 
+fn sync_view(sync: &SyncSegment) -> Element {
+    let (glyph, brush) = if sync.warning {
+        (CAUTION_GLYPH, ThemeRef::SystemCaution)
+    } else {
+        (SYNC_GLYPH, ThemeRef::SecondaryText)
+    };
+    hstack((
+        text_block(glyph)
+            .font_family(ICON_FONT)
+            .font_size(12.0)
+            .foreground(brush)
+            .vertical_alignment(VerticalAlignment::Center),
+        small(sync.text.clone()).foreground(ThemeRef::PrimaryText),
+    ))
+    .spacing(6.0)
+    .into()
+}
+
 fn small(text: impl Into<String>) -> TextBlock {
     text_block(text)
         .font_size(12.0)
@@ -208,6 +350,8 @@ mod tests {
         assert_eq!(
             status_bar(&playing(RecordOutcome::Counting), false),
             StatusBar {
+                sync: None,
+                lists: 0,
                 recording: Some(Recording {
                     dot: Dot::Neutral,
                     text: "Not recording \u{b7} no match".to_owned(),
@@ -265,6 +409,90 @@ mod tests {
                 text: "Records in 7:00".to_owned(),
                 skip: Some("Don't record episode 1".to_owned()),
             })
+        );
+    }
+
+    fn facts(next_send: Option<SystemTime>, offline: bool) -> ServiceFacts {
+        ServiceFacts {
+            service: ryuuji_core::Service::AniList,
+            stopped: None,
+            paused: offline.then(|| ryuuji_sync::Paused {
+                why: Pause::Offline,
+                until: SystemTime::UNIX_EPOCH + Duration::from_secs(90),
+            }),
+            rate_remaining: None,
+            last_call: None,
+            due: 0,
+            waiting: 1,
+            running: 0,
+            next_send,
+        }
+    }
+
+    fn said(segment: Option<SyncSegment>) -> Option<(String, bool)> {
+        segment.map(|segment| (segment.text, segment.warning))
+    }
+
+    #[test]
+    fn sync_says_itself_in_a_few_words_and_names_a_service_only_when_it_needs_you() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let quiet = |text: &str| Some((text.to_owned(), false));
+        let warning = |text: &str| Some((text.to_owned(), true));
+        let at = |secs| SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
+        let say = |line, lists, facts: &[ServiceFacts]| said(sync_segment(line, lists, facts, now));
+        assert_eq!(say(None, 0, &[]), None);
+        assert_eq!(say(Some(SyncLine::Synced), 1, &[]), quiet("Synced"));
+        assert_eq!(
+            say(Some(SyncLine::Finding), 1, &[]),
+            quiet("Finding your shows")
+        );
+        assert_eq!(
+            say(Some(SyncLine::Sending), 1, &[facts(Some(at(1_009)), false)]),
+            quiet("Sending in 9 s")
+        );
+        assert_eq!(
+            say(Some(SyncLine::Sending), 1, &[facts(Some(at(900)), false)]),
+            quiet("Sending")
+        );
+        assert_eq!(
+            say(Some(SyncLine::Checking), 1, &[]),
+            quiet("Checking your list")
+        );
+        assert_eq!(
+            say(Some(SyncLine::Checking), 2, &[]),
+            quiet("Checking your lists")
+        );
+        let needs = |why| {
+            Some(SyncLine::NeedsYou {
+                service: ryuuji_core::Service::AniList,
+                why,
+            })
+        };
+        assert_eq!(
+            say(needs(NeedsYou::Pick), 1, &[]),
+            warning("AniList \u{b7} pick the entry")
+        );
+        assert_eq!(
+            say(needs(NeedsYou::PickAnother), 1, &[]),
+            warning("AniList \u{b7} pick another")
+        );
+        assert_eq!(
+            say(needs(NeedsYou::SignIn), 1, &[]),
+            warning("AniList \u{b7} sign in again")
+        );
+        assert_eq!(
+            say(needs(NeedsYou::Rejected), 1, &[]),
+            warning("AniList \u{b7} change refused")
+        );
+        // Out of reach is said over what is under way, and under what needs
+        // the person.
+        assert_eq!(
+            say(Some(SyncLine::Sending), 1, &[facts(None, true)]),
+            warning("AniList \u{b7} offline, retrying")
+        );
+        assert_eq!(
+            say(needs(NeedsYou::Pick), 1, &[facts(None, true)]),
+            warning("AniList \u{b7} pick the entry")
         );
     }
 
