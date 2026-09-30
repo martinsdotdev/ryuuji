@@ -19,6 +19,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-appender.workspace = true
 clipboard-win.workspace = true
+windows.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
