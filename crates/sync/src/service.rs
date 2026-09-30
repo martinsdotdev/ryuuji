@@ -8,7 +8,7 @@
 use std::fmt;
 use std::time::Instant;
 
-use ryuuji_core::{Candidate, ListEntryId, MediaId, Remote, Service, UserId, Write};
+use ryuuji_core::{Candidate, ListEntryId, MediaId, Remote, Service, ShowInfo, UserId, Write};
 
 use crate::anilist;
 use crate::http::{Request, Response};
@@ -46,6 +46,17 @@ impl Session {
     pub(crate) fn read(&self, wire: Wire<'_>, media: MediaId) -> Result<Remote, Failure> {
         match self {
             Session::AniList(session) => session.read(wire, media),
+        }
+    }
+
+    /// What the service says about a show, and its cover's address.
+    pub(crate) fn describe(
+        &self,
+        wire: Wire<'_>,
+        media: MediaId,
+    ) -> Result<(ShowInfo, Option<String>), Failure> {
+        match self {
+            Session::AniList(session) => session.describe(wire, media),
         }
     }
 

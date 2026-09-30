@@ -1,0 +1,26 @@
+{
+  "status": 200,
+  "headers": { "X-RateLimit-Limit": "90", "X-RateLimit-Remaining": "88" },
+  "body": {
+    "data": {
+      "Media": {
+        "title": {
+          "romaji": "Sousou no Frieren",
+          "english": "Frieren: Beyond Journey's End",
+          "native": "葬送のフリーレン"
+        },
+        "format": "TV",
+        "season": "FALL",
+        "seasonYear": 2023,
+        "status": "FINISHED",
+        "episodes": 28,
+        "genres": ["Adventure", "Drama", "Fantasy"],
+        "studios": { "nodes": [{ "name": "Madhouse" }] },
+        "description": "After the party of heroes defeated the Demon King, they restored peace to the land.<br><br>\n<i>(Source: Crunchyroll)</i>",
+        "coverImage": {
+          "extraLarge": "https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx154587-n1fmjRv4JQUd.jpg"
+        }
+      }
+    }
+  }
+}

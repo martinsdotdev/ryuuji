@@ -9,7 +9,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use base64::Engine;
 use base64::prelude::BASE64_URL_SAFE_NO_PAD;
 use ryuuji_core::{
-    Candidate, Format, ListEntryId, ListState, ListStatus, Media, MediaId, Remote, UserId, Write,
+    Airing, Candidate, Format, ListEntryId, ListState, ListStatus, Media, MediaId, Remote, Season,
+    ShowInfo, UserId, Write,
 };
 use serde_json::{Map, Value, json};
 
@@ -39,6 +40,8 @@ const VIEWER: &str = "query { Viewer { id name } }";
 const FIND: &str = "query ($search: String) { Page(perPage: 10) { media(search: $search, type: ANIME, sort: SEARCH_MATCH) { id idMal title { romaji english native } synonyms episodes format seasonYear } } }";
 const READ: &str = "query ($id: Int) { Media(id: $id, type: ANIME) { id episodes mediaListEntry { id status progress repeat } } }";
 const SAVE: &str = "mutation ($id: Int, $mediaId: Int, $status: MediaListStatus, $progress: Int, $repeat: Int) { SaveMediaListEntry(id: $id, mediaId: $mediaId, status: $status, progress: $progress, repeat: $repeat) { id status progress repeat } }";
+
+const DESCRIBE: &str = "query ($id: Int) { Media(id: $id, type: ANIME) { title { romaji english native } format season seasonYear status episodes genres studios(isMain: true) { nodes { name } } description(asHtml: false) coverImage { extraLarge } } }";
 
 /// AniList holds nothing between calls: the token is the vault's and goes
 /// on each request. A service with a refresh token will hold it here.
@@ -70,6 +73,129 @@ impl Session {
         let response = wire(&save(media, id, write))?;
         parse_save(classify(&response)?)
     }
+
+    pub(crate) fn describe(
+        &self,
+        wire: Wire<'_>,
+        media: MediaId,
+    ) -> Result<(ShowInfo, Option<String>), Failure> {
+        let response = wire(&describe(media))?;
+        parse_describe(classify(&response)?)
+    }
+}
+
+/// Asked without the token: what AniList says about a show is public, so
+/// the token goes on no call that does not need it.
+pub(crate) fn describe(media: MediaId) -> Request {
+    Request {
+        signed: false,
+        ..request(DESCRIBE, json!({ "id": media.0 }))
+    }
+}
+
+/// What AniList says about a show, and its cover's address.
+pub(crate) fn parse_describe(data: &Value) -> Result<(ShowInfo, Option<String>), Failure> {
+    let media = present(data, "Media")?;
+    let text = |value: Option<&Value>| value.and_then(Value::as_str).map(str::to_owned);
+    let title = media.get("title");
+    let titles: Vec<String> = ["romaji", "english", "native"]
+        .into_iter()
+        .filter_map(|key| text(title.and_then(|title| title.get(key))))
+        .collect();
+    let strings = |key: &str| -> Vec<String> {
+        media
+            .get(key)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect()
+    };
+    let cover = media.get("coverImage");
+    let info = ShowInfo {
+        titles,
+        format: format(media),
+        season: season(media),
+        season_year: media
+            .get("seasonYear")
+            .and_then(Value::as_u64)
+            .and_then(|year| u16::try_from(year).ok()),
+        status: airing(media),
+        episodes: media
+            .get("episodes")
+            .and_then(Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok()),
+        genres: strings("genres"),
+        studio: media
+            .get("studios")
+            .and_then(|studios| studios.get("nodes"))
+            .and_then(Value::as_array)
+            .and_then(|nodes| nodes.first())
+            .and_then(|node| text(node.get("name"))),
+        description: text(media.get("description")).map(|raw| plain(&raw)),
+    };
+    let url = text(cover.and_then(|cover| cover.get("extraLarge")));
+    Ok((info, url))
+}
+
+/// The season a show began in, as AniList's `MediaSeason` names it.
+fn season(media: &Value) -> Option<Season> {
+    Some(match media.get("season")?.as_str()? {
+        "WINTER" => Season::Winter,
+        "SPRING" => Season::Spring,
+        "SUMMER" => Season::Summer,
+        "FALL" => Season::Fall,
+        _ => return None,
+    })
+}
+
+/// Where a show's airing stands, as AniList's `MediaStatus` names it.
+fn airing(media: &Value) -> Option<Airing> {
+    Some(match media.get("status")?.as_str()? {
+        "FINISHED" => Airing::Finished,
+        "RELEASING" => Airing::Ongoing,
+        "NOT_YET_RELEASED" => Airing::Upcoming,
+        "CANCELLED" => Airing::Cancelled,
+        "HIATUS" => Airing::Hiatus,
+        _ => return None,
+    })
+}
+
+/// A description as plain text. AniList's "not HTML" still carries `<br>`
+/// and `<i>`: a break becomes a line break, other tags go, and runs of
+/// blank lines close up to one.
+fn plain(raw: &str) -> String {
+    let mut text = String::new();
+    let mut rest = raw;
+    while let Some(open) = rest.find('<') {
+        text.push_str(&rest[..open]);
+        let Some(close) = rest[open..].find('>') else {
+            rest = &rest[open..];
+            break;
+        };
+        let tag = rest[open + 1..open + close].trim().to_ascii_lowercase();
+        if tag.trim_end_matches('/').trim() == "br" {
+            text.push('\n');
+        }
+        rest = &rest[open + close + 1..];
+    }
+    text.push_str(rest);
+    let text = text
+        .replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&#039;", "'");
+    let mut lines: Vec<&str> = Vec::new();
+    for line in text.lines().map(str::trim) {
+        if line.is_empty() && lines.last().is_none_or(|last| last.is_empty()) {
+            continue;
+        }
+        lines.push(line);
+    }
+    while lines.last().is_some_and(|last| last.is_empty()) {
+        lines.pop();
+    }
+    lines.join("\n")
 }
 
 pub(crate) fn viewer() -> Request {
@@ -374,6 +500,7 @@ mod tests {
     const UNAUTHORIZED: &str = include_str!("../fixtures/anilist/unauthorized_401.json");
     const INVALID_TOKEN: &str = include_str!("../fixtures/anilist/invalid_token_200.json");
     const THROTTLED: &str = include_str!("../fixtures/anilist/throttled_429.json");
+    const DESCRIBED: &str = include_str!("../fixtures/anilist/describe.json");
     const NOT_FOUND: &str = include_str!("../fixtures/anilist/not_found_404.json");
     const VALIDATION: &str = include_str!("../fixtures/anilist/validation_200.json");
     const SERVER_ERROR: &str = include_str!("../fixtures/anilist/server_error_500.json");
@@ -429,6 +556,69 @@ mod tests {
             assert_eq!(request.url, "https://graphql.anilist.co");
             assert!(request.signed);
         }
+    }
+
+    #[test]
+    fn a_show_is_described_without_the_token() {
+        let request = describe(MediaId(154587));
+        assert!(!request.signed);
+        assert_eq!(request.url, "https://graphql.anilist.co");
+        assert_eq!(request.body["variables"], json!({ "id": 154587 }));
+        assert!(
+            request.body["query"]
+                .as_str()
+                .unwrap()
+                .contains("coverImage { extraLarge }")
+        );
+    }
+
+    #[test]
+    fn a_description_reads_every_field_and_the_cover_address() {
+        let response = Response::fixture(DESCRIBED);
+        let (info, cover) = parse_describe(classify(&response).unwrap()).unwrap();
+        assert_eq!(
+            info,
+            ShowInfo {
+                titles: vec![
+                    "Sousou no Frieren".to_owned(),
+                    "Frieren: Beyond Journey's End".to_owned(),
+                    "葬送のフリーレン".to_owned(),
+                ],
+                format: Some(Format::Tv),
+                season: Some(Season::Fall),
+                season_year: Some(2023),
+                status: Some(Airing::Finished),
+                episodes: Some(28),
+                genres: vec![
+                    "Adventure".to_owned(),
+                    "Drama".to_owned(),
+                    "Fantasy".to_owned()
+                ],
+                studio: Some("Madhouse".to_owned()),
+                description: Some(
+                    "After the party of heroes defeated the Demon King, they restored peace to \
+                     the land.\n\n(Source: Crunchyroll)"
+                        .to_owned()
+                ),
+            }
+        );
+        assert_eq!(
+            cover.as_deref(),
+            Some(
+                "https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx154587-n1fmjRv4JQUd.jpg"
+            )
+        );
+    }
+
+    #[test]
+    fn a_description_loses_its_tags_and_extra_blank_lines() {
+        assert_eq!(
+            plain("One.<br>Two.<br/><br />Three."),
+            "One.\nTwo.\n\nThree."
+        );
+        assert_eq!(plain("<i>Tilted</i> &amp; <b>bold</b>"), "Tilted & bold");
+        assert_eq!(plain("A.<br><br><br><br>B.<br>"), "A.\n\nB.");
+        assert_eq!(plain("Keeps a < sign"), "Keeps a < sign");
     }
 
     #[test]

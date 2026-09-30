@@ -6,9 +6,10 @@
 
 mod merge;
 
+use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use crate::tagged::tagged_enum;
 use crate::{AppState, EntryId, LibraryEntry, ListStatus};
@@ -129,6 +130,16 @@ pub enum Tie {
     },
     /// The person said not to keep this show in step.
     Off,
+}
+
+impl Tie {
+    /// The media a linked show is tied to.
+    pub fn linked(&self) -> Option<&Media> {
+        match self {
+            Tie::Linked { media, .. } => Some(media),
+            Tie::Unpicked { .. } | Tie::Gone { .. } | Tie::Off => None,
+        }
+    }
 }
 
 /// A show set aside after the service rejected a write. The state it wanted
@@ -301,7 +312,8 @@ tagged_enum! {
 /// Now playing and the show's page draw. Kept per media, read on demand.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ShowInfo {
-    /// Every title the service gives, its main one first.
+    /// The show's titles in romaji, English and native script, as the
+    /// service has them, its main one first.
     pub titles: Vec<String>,
     pub format: Option<Format>,
     pub season: Option<Season>,
@@ -420,6 +432,11 @@ pub enum Report {
     },
 }
 
+/// How long a show's info stands before it is fetched again: an airing
+/// show's episode count and status move, and a week is often enough to see
+/// it without asking about every show every day.
+const DESCRIBE_AGAIN: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
 /// The sync side of [`AppState`].
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct SyncState {
@@ -435,41 +452,53 @@ pub struct SyncState {
     pub described: Vec<DescribedAt>,
 }
 
+/// Where `entry` stands with `account`'s service, given its listing there.
+fn link_state(entry: &LibraryEntry, account: &Account, listing: Option<&Listing>) -> LinkState {
+    let Some(listing) = listing else {
+        return LinkState::Looking;
+    };
+    match &listing.tie {
+        Tie::Unpicked { found } => LinkState::Unpicked { found: *found },
+        Tie::Gone { media } => LinkState::Gone {
+            show: media.title.clone(),
+        },
+        Tie::Off => LinkState::Off,
+        Tie::Linked { media, .. } => {
+            let show = media.title.clone();
+            let wanted = listing.wanted(entry, account.user);
+            // Parked on what it still wants, it stays refused; once it
+            // wants something else it is sent again, so it is waiting.
+            if let Some(parked) = listing.parked.as_ref().filter(|p| p.wanted == wanted) {
+                return LinkState::Refused {
+                    show,
+                    message: parked.message.clone(),
+                };
+            }
+            match listing.base_for(account.user) {
+                None => LinkState::Merging { show },
+                Some(base) if base.state == wanted => LinkState::InStep {
+                    show,
+                    listed: base.listed,
+                },
+                Some(_) => LinkState::Waiting { show },
+            }
+        }
+    }
+}
+
 impl SyncState {
     /// Where a show stands with a service, for the Library row to say;
     /// `None` while no account is signed in to that service.
     pub fn link_state(&self, entry: &LibraryEntry, service: Service) -> Option<LinkState> {
         let account = self.signed_in(service)?;
-        let Some(listing) = self.listing(entry.id, service) else {
-            return Some(LinkState::Looking);
-        };
-        Some(match &listing.tie {
-            Tie::Unpicked { found } => LinkState::Unpicked { found: *found },
-            Tie::Gone { media } => LinkState::Gone {
-                show: media.title.clone(),
-            },
-            Tie::Off => LinkState::Off,
-            Tie::Linked { media, .. } => {
-                let show = media.title.clone();
-                let wanted = listing.wanted(entry, account.user);
-                // Parked on what it still wants, it stays refused; once it
-                // wants something else it is sent again, so it is waiting.
-                if let Some(parked) = listing.parked.as_ref().filter(|p| p.wanted == wanted) {
-                    return Some(LinkState::Refused {
-                        show,
-                        message: parked.message.clone(),
-                    });
-                }
-                match listing.base_for(account.user) {
-                    None => LinkState::Merging { show },
-                    Some(base) if base.state == wanted => LinkState::InStep {
-                        show,
-                        listed: base.listed,
-                    },
-                    Some(_) => LinkState::Waiting { show },
-                }
-            }
-        })
+        Some(link_state(entry, account, self.listing(entry.id, service)))
+    }
+
+    /// The accounts signed in, in the order they were added.
+    pub fn signed_in_accounts(&self) -> impl Iterator<Item = &Account> {
+        self.accounts
+            .iter()
+            .filter(|account| account.signed == Signed::In)
     }
 
     /// The account for `service`, whatever its standing.
@@ -517,6 +546,24 @@ impl SyncState {
         })
     }
 
+    /// The fetch of a linked show's info, when it has none or what it has
+    /// is older than [`DESCRIBE_AGAIN`] at `now`.
+    fn describe(&self, entry: &LibraryEntry, service: Service, now: SystemTime) -> Option<Job> {
+        let media = self.listing(entry.id, service)?.tie.linked()?;
+        let fresh = self.described.iter().any(|known| {
+            known.service == service
+                && known.media == media.id
+                && now
+                    .duration_since(known.at)
+                    .is_ok_and(|age| age < DESCRIBE_AGAIN)
+        });
+        (!fresh).then_some(Job {
+            entry: entry.id,
+            task: Task::Describe { media: media.id },
+            when: When::Background,
+        })
+    }
+
     /// The reconcile one show gives one account, if any. A linked show is
     /// reconciled when what the library wants differs from its base, or
     /// from a first merge when this user has no base for it, which asks
@@ -527,9 +574,7 @@ impl SyncState {
     /// gone or off show has nothing to send.
     fn reconcile(&self, entry: &LibraryEntry, account: &Account) -> Option<Job> {
         let listing = self.listing(entry.id, account.service)?;
-        let Tie::Linked { media, .. } = &listing.tie else {
-            return None;
-        };
+        let media = listing.tie.linked()?;
         let wanted = listing.wanted(entry, account.user);
         if listing
             .parked
@@ -564,11 +609,10 @@ impl AppState {
     /// at most one search and one reconcile per show; the shell posts the
     /// whole thing whenever it changes.
     pub fn work(&self) -> Work {
+        let now = SystemTime::now();
         let services = self
             .sync
-            .accounts
-            .iter()
-            .filter(|account| matches!(account.signed, Signed::In))
+            .signed_in_accounts()
             .map(|account| ServiceWork {
                 service: account.service,
                 user: account.user,
@@ -580,6 +624,7 @@ impl AppState {
                             .find(entry, account.service)
                             .into_iter()
                             .chain(self.sync.reconcile(entry, account))
+                            .chain(self.sync.describe(entry, account.service, now))
                     })
                     .collect(),
             })
@@ -612,6 +657,14 @@ impl AppState {
                 }
                 Signed::In => raise(SyncLine::Synced),
             }
+            // One pass over the listings, rather than a search per show.
+            let listings: HashMap<EntryId, &Listing> = self
+                .sync
+                .listings
+                .iter()
+                .filter(|listing| listing.service == account.service)
+                .map(|listing| (listing.entry, listing))
+                .collect();
             for entry in &self.library {
                 // A check reads the list only when it gives a reconcile.
                 if self.sync.checks.contains(&(account.service, entry.id))
@@ -619,25 +672,25 @@ impl AppState {
                 {
                     raise(SyncLine::Checking);
                 }
-                let why = match self.sync.link_state(entry, account.service) {
-                    Some(LinkState::Unpicked { .. }) => NeedsYou::Pick,
-                    Some(LinkState::Gone { .. }) => NeedsYou::PickAnother,
-                    Some(LinkState::Refused { .. }) => NeedsYou::Rejected,
-                    Some(LinkState::Waiting { .. }) => {
+                let why = match link_state(entry, account, listings.get(&entry.id).copied()) {
+                    LinkState::Unpicked { .. } => NeedsYou::Pick,
+                    LinkState::Gone { .. } => NeedsYou::PickAnother,
+                    LinkState::Refused { .. } => NeedsYou::Rejected,
+                    LinkState::Waiting { .. } => {
                         raise(SyncLine::Sending);
                         continue;
                     }
                     // A first merge reads the list before it knows whether
                     // anything goes out.
-                    Some(LinkState::Merging { .. }) => {
+                    LinkState::Merging { .. } => {
                         raise(SyncLine::Checking);
                         continue;
                     }
-                    Some(LinkState::Looking) => {
+                    LinkState::Looking => {
                         raise(SyncLine::Finding);
                         continue;
                     }
-                    Some(LinkState::InStep { .. } | LinkState::Off) | None => continue,
+                    LinkState::InStep { .. } | LinkState::Off => continue,
                 };
                 raise(SyncLine::NeedsYou {
                     service: account.service,
@@ -655,23 +708,19 @@ impl AppState {
         self.library
             .iter()
             .filter_map(|entry| {
-                self.sync
-                    .accounts
-                    .iter()
-                    .filter(|account| account.signed == Signed::In)
-                    .find_map(|account| {
-                        let Some(LinkState::Waiting { .. }) =
-                            self.sync.link_state(entry, account.service)
-                        else {
-                            return None;
-                        };
-                        let listing = self.sync.listing(entry.id, account.service)?;
-                        Some(Waiting {
-                            entry,
-                            base: listing.base_for(account.user)?.state,
-                            wanted: listing.wanted(entry, account.user),
-                        })
+                self.sync.signed_in_accounts().find_map(|account| {
+                    let Some(LinkState::Waiting { .. }) =
+                        self.sync.link_state(entry, account.service)
+                    else {
+                        return None;
+                    };
+                    let listing = self.sync.listing(entry.id, account.service)?;
+                    Some(Waiting {
+                        entry,
+                        base: listing.base_for(account.user)?.state,
+                        wanted: listing.wanted(entry, account.user),
                     })
+                })
             })
             .collect()
     }
@@ -805,6 +854,8 @@ pub enum Task {
         wanted: ListState,
         base: Option<ListState>,
     },
+    /// Fetch what the service says about the show, and its cover.
+    Describe { media: MediaId },
 }
 
 /// How soon a job runs: at once, after the last edit settles, or when
@@ -900,12 +951,25 @@ mod tests {
         })
     }
 
+    /// An app whose linked shows were all described just now, so their
+    /// work holds only searches and reconciles; `described` tests the rest.
     fn app(accounts: Vec<Account>, library: Vec<LibraryEntry>, listings: Vec<Listing>) -> AppState {
+        let described = listings
+            .iter()
+            .filter_map(|listing| {
+                Some(DescribedAt {
+                    service: listing.service,
+                    media: listing.tie.linked()?.id,
+                    at: SystemTime::now(),
+                })
+            })
+            .collect();
         AppState {
             library,
             sync: SyncState {
                 accounts,
                 listings,
+                described,
                 ..SyncState::default()
             },
             ..AppState::default()
@@ -1263,6 +1327,42 @@ mod tests {
         );
         let signed_out = app(vec![account(Signed::Out)], library, listings);
         assert_eq!(signed_out.waiting(), vec![]);
+    }
+
+    #[test]
+    fn a_linked_show_is_described_when_it_never_was_or_a_week_has_passed() {
+        let wanted = state(ListStatus::Watching, 4, 3);
+        let mut app = app(
+            vec![account(Signed::In)],
+            vec![show(1, 4), show(2, 4)],
+            vec![
+                linked(1, based(7, LISTED, wanted)),
+                listing(2, Tie::Unpicked { found: 2 }, None),
+            ],
+        );
+        let describes = |app: &AppState| {
+            app.work().services[0]
+                .jobs
+                .iter()
+                .filter(|job| matches!(job.task, Task::Describe { .. }))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(describes(&app), vec![]);
+
+        let week = Duration::from_secs(7 * 24 * 60 * 60);
+        app.sync.described[0].at = SystemTime::now() - week - Duration::from_secs(60);
+        let described = vec![Job {
+            entry: EntryId(1),
+            task: Task::Describe { media: media().id },
+            when: When::Background,
+        }];
+        assert_eq!(describes(&app), described);
+
+        app.sync.described.clear();
+        assert_eq!(describes(&app), described);
+        app.sync.accounts = vec![account(Signed::Out)];
+        assert_eq!(app.work().services, vec![]);
     }
 
     /// The check is the read: a show in step is reconciled anyway, at once,

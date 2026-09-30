@@ -1,5 +1,6 @@
-//! The only network code. One agent and one shape of request: a POST of
-//! JSON to a service, with the bearer token on the calls that ask for it.
+//! The only network code. One agent and two shapes of request: a POST of
+//! JSON to a service, with the bearer token on the calls that ask for it,
+//! and a GET of a picture, which never carries the token.
 //! Nothing here logs a header or a body; a line names the method, the URL,
 //! the status and how long the call took. Every status comes back as a
 //! response, so the service module reads the reasons a 4xx carries; only a
@@ -16,6 +17,10 @@ use crate::Token;
 use crate::service::Failure;
 
 const TIMEOUT: Duration = Duration::from_secs(15);
+
+/// The most a picture may weigh. A cover is a few hundred kilobytes; a
+/// body past this is not one.
+const PICTURE_LIMIT: u64 = 8 * 1024 * 1024;
 const USER_AGENT: &str = concat!("Ryuuji/", env!("CARGO_PKG_VERSION"));
 
 /// A request as a service module builds it: where, what, and whether the
@@ -161,6 +166,42 @@ impl Http {
             body,
             received: Instant::now(),
         })
+    }
+}
+
+impl Http {
+    /// Fetches a picture from `url`. It takes no token, so none can go with
+    /// it: a picture lives on a public address, often another host's. Any
+    /// status but 200 is `Transient`, and so is a body past the limit.
+    pub(crate) fn fetch(&self, url: &str) -> Result<Vec<u8>, Failure> {
+        let started = Instant::now();
+        let response = match self.agent.get(url).header("Accept", "image/*").call() {
+            Ok(response) => response,
+            Err(err) => {
+                warn!(method = "GET", url, elapsed_ms = elapsed_ms(started), error = %err, "the picture could not be reached");
+                return Err(Failure::Offline);
+            }
+        };
+        let status = response.status().as_u16();
+        debug!(
+            method = "GET",
+            url,
+            status,
+            elapsed_ms = elapsed_ms(started),
+            "picture"
+        );
+        if status != 200 {
+            return Err(Failure::Transient);
+        }
+        response
+            .into_body()
+            .with_config()
+            .limit(PICTURE_LIMIT)
+            .read_to_vec()
+            .map_err(|err| {
+                warn!(url, error = %err, "the picture's body could not be read");
+                Failure::Transient
+            })
     }
 }
 
