@@ -31,6 +31,10 @@ pub fn authorize_url() -> String {
     format!("https://anilist.co/api/v2/oauth/authorize?client_id={CLIENT_ID}&response_type=token")
 }
 
+pub(crate) fn site_url(media: MediaId) -> String {
+    format!("https://anilist.co/anime/{}", media.0)
+}
+
 const VIEWER: &str = "query { Viewer { id name } }";
 const FIND: &str = "query ($search: String) { Page(perPage: 10) { media(search: $search, type: ANIME, sort: SEARCH_MATCH) { id idMal title { romaji english native } synonyms episodes format seasonYear } } }";
 const READ: &str = "query ($id: Int) { Media(id: $id, type: ANIME) { id episodes mediaListEntry { id status progress repeat } } }";
@@ -373,6 +377,14 @@ mod tests {
 
     fn data(text: &str) -> Value {
         classify(&Response::fixture(text)).unwrap().clone()
+    }
+
+    #[test]
+    fn a_shows_page_is_its_id_under_anime() {
+        assert_eq!(
+            crate::site_url(ryuuji_core::Service::AniList, MediaId(52_991)),
+            "https://anilist.co/anime/52991"
+        );
     }
 
     #[test]

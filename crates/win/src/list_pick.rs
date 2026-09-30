@@ -5,7 +5,7 @@
 //! by the worker; the card asks it with the show's title when it opens.
 
 use ryuuji_core::{
-    AppState, Candidate, Command, EntryId, LinkState, MediaId, Picker, Service, Signed,
+    AppState, Candidate, Command, EntryId, LinkState, MediaId, Picker, Service, Signed, Tie,
 };
 use windows_reactor::*;
 
@@ -59,6 +59,27 @@ pub(crate) fn needed(state: &AppState, entry: EntryId) -> Option<ListPick> {
                 current: None,
             })
         })
+}
+
+/// The pick Change entry opens over a show already linked, or one the
+/// person stopped syncing.
+pub(crate) fn changing(state: &AppState, entry: EntryId, service: Service) -> Option<ListPick> {
+    let shown = state.library.iter().find(|shown| shown.id == entry)?;
+    let current = state
+        .sync
+        .listing(entry, service)
+        .and_then(|listing| match &listing.tie {
+            Tie::Linked { media, .. } => Some(media.id),
+            Tie::Unpicked { .. } | Tie::Gone { .. } | Tie::Off => None,
+        });
+    Some(ListPick {
+        entry,
+        service,
+        title: shown.title.clone(),
+        reason: format!("Pick the entry this show is on {}.", service.label()),
+        picker: open_over(state, entry, service),
+        current,
+    })
 }
 
 fn open_over(state: &AppState, entry: EntryId, service: Service) -> Option<Picker> {
