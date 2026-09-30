@@ -127,6 +127,15 @@ pub struct HistoryPage {
     pub more: bool,
 }
 
+/// When a show last had an episode recorded that still stands, and in which
+/// player: what Continue watching says about it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LastWatched {
+    pub entry: EntryId,
+    pub player: String,
+    pub at: SystemTime,
+}
+
 impl Watch {
     /// The time a row shows: when it recorded, else when it was written.
     pub fn shown_at(&self) -> SystemTime {
