@@ -17,6 +17,7 @@ use ryuuji_core::{
 use tracing::warn;
 use windows_reactor::*;
 
+use crate::list_pick::{self, ListPick, ListPickProps};
 use crate::share;
 use crate::standing::{Standing, Why, standing};
 use crate::ui::{
@@ -77,10 +78,23 @@ pub(crate) fn body(
             dispatch,
             view: view(state, detection_down, &recent, SystemTime::now()),
             question: question(state),
+            list_pick: settled_entry(state).and_then(|entry| list_pick::needed(state, entry)),
         },
     )
     // A new file starts with the picker closed and its search empty.
     .with_key(key)
+}
+
+/// The show a playing file is settled on, when it is: a pick on a list is
+/// only asked of a show the file surely is.
+fn settled_entry(state: &AppState) -> Option<EntryId> {
+    if state.ignored || !matches!(state.now_playing, NowPlaying::Playing { .. }) {
+        return None;
+    }
+    match state.last_match.as_ref()?.link {
+        Link::Exact(entry) => Some(entry),
+        Link::Likely(_) | Link::Unmatched => None,
+    }
 }
 
 /// One library row the picker can offer, worked out by the caller so the
@@ -441,6 +455,8 @@ struct NowPlayingProps {
     dispatch: Dispatch<Command>,
     view: View,
     question: Option<Question>,
+    /// The playing show's entry on a list, when the person has to pick it.
+    list_pick: Option<ListPick>,
 }
 
 fn now_playing(props: &NowPlayingProps, cx: &mut RenderCx) -> Element {
@@ -478,7 +494,21 @@ fn now_playing(props: &NowPlayingProps, cx: &mut RenderCx) -> Element {
         )],
         View::Idle(idle) => idle_sections(idle, picker, &props.dispatch),
         View::Playing(playing) => {
-            playing_sections(playing, picker, &props.dispatch, set_wrong_show)
+            // A show the person says is wrong is settled before its list
+            // entry, which belongs to whichever show they pick.
+            let card = if wrong_show {
+                picker
+            } else {
+                let list_pick = props.list_pick.clone().map(|pick| {
+                    list_pick::card(ListPickProps {
+                        dispatch: props.dispatch.clone(),
+                        pick,
+                        cancel: false,
+                    })
+                });
+                list_pick.or(picker)
+            };
+            playing_sections(playing, card, &props.dispatch, set_wrong_show)
         }
     };
     scroll_viewer(vstack(sections).spacing(16.0).max_width(CONTENT_MAX_WIDTH)).into()
