@@ -333,11 +333,15 @@ pub enum RecordOutcome {
 }
 
 tagged_enum! {
-    /// Why a viewing past its threshold wrote nothing, in the order the
-    /// gates run: the name first, then the match, then the entry. Tags are
-    /// stored in the history table's `reason` column.
+    /// Why a viewing past its threshold wrote nothing: the person's own say
+    /// first, then the gates in the order they run, the name, the match and
+    /// the entry. Tags are stored in the history table's `reason` column.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum Decline {
+        /// The person said not to record this viewing. It comes before the
+        /// gates because it answers them all: nothing about the file matters
+        /// once they have said no.
+        Skipped => "skipped", "Not recorded: you skipped it",
         /// The name says it is a preview, a trailer, an opening. Such a name
         /// carries a real show and often a real episode number, so it is
         /// refused before the match is even considered: it is true of the
@@ -351,6 +355,15 @@ tagged_enum! {
         /// refuses the same; such a file is more often absolute numbering
         /// than a real episode.
         PastTotal => "past-total", "Not recorded: past the show's total",
+    }
+}
+
+impl Decline {
+    /// Why, without the "Not recorded: " the label opens with: the words a
+    /// shell puts after its own, so every place says a decline the same way.
+    pub fn reason(self) -> &'static str {
+        let label = self.label();
+        label.strip_prefix("Not recorded: ").unwrap_or(label)
     }
 }
 
@@ -393,6 +406,10 @@ pub enum Command {
     /// it was before the write, while the entry still stands where the
     /// recording left it.
     UndoRecording(HistoryId),
+    /// Says not to record the standing viewing. Only this viewing: the next
+    /// one of the same file counts as usual. A viewing that has recorded
+    /// already is left alone, since Undo is the way back from that.
+    DontRecord,
     /// Says the guessed show is the right one: remembers the title, relinks
     /// the standing proposal as exact, and records at once when the viewing
     /// has already earned it.
@@ -669,6 +686,15 @@ mod tests {
 
     #[test]
     fn decline_labels_say_why_nothing_was_recorded() {
+        for decline in Decline::ALL {
+            assert_eq!(
+                decline.label(),
+                format!("Not recorded: {}", decline.reason())
+            );
+        }
+        assert_eq!(Decline::NotNext.reason(), "not the next episode");
+        assert_eq!(Decline::Skipped.label(), "Not recorded: you skipped it");
+        assert_eq!(Decline::NotEpisode.label(), "Not recorded: not an episode");
         assert_eq!(Decline::NotExact.label(), "Not recorded: no exact match");
         assert_eq!(
             Decline::Completed.label(),

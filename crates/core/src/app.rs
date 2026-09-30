@@ -168,6 +168,7 @@ impl Ryuuji {
             Command::StopIgnoring => self.stop_ignoring_standing(),
             Command::PickShow(entry) => self.pick_show(entry),
             Command::UndoRecording(id) => self.undo_recording(id),
+            Command::DontRecord => self.dont_record(),
             Command::Synced(report) => self.synced(report),
             Command::SearchList {
                 entry,
@@ -204,12 +205,18 @@ impl Ryuuji {
                 matching::propose(&event, &self.state.library, &self.aliases, &self.ignored);
             self.record_match(proposal);
         }
-        self.state.watch_progress = observed.progress.map(|accrual| WatchProgress {
+        self.state.watch_progress = observed
+            .progress
+            .map(|accrual| self.watch_progress(accrual));
+        self.state.now_playing = NowPlaying::of(&event);
+    }
+
+    fn watch_progress(&mut self, accrual: Accrual) -> WatchProgress {
+        WatchProgress {
             accrued: accrual.accrued,
             threshold: accrual.threshold,
             outcome: self.record_outcome(accrual),
-        });
-        self.state.now_playing = NowPlaying::of(&event);
+        }
     }
 
     /// Writes the episode the standing viewing has earned, once per viewing,
@@ -226,6 +233,15 @@ impl Ryuuji {
         // since ignoring a file from now on does not unwrite an episode.
         if self.state.ignored {
             return RecordOutcome::Ignored;
+        }
+        // Said at once, like an ignored file, but logged only once the
+        // viewing has earned a row: a skip is a watch that reached the
+        // threshold and was refused, like any other decline.
+        if accrual.skipped {
+            if accrual.accrued >= accrual.threshold {
+                self.log_decline(Decline::Skipped);
+            }
+            return RecordOutcome::Declined(Decline::Skipped);
         }
         if accrual.accrued < accrual.threshold {
             return RecordOutcome::Counting;
@@ -341,6 +357,14 @@ impl Ryuuji {
             parsed_title: last.parsed_title.clone(),
             player: last.player.clone(),
         })
+    }
+
+    /// Skips the standing viewing and says so at once, without waiting for
+    /// the next event.
+    fn dont_record(&mut self) {
+        if self.session.skip() {
+            self.record_now();
+        }
     }
 
     /// Not `absorb`: the link is unchanged, so re-resolving would be a store
@@ -717,26 +741,17 @@ impl Ryuuji {
     /// Runs the gates against the standing viewing without waiting for a
     /// playback event. Confirming under a paused player would otherwise
     /// leave the card saying the episode was not recorded, since detection
-    /// sends nothing until playback moves.
+    /// sends nothing until playback moves. It goes the way an event does, so
+    /// whatever prompted it, a skipped viewing stays skipped and a recorded
+    /// one stays recorded.
     fn record_now(&mut self) {
-        let Some(progress) = self.state.watch_progress else {
-            return;
-        };
-        if progress.accrued < progress.threshold
-            || matches!(
-                progress.outcome,
-                RecordOutcome::Recorded(_) | RecordOutcome::Undone
-            )
-        {
+        if self.state.watch_progress.is_none() {
             return;
         }
-        let outcome = match self.earned() {
-            Ok(write) => self.record(write),
-            Err(decline) => self.declined(decline),
-        };
-        if let Some(progress) = self.state.watch_progress.as_mut() {
-            progress.outcome = outcome;
-        }
+        self.state.watch_progress = self
+            .session
+            .progress()
+            .map(|accrual| self.watch_progress(accrual));
     }
 
     #[cfg(test)]
@@ -2613,6 +2628,128 @@ mod tests {
         assert_eq!(stored_writes(&dir), vec![(1..=1, 0, 1)]);
         assert_eq!(stored_watches(&dir).len(), 1);
         assert!(app.state().notices.is_empty());
+    }
+
+    #[test]
+    fn dont_record_says_so_at_once_and_logs_one_decline_at_the_threshold() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::AddEntry(entry("Show")));
+        app.dispatch(Command::Playback(playing("Show - 01.mkv")));
+        app.dispatch(Command::DontRecord);
+        assert_eq!(outcome(&app), RecordOutcome::Declined(Decline::Skipped));
+        assert_eq!(stored_watches(&dir), vec![]);
+
+        app.dispatch(Command::Playback(later("Show - 01.mkv", 720)));
+        app.dispatch(Command::Playback(later("Show - 01.mkv", 1_400)));
+        assert_eq!(outcome(&app), RecordOutcome::Declined(Decline::Skipped));
+        assert_eq!(app.state().library[0].progress, 0);
+        assert_eq!(stored_declines(&dir), vec![Decline::Skipped]);
+        assert!(app.state().notices.is_empty());
+    }
+
+    #[test]
+    fn dont_record_past_the_threshold_logs_at_once() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::AddEntry(entry("Show")));
+        app.dispatch(Command::Playback(playing("Show - 05.mkv")));
+        app.dispatch(Command::Playback(later("Show - 05.mkv", 720)));
+        assert_eq!(outcome(&app), RecordOutcome::Declined(Decline::NotNext));
+        app.dispatch(Command::DontRecord);
+        assert_eq!(outcome(&app), RecordOutcome::Declined(Decline::Skipped));
+        let watches = stored_watches(&dir);
+        assert_eq!(watches.len(), 1);
+        assert_eq!(watches[0].outcome, WatchOutcome::Declined(Decline::Skipped));
+    }
+
+    #[test]
+    fn dont_record_leaves_a_recording_to_undo() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        let watch = record_first_episode(&mut app, &dir);
+        app.dispatch(Command::DontRecord);
+        assert_eq!(outcome(&app), RecordOutcome::Recorded(watch));
+        assert_eq!(stored_writes(&dir), vec![(1..=1, 0, 1)]);
+        app.dispatch(Command::UndoRecording(watch));
+        assert_eq!(app.state().library[0].progress, 0);
+    }
+
+    #[test]
+    fn a_skip_outlasts_another_player_for_a_moment() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::AddEntry(entry("Show")));
+        app.dispatch(Command::Playback(playing("Show - 01.mkv")));
+        app.dispatch(Command::DontRecord);
+        app.dispatch(Command::Playback(elsewhere(10)));
+        app.dispatch(Command::Playback(later("Show - 01.mkv", 20)));
+        app.dispatch(Command::Playback(later("Show - 01.mkv", 740)));
+        assert_eq!(outcome(&app), RecordOutcome::Declined(Decline::Skipped));
+        assert_eq!(app.state().library[0].progress, 0);
+    }
+
+    #[test]
+    fn a_skip_holds_whatever_else_runs_the_gates() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::AddEntry(entry("Show")));
+        app.dispatch(Command::AddEntry(entry("Other")));
+        let other = app.state().library[1].id;
+        app.dispatch(Command::SetStatus {
+            id: other,
+            status: WatchStatus::Completed,
+        });
+        app.dispatch(Command::Playback(playing("Show - 01.mkv")));
+        app.dispatch(Command::DontRecord);
+        app.dispatch(Command::Playback(later("Show - 01.mkv", 720)));
+
+        // A rewatch on another show, then naming the show by hand, each run
+        // the gates again; neither may write the skipped episode.
+        app.dispatch(Command::SetRewatching {
+            id: other,
+            rewatching: true,
+        });
+        app.dispatch(Command::PickShow(other));
+        assert_eq!(outcome(&app), RecordOutcome::Declined(Decline::Skipped));
+        assert_eq!(stored_writes(&dir), vec![]);
+        assert!(app.state().library.iter().all(|entry| entry.progress == 0));
+    }
+
+    #[test]
+    fn a_relaunch_under_a_skipped_file_keeps_the_skip() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::AddEntry(entry("Show")));
+        app.dispatch(Command::Playback(playing("Show - 01.mkv")));
+        app.dispatch(Command::DontRecord);
+        app.dispatch(Command::Playback(later("Show - 01.mkv", 720)));
+        drop(app);
+
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::Playback(later("Show - 01.mkv", 2_000)));
+        app.dispatch(Command::Playback(later("Show - 01.mkv", 2_720)));
+        assert_eq!(outcome(&app), RecordOutcome::Declined(Decline::Skipped));
+        assert_eq!(app.state().library[0].progress, 0);
+        assert_eq!(stored_declines(&dir), vec![Decline::Skipped]);
+    }
+
+    #[test]
+    fn a_skipped_file_counts_when_played_again_later() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::AddEntry(entry("Show")));
+        app.dispatch(Command::Playback(playing("Show - 01.mkv")));
+        app.dispatch(Command::DontRecord);
+        app.dispatch(Command::Playback(later("Show - 01.mkv", 720)));
+        watch_past_threshold(&mut app, "Show - 02.mkv");
+        drop(app);
+
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::Playback(later("Show - 01.mkv", 3_000)));
+        app.dispatch(Command::Playback(later("Show - 01.mkv", 3_720)));
+        assert_eq!(app.state().library[0].progress, 1);
+        assert_eq!(stored_writes(&dir), vec![(1..=1, 0, 1)]);
     }
 
     #[test]
