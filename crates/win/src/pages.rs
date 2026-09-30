@@ -3,9 +3,9 @@
 //! the theme picker, the data folder and the way into Diagnostics. Empty
 //! pages use a placeholder in the symbolic empty-state style the UI-direction
 //! research settled on (heading required, neutral tone). Now playing and
-//! History live in modules of their own; History is the one page handed the
-//! core handle, since it reads its rows on demand. Details are built by the
-//! shell, so this module never sees the log buffer.
+//! History live in modules of their own and are handed the core handle,
+//! since they read from the store on demand. Details are built by the shell,
+//! so this module never sees the log buffer.
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -75,7 +75,7 @@ pub fn body(
                 rows: library_rows(&state.library),
             },
         ),
-        Page::NowPlaying => now_playing::body(state, dispatch, detection_down),
+        Page::NowPlaying => now_playing::body(state, dispatch, detection_down, core),
         Page::History => component(
             history::history,
             HistoryProps {
