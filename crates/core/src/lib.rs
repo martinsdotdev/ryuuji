@@ -44,8 +44,9 @@ pub use store::{
 };
 pub use sync::{
     Account, Asked, Attempt, Candidate, Job, LinkState, LinkedBy, ListBase, ListEntryId, ListState,
-    ListUpdate, ListUpdateId, Listing, Media, MediaId, Merge, Parked, Patch, Picker, Remote,
-    Report, Service, ServiceWork, Signed, SyncState, Task, Tie, UserId, When, Work, Write, merge,
+    ListUpdate, ListUpdateId, Listing, Media, MediaId, Merge, NeedsYou, Parked, Patch, Picker,
+    Remote, Report, Service, ServiceWork, Signed, SyncLine, SyncState, Task, Tie, UserId, Waiting,
+    When, Work, Write, merge,
 };
 pub(crate) use sync::{AutoLink, Settlement, auto_link, settlement};
 use tagged::tagged_enum;

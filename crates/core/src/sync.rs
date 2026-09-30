@@ -349,7 +349,10 @@ impl SyncState {
             Tie::Off => LinkState::Off,
             Tie::Linked { media, .. } => {
                 let show = media.title.clone();
-                if let Some(parked) = &listing.parked {
+                let wanted = listing.wanted(entry, account.user);
+                // Parked on what it still wants, it stays refused; once it
+                // wants something else it is sent again, so it is waiting.
+                if let Some(parked) = listing.parked.as_ref().filter(|p| p.wanted == wanted) {
                     return Some(LinkState::Refused {
                         show,
                         message: parked.message.clone(),
@@ -357,12 +360,10 @@ impl SyncState {
                 }
                 match listing.base_for(account.user) {
                     None => LinkState::Merging { show },
-                    Some(base) if base.state == listing.wanted(entry, account.user) => {
-                        LinkState::InStep {
-                            show,
-                            listed: base.listed,
-                        }
-                    }
+                    Some(base) if base.state == wanted => LinkState::InStep {
+                        show,
+                        listed: base.listed,
+                    },
                     Some(_) => LinkState::Waiting { show },
                 }
             }
@@ -381,7 +382,7 @@ impl SyncState {
             .filter(|account| matches!(account.signed, Signed::In))
     }
 
-    pub(crate) fn listing(&self, entry: EntryId, service: Service) -> Option<&Listing> {
+    pub fn listing(&self, entry: EntryId, service: Service) -> Option<&Listing> {
         self.listings
             .iter()
             .find(|listing| listing.entry == entry && listing.service == service)
@@ -482,6 +483,156 @@ impl AppState {
             })
             .collect();
         Work { services }
+    }
+
+    /// Sync in one line, for the status bar: a service is named only when
+    /// it needs the person. `None` while no account is signed in, or
+    /// refused, since then there is nothing to say.
+    pub fn sync_line(&self) -> Option<SyncLine> {
+        let mut line: Option<SyncLine> = None;
+        let mut raise = |next: SyncLine| {
+            if line
+                .as_ref()
+                .is_none_or(|standing| next.rank() > standing.rank())
+            {
+                line = Some(next);
+            }
+        };
+        for account in &self.sync.accounts {
+            match account.signed {
+                Signed::Out => continue,
+                Signed::Refused { .. } => {
+                    raise(SyncLine::NeedsYou {
+                        service: account.service,
+                        why: NeedsYou::SignIn,
+                    });
+                    continue;
+                }
+                Signed::In => raise(SyncLine::Synced),
+            }
+            for entry in &self.library {
+                // A check reads the list only when it gives a reconcile.
+                if self.sync.checks.contains(&(account.service, entry.id))
+                    && self.sync.reconcile(entry, account).is_some()
+                {
+                    raise(SyncLine::Checking);
+                }
+                let why = match self.sync.link_state(entry, account.service) {
+                    Some(LinkState::Unpicked { .. }) => NeedsYou::Pick,
+                    Some(LinkState::Gone { .. }) => NeedsYou::PickAnother,
+                    Some(LinkState::Refused { .. }) => NeedsYou::Rejected,
+                    Some(LinkState::Waiting { .. }) => {
+                        raise(SyncLine::Sending);
+                        continue;
+                    }
+                    // A first merge reads the list before it knows whether
+                    // anything goes out.
+                    Some(LinkState::Merging { .. }) => {
+                        raise(SyncLine::Checking);
+                        continue;
+                    }
+                    Some(LinkState::Looking) => {
+                        raise(SyncLine::Finding);
+                        continue;
+                    }
+                    Some(LinkState::InStep { .. } | LinkState::Off) | None => continue,
+                };
+                raise(SyncLine::NeedsYou {
+                    service: account.service,
+                    why,
+                });
+            }
+        }
+        line
+    }
+
+    /// The shows with a change waiting to go out, in library order, each
+    /// once however many lists it waits for. A first merge is not among
+    /// them: until the list is read there is nothing to set against.
+    pub fn waiting(&self) -> Vec<Waiting<'_>> {
+        self.library
+            .iter()
+            .filter_map(|entry| {
+                self.sync
+                    .accounts
+                    .iter()
+                    .filter(|account| account.signed == Signed::In)
+                    .find_map(|account| {
+                        let Some(LinkState::Waiting { .. }) =
+                            self.sync.link_state(entry, account.service)
+                        else {
+                            return None;
+                        };
+                        let listing = self.sync.listing(entry.id, account.service)?;
+                        Some(Waiting {
+                            entry,
+                            base: listing.base_for(account.user)?.state,
+                            wanted: listing.wanted(entry, account.user),
+                        })
+                    })
+            })
+            .collect()
+    }
+}
+
+/// A change waiting to go out to a signed-in list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Waiting<'a> {
+    pub entry: &'a LibraryEntry,
+    /// What the list last confirmed.
+    pub base: ListState,
+    /// What the library wants it to hold.
+    pub wanted: ListState,
+}
+
+/// Sync in one line. Only a service that needs the person is named; every
+/// other state is said of the library as a whole.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SyncLine {
+    /// Every signed-in list holds what the library wants.
+    Synced,
+    /// Shows are being looked up on a list for the first time.
+    Finding,
+    /// A change waits to go out.
+    Sending,
+    /// A list is being read, to merge a show it was never read for or to
+    /// see whether it knows of watching further.
+    Checking,
+    NeedsYou {
+        service: Service,
+        why: NeedsYou,
+    },
+}
+
+/// What a service needs the person to do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NeedsYou {
+    /// Its token was refused.
+    SignIn,
+    /// A show matches several of its entries.
+    Pick,
+    /// A show's entry is gone from it.
+    PickAnother,
+    /// It refused a change.
+    Rejected,
+}
+
+impl SyncLine {
+    /// Which line wins when several are true: whatever needs the person,
+    /// then what is under way, then quiet.
+    fn rank(self) -> u8 {
+        match self {
+            SyncLine::Synced => 0,
+            SyncLine::Finding => 1,
+            SyncLine::Sending => 2,
+            SyncLine::Checking => 3,
+            SyncLine::NeedsYou { why, .. } => match why {
+                NeedsYou::Rejected => 4,
+                NeedsYou::PickAnother => 5,
+                NeedsYou::Pick => 6,
+                NeedsYou::SignIn => 7,
+            },
+        }
     }
 }
 
@@ -888,6 +1039,15 @@ mod tests {
                 message: "Validation error".into()
             })
         );
+        // Parked on something it no longer wants, it is sent again.
+        let moved_on = Listing {
+            parked: parked(state(ListStatus::Watching, 3, 3)),
+            ..linked(1, based(7, LISTED, state(ListStatus::Watching, 3, 3)))
+        };
+        assert_eq!(
+            state_of(&signed_in, vec![moved_on]),
+            Some(LinkState::Waiting { show: show() })
+        );
         assert_eq!(
             state_of(
                 &signed_in,
@@ -899,6 +1059,108 @@ mod tests {
             state_of(&signed_in, vec![listing(1, Tie::Off, None)]),
             Some(LinkState::Off)
         );
+    }
+
+    #[test]
+    fn the_sync_line_names_a_service_only_when_it_needs_you() {
+        let wanted = state(ListStatus::Watching, 4, 3);
+        let line = |accounts: Vec<Account>, listings: Vec<Listing>| {
+            app(accounts, vec![show(1, 4), show(2, 4)], listings).sync_line()
+        };
+        let in_step = || linked(1, based(7, LISTED, wanted));
+        let also_in_step = || linked(2, based(7, LISTED, wanted));
+        assert_eq!(line(vec![], vec![]), None);
+        assert_eq!(line(vec![account(Signed::Out)], vec![]), None);
+        assert_eq!(
+            line(vec![account(Signed::In)], vec![in_step(), also_in_step()]),
+            Some(SyncLine::Synced)
+        );
+        assert_eq!(
+            line(vec![account(Signed::In)], vec![in_step()]),
+            Some(SyncLine::Finding)
+        );
+        let behind = linked(2, based(7, LISTED, state(ListStatus::Watching, 3, 3)));
+        assert_eq!(
+            line(vec![account(Signed::In)], vec![in_step(), behind.clone()]),
+            Some(SyncLine::Sending)
+        );
+        let mut checking = app(
+            vec![account(Signed::In)],
+            vec![show(1, 4), show(2, 4)],
+            vec![in_step(), behind.clone()],
+        );
+        checking.sync.checks = vec![(Service::AniList, EntryId(1))];
+        assert_eq!(checking.sync_line(), Some(SyncLine::Checking));
+        let mut not_synced = app(
+            vec![account(Signed::In)],
+            vec![show(1, 4), show(2, 4)],
+            vec![in_step(), listing(2, Tie::Off, None)],
+        );
+        not_synced.sync.checks = vec![(Service::AniList, EntryId(2))];
+        assert_eq!(not_synced.sync_line(), Some(SyncLine::Synced));
+        assert_eq!(
+            line(vec![account(Signed::In)], vec![in_step(), linked(2, None)]),
+            Some(SyncLine::Checking)
+        );
+        let needs = |why| {
+            Some(SyncLine::NeedsYou {
+                service: Service::AniList,
+                why,
+            })
+        };
+        assert_eq!(
+            line(
+                vec![account(Signed::In)],
+                vec![behind.clone(), listing(1, Tie::Unpicked { found: 3 }, None)]
+            ),
+            needs(NeedsYou::Pick)
+        );
+        assert_eq!(
+            line(
+                vec![account(Signed::In)],
+                vec![in_step(), listing(2, Tie::Gone { media: media() }, None)]
+            ),
+            needs(NeedsYou::PickAnother)
+        );
+        let rejected = Listing {
+            parked: parked(wanted),
+            ..linked(2, based(7, LISTED, state(ListStatus::Watching, 3, 3)))
+        };
+        assert_eq!(
+            line(vec![account(Signed::In)], vec![in_step(), rejected]),
+            needs(NeedsYou::Rejected)
+        );
+        let refused = account(Signed::Refused {
+            message: "Invalid token".into(),
+        });
+        assert_eq!(line(vec![refused], vec![]), needs(NeedsYou::SignIn));
+    }
+
+    #[test]
+    fn a_show_waits_to_go_out_while_its_list_holds_something_else() {
+        let wanted = state(ListStatus::Watching, 4, 3);
+        let was = state(ListStatus::Watching, 3, 3);
+        let library = vec![show(1, 4), show(2, 4), show(3, 4), show(4, 4)];
+        let listings = vec![
+            linked(1, based(7, LISTED, wanted)),
+            linked(2, based(7, LISTED, was)),
+            linked(3, None),
+            Listing {
+                parked: parked(wanted),
+                ..linked(4, based(7, LISTED, was))
+            },
+        ];
+        let signed_in = app(vec![account(Signed::In)], library.clone(), listings.clone());
+        assert_eq!(
+            signed_in.waiting(),
+            vec![Waiting {
+                entry: &signed_in.library[1],
+                base: was,
+                wanted,
+            }]
+        );
+        let signed_out = app(vec![account(Signed::Out)], library, listings);
+        assert_eq!(signed_out.waiting(), vec![]);
     }
 
     /// The check is the read: a show in step is reconciled anyway, at once,
