@@ -65,6 +65,10 @@ struct Viewing {
     /// What the viewing's recording became once it wrote one: `Recorded`,
     /// or `Undone` after an undo. Nothing records again while it is set.
     recorded: Option<RecordOutcome>,
+    /// The person said not to record this viewing. It lasts as long as the
+    /// viewing does, set aside and back included, and a relaunch that picks
+    /// the viewing's row back up keeps it.
+    skipped: bool,
     /// The history row this viewing has written, once it has one.
     row: Option<HistoryId>,
     /// What the viewing last put in its row, or tried to. A failed write is
@@ -122,6 +126,8 @@ pub(crate) struct Accrual {
     /// What the viewing's recording became, once it has written its
     /// episode: the app shows it instead of running the gates again.
     pub recorded: Option<RecordOutcome>,
+    /// The person said not to record this viewing.
+    pub skipped: bool,
 }
 
 impl WatchSession {
@@ -132,7 +138,8 @@ impl WatchSession {
     /// recording that row still holds comes back with it, so the viewing
     /// reads as recorded instead of running the gates again and refusing the
     /// episode it just wrote; one already undone does not, so watching the
-    /// file again records it afresh. Like any viewing it is set aside when
+    /// file again records it afresh. A row the person skipped keeps the
+    /// viewing skipped. Like any viewing it is set aside when
     /// detection reports another player first, as it does at launch, and
     /// comes back with its player.
     pub(crate) fn resume(
@@ -151,6 +158,8 @@ impl WatchSession {
                     }
                     _ => None,
                 }),
+                skipped: newest
+                    .is_some_and(|watch| watch.outcome == WatchOutcome::Declined(Decline::Skipped)),
                 ..Viewing::new(key)
             }
         });
@@ -196,6 +205,19 @@ impl WatchSession {
         self.wrote(row, Logged::Recorded);
         if let Some(viewing) = self.viewing.as_mut() {
             viewing.recorded = Some(RecordOutcome::Recorded(row));
+        }
+    }
+
+    /// Marks the standing viewing as one not to record. Says whether that
+    /// changed anything: there may be no viewing, it may be skipped already,
+    /// or it may have recorded, which only Undo takes back.
+    pub(crate) fn skip(&mut self) -> bool {
+        match self.viewing.as_mut() {
+            Some(viewing) if viewing.recorded.is_none() && !viewing.skipped => {
+                viewing.skipped = true;
+                true
+            }
+            _ => false,
         }
     }
 
@@ -259,7 +281,7 @@ impl WatchSession {
         }
     }
 
-    fn progress(&self) -> Option<Accrual> {
+    pub(crate) fn progress(&self) -> Option<Accrual> {
         let viewing = self.viewing.as_ref()?;
         let threshold = if viewing.duration.is_zero() {
             FALLBACK_THRESHOLD
@@ -270,6 +292,7 @@ impl WatchSession {
             accrued: viewing.accrued,
             threshold,
             recorded: viewing.recorded,
+            skipped: viewing.skipped,
         })
     }
 }
@@ -281,6 +304,7 @@ impl Viewing {
             duration: Duration::ZERO,
             accrued: Duration::ZERO,
             recorded: None,
+            skipped: false,
             row: None,
             logged: None,
         }
@@ -379,6 +403,7 @@ mod tests {
                     accrued: Duration::ZERO,
                     threshold: secs(710),
                     recorded: None,
+                    skipped: false,
                 }),
             }
         );
@@ -744,10 +769,37 @@ mod tests {
                 accrued: Duration::ZERO,
                 threshold: secs(710),
                 recorded: None,
+                skipped: false,
             })
         );
         // Nothing from the old title's cursor leaks into the first credit.
         assert_eq!(accrued(&session), Duration::ZERO);
+    }
+
+    #[test]
+    fn a_skip_needs_a_viewing_that_has_not_recorded() {
+        let mut session = WatchSession::default();
+        assert!(!session.skip());
+
+        session.observe(&playing_at(100, 1_000));
+        assert!(session.skip());
+        assert!(!session.skip());
+        assert!(session.progress().unwrap().skipped);
+
+        let mut recorded = WatchSession::default();
+        recorded.observe(&playing_at(100, 1_000));
+        recorded.mark_recorded(HistoryId(1));
+        assert!(!recorded.skip());
+        assert!(!recorded.progress().unwrap().skipped);
+    }
+
+    #[test]
+    fn a_new_viewing_is_not_skipped() {
+        let mut session = WatchSession::default();
+        session.observe(&playing_at(100, 1_000));
+        session.skip();
+        let observed = session.observe(&event("Show - 04.mkv", PlaybackStatus::Playing, 5, 1_005));
+        assert!(!observed.progress.unwrap().skipped);
     }
 
     #[test]
