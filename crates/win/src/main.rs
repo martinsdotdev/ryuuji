@@ -12,6 +12,7 @@ mod now_playing;
 mod pages;
 mod share;
 mod shell;
+mod show_info;
 mod show_page;
 mod standing;
 mod status_bar;

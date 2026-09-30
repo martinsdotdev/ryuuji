@@ -169,10 +169,12 @@ impl Component for Shell {
                 core,
                 &syncer,
             ),
+            Body::Detail(Detail::Entry(entry)) => {
+                show_page::body(&state, entry, dispatch.clone(), core)
+            }
             // Built here rather than in `pages`: the props carry the core
             // handle, the log buffer, the watcher and the sync worker, all
             // owned by `Shell`.
-            Body::Detail(Detail::Entry(entry)) => show_page::body(&state, entry, dispatch.clone()),
             Body::Detail(Detail::Diagnostics) => component(
                 debug::diagnostics,
                 debug::DiagnosticsProps {

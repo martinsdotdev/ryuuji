@@ -255,15 +255,14 @@ fn library(props: &LibraryProps, _cx: &mut RenderCx) -> Element {
         };
         // The toolkit's list has no item click, so the page opens from a
         // button of its own.
-        let details = {
-            let dispatch = dispatch.clone();
-            let id = row.entry;
-            button("Details")
-                .on_click(move || dispatch.call(Command::OpenDetail(Detail::Entry(id))))
-                .automation_name(format!("Details of {}", row.title))
-                .vertical_alignment(VerticalAlignment::Center)
-                .grid_column(2)
-        };
+        let details = button("Details")
+            .on_click(ui::send(
+                &dispatch,
+                Command::OpenDetail(Detail::Entry(row.entry)),
+            ))
+            .automation_name(format!("Details of {}", row.title))
+            .vertical_alignment(VerticalAlignment::Center)
+            .grid_column(2);
         grid(vec![main.into(), action, details.into()])
             .columns([GridLength::STAR, GridLength::Auto, GridLength::Auto])
             .column_spacing(8.0)

@@ -6,11 +6,11 @@
 use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 
-use ryuuji_core::{AppState, Command, NeedsYou, NowPlaying, Signed, SyncLine};
+use ryuuji_core::{AppState, Command, NeedsYou, NowPlaying, SyncLine};
 use ryuuji_sync::{Pause, ServiceFacts, SyncError, Syncer};
 use windows_reactor::*;
 
-use crate::standing::{Standing, standing};
+use crate::standing::{Standing, Tone, standing};
 use crate::ui::{self, ICON_FONT, clock_text, duration_text};
 
 const HEIGHT: f64 = 32.0;
@@ -22,26 +22,6 @@ const CAUTION_GLYPH: &str = "\u{E7BA}";
 /// moves and a pause shows.
 const TICK: Duration = Duration::from_secs(1);
 
-/// The colour of the dot beside the recording's words.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Dot {
-    /// Counting down to the write.
-    Accent,
-    /// Written.
-    Success,
-    /// Nothing is being written.
-    Neutral,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Recording {
-    pub dot: Dot,
-    pub text: String,
-    /// What the button that skips the viewing says, while there is a
-    /// countdown for it to stop.
-    pub skip: Option<String>,
-}
-
 /// What the bar says, left to right.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct StatusBar {
@@ -50,7 +30,8 @@ pub(crate) struct StatusBar {
     pub sync: Option<SyncLine>,
     /// How many accounts are signed in, which decides "list" or "lists".
     pub lists: usize,
-    pub recording: Option<Recording>,
+    /// Where the playing viewing stands against its recording.
+    pub recording: Option<Standing>,
     /// `11:33 / 24:00` while something plays.
     pub position: Option<String>,
     /// Said while nothing plays, when the bar would otherwise be empty.
@@ -58,15 +39,6 @@ pub(crate) struct StatusBar {
 }
 
 pub(crate) fn status_bar(state: &AppState, detection_down: bool) -> StatusBar {
-    let recording = standing(state).map(|standing| Recording {
-        dot: match standing {
-            Standing::Counting { .. } => Dot::Accent,
-            Standing::Recorded { .. } => Dot::Success,
-            Standing::Undone { .. } | Standing::NotRecording { .. } => Dot::Neutral,
-        },
-        text: standing.status(),
-        skip: standing.skip_label(),
-    });
     let (position, tracking) = match &state.now_playing {
         NowPlaying::Playing {
             position, duration, ..
@@ -89,13 +61,8 @@ pub(crate) fn status_bar(state: &AppState, detection_down: bool) -> StatusBar {
     };
     StatusBar {
         sync: state.sync_line(),
-        lists: state
-            .sync
-            .accounts
-            .iter()
-            .filter(|account| account.signed == Signed::In)
-            .count(),
-        recording,
+        lists: state.sync.signed_in_accounts().count(),
+        recording: standing(state),
         position,
         tracking,
     }
@@ -240,11 +207,13 @@ fn bar(bar: &StatusBar, sync: Option<&SyncSegment>, dispatch: Dispatch<Command>)
     .border_brush(ThemeRef::DividerStroke)
 }
 
-fn recording_segment(recording: &Recording, dispatch: Dispatch<Command>) -> Element {
-    let brush = match recording.dot {
-        Dot::Accent => ThemeRef::Accent,
-        Dot::Success => ThemeRef::SystemSuccess,
-        Dot::Neutral => ThemeRef::custom("ControlStrongFillColorDefaultBrush"),
+fn recording_segment(standing: &Standing, dispatch: Dispatch<Command>) -> Element {
+    let brush = match standing.tone() {
+        Tone::Accent => ThemeRef::Accent,
+        Tone::Success => ThemeRef::SystemSuccess,
+        // The bar keeps caution for sync; a declined episode is said in
+        // words here and in caution on Now playing.
+        Tone::Neutral | Tone::Caution => ThemeRef::custom("ControlStrongFillColorDefaultBrush"),
     };
     let mut parts: Vec<Element> = vec![
         border(Element::Empty)
@@ -254,19 +223,19 @@ fn recording_segment(recording: &Recording, dispatch: Dispatch<Command>) -> Elem
             .background(brush)
             .vertical_alignment(VerticalAlignment::Center)
             .into(),
-        small(recording.text.clone())
+        small(standing.status())
             .foreground(ThemeRef::PrimaryText)
             .vertical_alignment(VerticalAlignment::Center)
             .into(),
     ];
-    if let Some(label) = &recording.skip {
+    if let Some(label) = standing.skip_label() {
         parts.push(
             button("")
                 .icon(Icon::font(CANCEL_GLYPH))
                 .subtle()
                 .tooltip(label.clone())
                 .automation_name(label.clone())
-                .on_click(move || dispatch.call(Command::DontRecord))
+                .on_click(ui::send(&dispatch, Command::DontRecord))
                 .padding(Thickness::uniform(4.0))
                 .vertical_alignment(VerticalAlignment::Center)
                 .into(),
@@ -345,22 +314,27 @@ mod tests {
         }
     }
 
+    /// What the bar says of the recording: its tone, its words and its
+    /// skip button.
+    fn recording(bar: &StatusBar) -> Option<(Tone, String, Option<String>)> {
+        bar.recording
+            .as_ref()
+            .map(|standing| (standing.tone(), standing.status(), standing.skip_label()))
+    }
+
     #[test]
     fn while_something_plays_the_bar_says_the_recording_and_the_position() {
+        let bar = status_bar(&playing(RecordOutcome::Counting), false);
         assert_eq!(
-            status_bar(&playing(RecordOutcome::Counting), false),
-            StatusBar {
-                sync: None,
-                lists: 0,
-                recording: Some(Recording {
-                    dot: Dot::Neutral,
-                    text: "Not recording \u{b7} no match".to_owned(),
-                    skip: None,
-                }),
-                position: Some("11:33 / 24:00".to_owned()),
-                tracking: None,
-            }
+            recording(&bar),
+            Some((
+                Tone::Neutral,
+                "Not recording \u{b7} no match".to_owned(),
+                None
+            ))
         );
+        assert_eq!(bar.position.as_deref(), Some("11:33 / 24:00"));
+        assert_eq!((bar.sync, bar.lists, bar.tracking), (None, 0, None));
     }
 
     #[test]
@@ -403,12 +377,12 @@ mod tests {
             m.link = Link::Exact(entry.id);
         }
         assert_eq!(
-            status_bar(&state, false).recording,
-            Some(Recording {
-                dot: Dot::Accent,
-                text: "Records in 7:00".to_owned(),
-                skip: Some("Don't record episode 1".to_owned()),
-            })
+            recording(&status_bar(&state, false)),
+            Some((
+                Tone::Accent,
+                "Records in 7:00".to_owned(),
+                Some("Don't record episode 1".to_owned())
+            ))
         );
     }
 

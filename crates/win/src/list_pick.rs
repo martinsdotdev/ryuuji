@@ -4,12 +4,11 @@
 //! when the service needs the person. The search is the core's picker, run
 //! by the worker; the card asks it with the show's title when it opens.
 
-use ryuuji_core::{
-    AppState, Candidate, Command, EntryId, LinkState, MediaId, Picker, Service, Signed, Tie,
-};
+use ryuuji_core::{AppState, Candidate, Command, EntryId, LinkState, MediaId, Picker, Service};
 use windows_reactor::*;
 
-use crate::ui::{caption, card_frame};
+use crate::show_info;
+use crate::ui::{self, PICKER_HEIGHT, PICKER_ROWS, caption, card_frame};
 
 /// A show's pick on one service, worked out from the state.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -26,52 +25,50 @@ pub(crate) struct ListPick {
     pub current: Option<MediaId>,
 }
 
-/// The pick the show needs on the first signed-in service that needs one:
-/// it matched several entries, or the one it was linked to is gone.
+/// The pick the show needs on the first signed-in service that needs one.
 pub(crate) fn needed(state: &AppState, entry: EntryId) -> Option<ListPick> {
-    let shown = state.library.iter().find(|shown| shown.id == entry)?;
     state
         .sync
-        .accounts
-        .iter()
-        .filter(|account| account.signed == Signed::In)
-        .find_map(|account| {
-            let service = account.service;
-            let reason = match state.sync.link_state(shown, service)? {
-                LinkState::Unpicked { found } => unpicked_reason(service, &shown.title, found),
-                LinkState::Gone { show } => format!(
-                    "{show} is gone from {}. Pick the entry this show is now.",
-                    service.label()
-                ),
-                LinkState::Looking
-                | LinkState::Merging { .. }
-                | LinkState::Waiting { .. }
-                | LinkState::InStep { .. }
-                | LinkState::Refused { .. }
-                | LinkState::Off => return None,
-            };
-            Some(ListPick {
-                entry,
-                service,
-                title: shown.title.clone(),
-                reason,
-                picker: open_over(state, entry, service),
-                current: None,
-            })
-        })
+        .signed_in_accounts()
+        .find_map(|account| needed_on(state, entry, account.service))
+}
+
+/// The pick the show needs on `service`: it matched several entries, or
+/// the one it was linked to is gone.
+pub(crate) fn needed_on(state: &AppState, entry: EntryId, service: Service) -> Option<ListPick> {
+    let shown = state.entry(entry)?;
+    let reason = match state.sync.link_state(shown, service)? {
+        LinkState::Unpicked { found } => unpicked_reason(service, &shown.title, found),
+        LinkState::Gone { show } => format!(
+            "{show} is gone from {}. Pick the entry this show is now.",
+            service.label()
+        ),
+        LinkState::Looking
+        | LinkState::Merging { .. }
+        | LinkState::Waiting { .. }
+        | LinkState::InStep { .. }
+        | LinkState::Refused { .. }
+        | LinkState::Off => return None,
+    };
+    Some(ListPick {
+        entry,
+        service,
+        title: shown.title.clone(),
+        reason,
+        picker: open_over(state, entry, service),
+        current: None,
+    })
 }
 
 /// The pick Change entry opens over a show already linked, or one the
 /// person stopped syncing.
 pub(crate) fn changing(state: &AppState, entry: EntryId, service: Service) -> Option<ListPick> {
-    let shown = state.library.iter().find(|shown| shown.id == entry)?;
+    let shown = state.entry(entry)?;
     let current = state
         .sync
         .listing(entry, service)
-        .and_then(|listing| match &listing.tie {
-            Tie::Linked { media, .. } => Some(media.id),
-            Tie::Unpicked { .. } | Tie::Gone { .. } | Tie::Off => None,
-        });
+        .and_then(|listing| listing.tie.linked())
+        .map(|media| media.id);
     Some(ListPick {
         entry,
         service,
@@ -82,7 +79,8 @@ pub(crate) fn changing(state: &AppState, entry: EntryId, service: Service) -> Op
     })
 }
 
-fn open_over(state: &AppState, entry: EntryId, service: Service) -> Option<Picker> {
+/// The core's picker, while it is open over `entry` on `service`.
+pub(crate) fn open_over(state: &AppState, entry: EntryId, service: Service) -> Option<Picker> {
     state
         .sync
         .picker
@@ -108,18 +106,13 @@ fn unpicked_reason(service: Service, title: &str, found: u32) -> String {
 
 /// `TV · 26 episodes · 2001`: what tells two entries of one title apart.
 fn candidate_line(candidate: &Candidate) -> String {
-    let mut parts = Vec::new();
-    if let Some(format) = candidate.format {
-        parts.push(format.label().to_owned());
-    }
-    match candidate.media.episodes {
-        Some(1) => parts.push("1 episode".to_owned()),
-        Some(episodes) => parts.push(format!("{episodes} episodes")),
-        None => {}
-    }
-    if let Some(year) = candidate.year {
-        parts.push(year.to_string());
-    }
+    let parts: Vec<String> = [
+        show_info::format_line(candidate.format, candidate.media.episodes),
+        candidate.year.map(|year| year.to_string()),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
     parts.join(" \u{b7} ")
 }
 
@@ -219,7 +212,7 @@ fn list_pick(props: &ListPickProps, cx: &mut RenderCx) -> Element {
                 .iter()
                 .map(|candidate| candidate.media.id)
                 .collect();
-            let many = candidates.len() > 5;
+            let many = candidates.len() > PICKER_ROWS;
             let list = list_view(candidates, |candidate: &Candidate, _| {
                 vstack((
                     text_block(candidate.media.title.clone()).wrap(),
@@ -238,7 +231,7 @@ fn list_pick(props: &ListPickProps, cx: &mut RenderCx) -> Element {
                 );
             });
             children.push(if many {
-                list.height(280.0).into()
+                list.height(PICKER_HEIGHT).into()
             } else {
                 list.into()
             });
@@ -267,17 +260,18 @@ fn list_pick(props: &ListPickProps, cx: &mut RenderCx) -> Element {
             }
         }
     };
-    let stop = {
-        let dispatch = props.dispatch.clone();
-        let (entry, service) = (pick.entry, pick.service);
-        move || dispatch.call(Command::StopSyncing { entry, service })
-    };
+    let stop = ui::send(
+        &props.dispatch,
+        Command::StopSyncing {
+            entry: pick.entry,
+            service: pick.service,
+        },
+    );
     let mut buttons: Vec<Element> = vec![button("Don't sync this show").on_click(stop).into()];
     if props.cancel {
-        let dispatch = props.dispatch.clone();
         buttons.push(
             button("Cancel")
-                .on_click(move || dispatch.call(Command::ClosePicker))
+                .on_click(ui::send(&props.dispatch, Command::ClosePicker))
                 .into(),
         );
     }
@@ -299,7 +293,9 @@ fn list_pick(props: &ListPickProps, cx: &mut RenderCx) -> Element {
 
 #[cfg(test)]
 mod tests {
-    use ryuuji_core::{Account, DataDir, Format, Media, NewEntry, Ryuuji, UserId, WatchStatus};
+    use ryuuji_core::{
+        Account, DataDir, Format, Media, NewEntry, Ryuuji, Signed, UserId, WatchStatus,
+    };
 
     use super::*;
 
