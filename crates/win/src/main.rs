@@ -7,6 +7,7 @@ mod debug;
 mod destination;
 mod history;
 mod logging;
+mod now_playing;
 mod pages;
 mod shell;
 mod ui;
