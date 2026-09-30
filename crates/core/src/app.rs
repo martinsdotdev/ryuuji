@@ -6,9 +6,9 @@ use std::time::SystemTime;
 use crate::watch::{Accrual, Logged, WatchSession};
 use crate::{
     Added, AppState, Command, DataDir, Decline, Diagnostics, EntryId, HistoryId, HistoryPage,
-    LibraryEntry, Link, Moved, NewEntry, NewRecording, Notice, NowPlaying, Opened, PlaybackEvent,
-    ProposedMatch, RecordOutcome, Recording, Service, Settings, Store, StoreError, SyncState,
-    ThemePreference, UserFile, WatchProgress, WatchStatus, error_chain, matching,
+    LastWatched, LibraryEntry, Link, Moved, NewEntry, NewRecording, Notice, NowPlaying, Opened,
+    PlaybackEvent, ProposedMatch, RecordOutcome, Recording, Service, Settings, Store, StoreError,
+    SyncState, ThemePreference, UserFile, WatchProgress, WatchStatus, error_chain, matching,
 };
 use crate::{players, settings};
 
@@ -126,6 +126,12 @@ impl Ryuuji {
     /// which the shell clones on every dispatch.
     pub fn history(&self, entry: Option<EntryId>, limit: usize) -> Result<HistoryPage, StoreError> {
         self.store.history(entry, limit)
+    }
+
+    /// Up to `limit` shows, the most recently watched first, read on demand
+    /// like [`Ryuuji::history`].
+    pub fn last_watched(&self, limit: usize) -> Result<Vec<LastWatched>, StoreError> {
+        self.store.last_watched(limit)
     }
 
     /// Episodes recorded at or after `since` that still stand.

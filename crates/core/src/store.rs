@@ -9,9 +9,9 @@ use rusqlite_migration::Migrations;
 use tracing::{debug, info, info_span, warn};
 
 use crate::{
-    Confidence, DataDir, Decline, EntryId, HistoryId, HistoryPage, LibraryEntry, Link, ListStatus,
-    ListUpdateId, NewEntry, NewRecording, ProposedMatch, Recorded, Service, StatusMove, Watch,
-    WatchOutcome, WatchStatus,
+    Confidence, DataDir, Decline, EntryId, HistoryId, HistoryPage, LastWatched, LibraryEntry, Link,
+    ListStatus, ListUpdateId, NewEntry, NewRecording, ProposedMatch, Recorded, Service, StatusMove,
+    Watch, WatchOutcome, WatchStatus,
 };
 
 mod lists;
@@ -686,6 +686,47 @@ impl Store {
             )
             .map_err(query_failed)?;
         Ok(u32::try_from(count).unwrap_or(u32::MAX))
+    }
+
+    /// Up to `limit` shows, the most recently watched first: for each, when
+    /// its newest recording that still stands was made, and in which player.
+    /// An undone recording does not count, since the episode was taken back.
+    pub fn last_watched(&self, limit: usize) -> Result<Vec<LastWatched>, StoreError> {
+        let _span = info_span!("store.last_watched", limit).entered();
+        // SQLite fills a bare column beside MAX() from the row holding the
+        // maximum, which is the recording whose player is wanted.
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT entry_id, player, MAX(recorded_at) FROM history \
+                 WHERE progress IS NOT NULL AND undone_at IS NULL AND entry_id IS NOT NULL \
+                 GROUP BY entry_id ORDER BY MAX(recorded_at) DESC, entry_id DESC LIMIT ?1",
+            )
+            .map_err(query_failed)?;
+        let rows = stmt
+            .query_map([i64::try_from(limit).unwrap_or(i64::MAX)], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .map_err(query_failed)?;
+        let mut shows = Vec::new();
+        for row in rows {
+            let (entry, player, at) = row.map_err(query_failed)?;
+            let entry = EntryId(entry);
+            let at = unix_time(at).ok_or(StoreError::InvalidRow {
+                id: entry,
+                field: "recorded_at",
+            })?;
+            shows.push(LastWatched {
+                entry,
+                player: player.unwrap_or_default(),
+                at,
+            });
+        }
+        Ok(shows)
     }
 
     /// Reads `PRAGMA user_version`; touches nothing on disk.
@@ -2142,6 +2183,55 @@ mod tests {
         ));
         assert_eq!(store.entries().unwrap(), vec![written.entry]);
         assert_eq!(watches(&store), vec![written.watch]);
+    }
+
+    #[test]
+    fn last_watched_lists_each_show_by_its_newest_standing_recording() {
+        let (_tmp, dir) = open_tmp();
+        let mut store = open(&dir);
+        let a = store.add(entry("A")).unwrap().id;
+        let b = store.add(entry("B")).unwrap().id;
+        let c = store.add(entry("C")).unwrap().id;
+        store.record(watching(a, 1..=1)).unwrap();
+        store
+            .record(NewRecording {
+                player: "vlc".into(),
+                ..watching(a, 2..=2)
+            })
+            .unwrap();
+        store.record(watching(b, 1..=1)).unwrap();
+        let undone = store.record(watching(c, 1..=1)).unwrap();
+        store.undo(undone.watch.id).unwrap();
+        store
+            .decline(None, &proposed("Show - 03.mkv"), Decline::NotExact)
+            .unwrap();
+        store.execute_raw(&format!(
+            "UPDATE history SET recorded_at = 100 + id WHERE entry_id = {}",
+            a.0
+        ));
+        store.execute_raw(&format!(
+            "UPDATE history SET recorded_at = 500 WHERE entry_id = {}",
+            b.0
+        ));
+
+        let at = |secs| UNIX_EPOCH + Duration::from_secs(secs);
+        let shows = store.last_watched(10).unwrap();
+        assert_eq!(
+            shows,
+            vec![
+                LastWatched {
+                    entry: b,
+                    player: "mpv".into(),
+                    at: at(500),
+                },
+                LastWatched {
+                    entry: a,
+                    player: "vlc".into(),
+                    at: at(102),
+                },
+            ]
+        );
+        assert_eq!(store.last_watched(1).unwrap(), shows[..1]);
     }
 
     #[test]
