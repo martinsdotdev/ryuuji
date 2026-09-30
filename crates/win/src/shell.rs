@@ -21,6 +21,7 @@ use crate::debug;
 use crate::destination::{Body, Destination};
 use crate::logging::RecentEvents;
 use crate::pages;
+use crate::show_page;
 use crate::status_bar;
 
 /// Root component. Owns the core for the life of the window; the reducer
@@ -171,6 +172,7 @@ impl Component for Shell {
             // Built here rather than in `pages`: the props carry the core
             // handle, the log buffer, the watcher and the sync worker, all
             // owned by `Shell`.
+            Body::Detail(Detail::Entry(entry)) => show_page::body(&state, entry, dispatch.clone()),
             Body::Detail(Detail::Diagnostics) => component(
                 debug::diagnostics,
                 debug::DiagnosticsProps {

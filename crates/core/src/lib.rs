@@ -75,13 +75,18 @@ tagged_enum! {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Detail {
     Diagnostics,
+    /// One show's page: where it stands, and how it stands on each list.
+    Entry(EntryId),
 }
 
 impl Detail {
-    /// Human-readable label.
+    /// Human-readable label. A show's page is headed by the show's title,
+    /// which the shell reads from the library; this is what it says when
+    /// the library no longer has the show.
     pub fn label(self) -> &'static str {
         match self {
             Detail::Diagnostics => "Diagnostics",
+            Detail::Entry(_) => "Show",
         }
     }
 }

@@ -19,9 +19,18 @@ mod worker;
 use std::fmt;
 use std::time::SystemTime;
 
+use ryuuji_core::{MediaId, Service};
+
 pub use anilist::{CLIENT_ID, authorize_url};
 pub use engine::Pause;
 pub use worker::{LastCall, Paused, ServiceFacts, SyncError, Syncer, start};
+
+/// A show's page on the service's site, for the person to open.
+pub fn site_url(service: Service, media: MediaId) -> String {
+    match service {
+        Service::AniList => anilist::site_url(media),
+    }
+}
 
 /// An access token as pasted from the service: a JWT whose payload says when
 /// it stops working. It prints as `Token(<redacted>)`, has no `Display` and

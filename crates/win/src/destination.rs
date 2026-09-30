@@ -17,12 +17,12 @@ pub enum Body {
 }
 
 /// Everything the NavigationView needs from [`AppState`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Destination {
     pub body: Body,
     /// Text for the header. Never empty: the toolkit has no way to clear a
-    /// header once one has been set.
-    pub header: &'static str,
+    /// header once one has been set. A show's page is headed by its title.
+    pub header: String,
     /// Tag of the pane item to highlight, always a [`Page`]. A tag naming no
     /// item is a silent no-op that leaves the previous highlight frozen, so
     /// a detail lights the page it opened over rather than nothing.
@@ -38,13 +38,21 @@ impl Destination {
         match state.detail {
             Some(detail) => Destination {
                 body: Body::Detail(detail),
-                header: detail.label(),
+                header: match detail {
+                    Detail::Entry(entry) => state
+                        .library
+                        .iter()
+                        .find(|shown| shown.id == entry)
+                        .map(|shown| shown.title.clone()),
+                    Detail::Diagnostics => None,
+                }
+                .unwrap_or_else(|| detail.label().to_owned()),
                 tag,
                 back_enabled: true,
             },
             None => Destination {
                 body: Body::Page(state.page),
-                header: state.page.label(),
+                header: state.page.label().to_owned(),
                 tag,
                 back_enabled: false,
             },
@@ -56,7 +64,26 @@ impl Destination {
 mod tests {
     use super::*;
 
-    const DETAILS: [Detail; 1] = [Detail::Diagnostics];
+    /// Every kind of detail, a show's page included, with an id only a store
+    /// can mint.
+    fn details() -> Vec<Detail> {
+        vec![Detail::Diagnostics, Detail::Entry(show().id)]
+    }
+
+    fn show() -> ryuuji_core::LibraryEntry {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = ryuuji_core::DataDir::at(tmp.path()).unwrap();
+        let ryuuji_core::Opened { mut store, .. } = ryuuji_core::Store::open(&dir).unwrap();
+        store
+            .add(ryuuji_core::NewEntry {
+                title: "Frieren".to_owned(),
+                status: ryuuji_core::WatchStatus::Watching,
+                progress: 7,
+                total: Some(28),
+                rewatching: false,
+            })
+            .unwrap()
+    }
 
     fn showing(page: Page, detail: Option<Detail>) -> Destination {
         Destination::of(&AppState {
@@ -72,7 +99,7 @@ mod tests {
             showing(Page::Library, None),
             Destination {
                 body: Body::Page(Page::Library),
-                header: "Library",
+                header: "Library".to_owned(),
                 tag: "library",
                 back_enabled: false,
             }
@@ -85,11 +112,27 @@ mod tests {
             showing(Page::Settings, Some(Detail::Diagnostics)),
             Destination {
                 body: Body::Detail(Detail::Diagnostics),
-                header: "Diagnostics",
+                header: "Diagnostics".to_owned(),
                 tag: "settings",
                 back_enabled: true,
             }
         );
+    }
+
+    #[test]
+    fn a_shows_page_is_headed_by_its_title() {
+        let show = show();
+        let state = |library| AppState {
+            page: Page::Library,
+            detail: Some(Detail::Entry(show.id)),
+            library,
+            ..AppState::default()
+        };
+        assert_eq!(
+            Destination::of(&state(vec![show.clone()])).header,
+            "Frieren"
+        );
+        assert_eq!(Destination::of(&state(vec![])).header, "Show");
     }
 
     #[test]
@@ -104,7 +147,7 @@ mod tests {
     #[test]
     fn every_destination_highlights_a_real_pane_item() {
         for page in Page::ALL {
-            for detail in [None].into_iter().chain(DETAILS.map(Some)) {
+            for detail in [None].into_iter().chain(details().into_iter().map(Some)) {
                 let tag = showing(page, detail).tag;
                 assert_eq!(Page::from_tag(tag), Some(page), "{page:?} over {detail:?}");
             }
@@ -118,17 +161,17 @@ mod tests {
                 showing(page, None),
                 Destination {
                     body: Body::Page(page),
-                    header: page.label(),
+                    header: page.label().to_owned(),
                     tag: page.tag(),
                     back_enabled: false,
                 }
             );
-            for detail in DETAILS {
+            for detail in details() {
                 assert_eq!(
                     showing(page, Some(detail)),
                     Destination {
                         body: Body::Detail(detail),
-                        header: detail.label(),
+                        header: detail.label().to_owned(),
                         tag: page.tag(),
                         back_enabled: true,
                     }

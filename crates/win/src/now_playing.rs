@@ -10,7 +10,7 @@ use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 
 use ryuuji_core::{
-    AppState, Certainty, Command, ElementKind, EntryId, LastWatched, LibraryEntry, Link,
+    AppState, Certainty, Command, Detail, ElementKind, EntryId, LastWatched, LibraryEntry, Link,
     ListStatus, NowPlaying, Options, Page, ProposedMatch, RecordOutcome, Ryuuji, WatchProgress,
     normalize_title, parse,
 };
@@ -184,6 +184,8 @@ struct Hero {
     episode: Option<String>,
     /// `A guess: 07 may be a word of the title`.
     doubt: Option<String>,
+    /// The show the file is settled on, which Edit opens the page of.
+    entry: Option<EntryId>,
     /// What Share hands the share sheet, once the show is settled.
     share: Option<String>,
     /// The episode after this file, while the show has one.
@@ -271,6 +273,7 @@ fn view(state: &AppState, detection_down: bool, recent: &[LastWatched], now: Sys
                 undo: undo_applies(state),
                 hero: Hero {
                     status: hero_status(entry.filter(|_| !state.ignored)),
+                    entry: entry.filter(|_| settled).map(|entry| entry.id),
                     share: settled.then(|| share_text(&show, episode.as_deref())),
                     title: show,
                     episode,
@@ -294,7 +297,7 @@ fn view(state: &AppState, detection_down: bool, recent: &[LastWatched], now: Sys
 
 /// `Watching · 7 of 28 episodes`: the show's status and how far the person
 /// is, or only the status when nothing is watched and the length is unknown.
-fn hero_status(entry: Option<&LibraryEntry>) -> String {
+pub(crate) fn hero_status(entry: Option<&LibraryEntry>) -> String {
     let Some(entry) = entry else {
         return "Not in your library".to_owned();
     };
@@ -527,6 +530,7 @@ fn playing_sections(
     sections.push(hero(
         &playing.hero,
         playing.timeline.as_ref(),
+        dispatch,
         set_wrong_show,
     ));
     if let Some(picker) = picker {
@@ -586,7 +590,12 @@ fn header(standing: &Standing, undo: bool, dispatch: &Dispatch<Command>) -> Elem
         .into()
 }
 
-fn hero(hero: &Hero, timeline: Option<&Timeline>, set_wrong_show: SetState<bool>) -> Element {
+fn hero(
+    hero: &Hero,
+    timeline: Option<&Timeline>,
+    dispatch: &Dispatch<Command>,
+    set_wrong_show: SetState<bool>,
+) -> Element {
     let mut lines: Vec<Element> = vec![
         caption(hero.status.clone()).into(),
         text_block(hero.title.clone())
@@ -607,6 +616,15 @@ fn hero(hero: &Hero, timeline: Option<&Timeline>, set_wrong_show: SetState<bool>
         lines.push(caption(doubt.clone()).wrap().into());
     }
     let mut links: Vec<Element> = Vec::new();
+    if let Some(entry) = hero.entry {
+        let dispatch = dispatch.clone();
+        links.push(
+            button("Edit")
+                .text_link()
+                .on_click(move || dispatch.call(Command::OpenDetail(Detail::Entry(entry))))
+                .into(),
+        );
+    }
     if let Some(text) = &hero.share {
         let (show, text) = (hero.title.clone(), text.clone());
         links.push(
