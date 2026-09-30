@@ -91,6 +91,9 @@ pub(crate) struct LaneFacts {
     pub due: usize,
     pub waiting: usize,
     pub running: usize,
+    /// When the soonest waiting reconcile goes out, after any pause: when
+    /// the status bar says the next send goes out.
+    pub next_due: Option<Instant>,
 }
 
 #[derive(Default)]
@@ -387,23 +390,27 @@ impl Lane {
     }
 
     fn facts(&self, now: Instant) -> LaneFacts {
-        let (due, waiting) = self
-            .slots
-            .iter()
-            .filter(|slot| !slot.dropped && self.running != Some(slot.key))
-            .fold((0, 0), |(due, waiting), slot| {
-                if slot.due_at() <= now {
-                    (due + 1, waiting)
-                } else {
-                    (due, waiting + 1)
-                }
-            });
+        let open = || {
+            self.slots
+                .iter()
+                .filter(|slot| !slot.dropped && self.running != Some(slot.key))
+        };
+        let due = open().filter(|slot| slot.due_at() <= now).count();
+        let waiting = open().filter(|slot| slot.due_at() > now).count();
+        let paused = self.paused.filter(|(_, until)| *until > now);
+        // Only a reconcile sends, and a pause holds it until the pause ends.
+        let next_due = open()
+            .filter(|slot| slot.key.kind == Kind::Reconcile)
+            .map(|slot| paused.map_or(slot.due_at(), |(_, until)| slot.due_at().max(until)))
+            .filter(|at| *at > now)
+            .min();
         LaneFacts {
-            paused: self.paused.filter(|(_, until)| *until > now),
+            paused,
             stopped: self.stopped.clone(),
             due,
             waiting,
             running: usize::from(self.running.is_some()),
+            next_due,
         }
     }
 }
@@ -624,6 +631,7 @@ pub(crate) mod tests {
                 due: 2,
                 waiting: 0,
                 running: 0,
+                next_due: Some(at(30)),
             }
         );
         assert_eq!(engine.next(at(29)), Next::Wait(at(30)));
@@ -827,6 +835,7 @@ pub(crate) mod tests {
                 due: 0,
                 waiting: 0,
                 running: 1,
+                next_due: None,
             }
         );
         // The run still reports through the worker; the engine only lets
@@ -901,6 +910,44 @@ pub(crate) mod tests {
         assert_eq!(engine.next(at(0)), Next::Run(key(a, Kind::Reconcile)));
         assert_eq!(counts(engine.facts(Service::AniList, at(0))), (1, 1, 1));
         assert_eq!(counts(engine.facts(Service::AniList, at(10))), (2, 0, 1));
+    }
+
+    #[test]
+    fn the_facts_say_when_the_soonest_waiting_send_goes_out() {
+        let at = clock();
+        let [a, b, c] = entries(3)[..] else {
+            unreachable!()
+        };
+        let mut engine = Engine::default();
+        assert_eq!(engine.facts(Service::AniList, at(0)).next_due, None);
+        let search = Job {
+            when: When::Settled,
+            ..find(c)
+        };
+        engine.post(&work(vec![reconcile(a, When::Settled, 4)]), at(0));
+        // A search sends nothing, however soon it runs.
+        engine.post(
+            &work(vec![reconcile(a, When::Settled, 4), search.clone()]),
+            at(2),
+        );
+        engine.post(
+            &work(vec![
+                reconcile(a, When::Settled, 4),
+                search,
+                reconcile(b, When::Settled, 5),
+            ]),
+            at(3),
+        );
+        assert_eq!(
+            engine.facts(Service::AniList, at(4)).next_due,
+            Some(at(0) + SETTLE)
+        );
+        // Due now is no longer waiting, so the next one is the later show.
+        assert_eq!(
+            engine.facts(Service::AniList, at(11)).next_due,
+            Some(at(3) + SETTLE)
+        );
+        assert_eq!(engine.facts(Service::AniList, at(14)).next_due, None);
     }
 
     #[test]
