@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Instant, SystemTime};
 
-use ryuuji_core::{Account, Report, Service, Signed, Task, Work};
+use ryuuji_core::{Account, Cover, Report, Service, ShowInfo, Signed, Task, Work};
 use tracing::{info, warn};
 
 use crate::engine::{Engine, Key, Next, Outcome, Pause, SPACING};
@@ -23,6 +23,9 @@ use crate::vault::Tokens;
 use crate::{Credentials, Token};
 
 type Transport = Box<dyn FnMut(&Request, Option<&Token>) -> Result<Response, Failure> + Send>;
+/// How a picture is fetched. It is handed an address and nothing else, so
+/// no token can ride along.
+type Fetch = Box<dyn FnMut(&str) -> Result<Vec<u8>, Failure> + Send>;
 type OnReport = Box<dyn Fn(u64) + Send>;
 
 #[derive(Debug, thiserror::Error)]
@@ -35,10 +38,12 @@ pub enum SyncError {
 /// number that never repeats, each time reports are queued; the shell then
 /// drains them with [`Syncer::take_reports`].
 pub fn start(on_report: impl Fn(u64) + Send + 'static) -> Result<Syncer, SyncError> {
-    let http = Http::new();
+    let http = std::sync::Arc::new(Http::new());
+    let pictures = http.clone();
     start_with(
         Tokens::default(),
         Box::new(move |request, token| http.send(request, token)),
+        Box::new(move |url| pictures.fetch(url)),
         Box::new(on_report),
     )
 }
@@ -46,6 +51,7 @@ pub fn start(on_report: impl Fn(u64) + Send + 'static) -> Result<Syncer, SyncErr
 fn start_with(
     vault: Tokens,
     transport: Transport,
+    fetch: Fetch,
     on_report: OnReport,
 ) -> Result<Syncer, SyncError> {
     let (tx, rx) = mpsc::channel();
@@ -56,6 +62,7 @@ fn start_with(
         vault,
         calls: HashMap::new(),
         transport,
+        fetch,
         last_sent: None,
         run_remaining: None,
         reports: reports.clone(),
@@ -227,6 +234,7 @@ struct Worker {
     vault: Tokens,
     calls: HashMap<Service, Calls>,
     transport: Transport,
+    fetch: Fetch,
     /// When the last request went out, so the next keeps its distance.
     last_sent: Option<Instant>,
     /// `X-RateLimit-Remaining` from the run under way.
@@ -319,6 +327,14 @@ impl Worker {
                     }
                 })
             }
+            Task::Describe { media } => session
+                .describe(&mut |request| self.call(service, request), *media)
+                .map(|(info, url)| Report::Described {
+                    service,
+                    media: *media,
+                    info,
+                    cover: url.and_then(|url| self.cover(&url)),
+                }),
         };
         let failure = outcome.as_ref().err().cloned();
         match outcome {
@@ -350,6 +366,12 @@ impl Worker {
                     %message,
                     "search rejected"
                 ),
+                Task::Describe { media } => warn!(
+                    service = service.tag(),
+                    media = media.0,
+                    %message,
+                    "show info unreadable"
+                ),
             },
             Err(Failure::NotFound) => match &posted.job.task {
                 Task::Reconcile { media, .. } => {
@@ -363,6 +385,23 @@ impl Worker {
                         service,
                         entry,
                         media: *media,
+                    });
+                }
+                // Asked without the token, a show the account can see may
+                // still read as missing, so only a reconcile says it is
+                // gone. Saying it has nothing keeps it from being asked
+                // again before the week is out.
+                Task::Describe { media } => {
+                    info!(
+                        service = service.tag(),
+                        media = media.0,
+                        "show info not found"
+                    );
+                    self.queue(Report::Described {
+                        service,
+                        media: *media,
+                        info: ShowInfo::default(),
+                        cover: None,
                     });
                 }
                 Task::Find { title } => warn!(
@@ -462,6 +501,24 @@ impl Worker {
     fn queue(&self, report: Report) {
         let count = self.reports.queue(report);
         (self.on_report)(count);
+    }
+
+    /// Fetches a cover, or nothing when it cannot be had: the info stands
+    /// without it, and the next fetch tries again.
+    fn cover(&mut self, url: &str) -> Option<Cover> {
+        let extension = url
+            .rsplit('/')
+            .next()
+            .and_then(|name| name.rsplit_once('.'))
+            .map(|(_, extension)| extension.to_owned())
+            .unwrap_or_default();
+        match (self.fetch)(url) {
+            Ok(bytes) => Some(Cover { bytes, extension }),
+            Err(failure) => {
+                warn!(url, %failure, "cover not fetched");
+                None
+            }
+        }
     }
 
     /// Sends a request on `service`'s behalf with the kept token, or
@@ -578,6 +635,8 @@ mod tests {
     const SEARCH: &str = include_str!("../fixtures/anilist/search.json");
     const READ_LISTED: &str = include_str!("../fixtures/anilist/read_listed.json");
     const SAVED: &str = include_str!("../fixtures/anilist/save.json");
+    const DESCRIBED: &str = include_str!("../fixtures/anilist/describe.json");
+    const NOT_FOUND: &str = include_str!("../fixtures/anilist/not_found_404.json");
 
     const ANILIST: Service = Service::AniList;
 
@@ -596,6 +655,8 @@ mod tests {
             let query = request.body["query"].as_str().expect("a query");
             let operation = if query.contains("Viewer") {
                 "viewer"
+            } else if query.contains("coverImage") {
+                "describe"
             } else if query.contains("SaveMediaListEntry") {
                 "save"
             } else if query.contains("mediaListEntry") {
@@ -610,6 +671,7 @@ mod tests {
             });
             Ok(Response::fixture(match operation {
                 "viewer" => VIEWER,
+                "describe" => DESCRIBED,
                 "save" => SAVED,
                 "read" => READ_LISTED,
                 _ => SEARCH,
@@ -617,15 +679,38 @@ mod tests {
         })
     }
 
+    /// A transport answering every request as `fixture`.
+    fn always(fixture: &'static str) -> Transport {
+        Box::new(move |_: &Request, _: Option<&Token>| Ok(Response::fixture(fixture)))
+    }
+
     fn started(transport: Transport) -> (Syncer, Receiver<u64>) {
         started_with(Tokens::default(), transport)
     }
 
+    /// A picture fetch that answers every address with its own text, and
+    /// records the addresses it was asked for.
+    fn pictures(asked: Arc<Mutex<Vec<String>>>) -> Fetch {
+        Box::new(move |url: &str| {
+            asked.lock().unwrap().push(url.to_owned());
+            Ok(format!("picture at {url}").into_bytes())
+        })
+    }
+
     fn started_with(vault: Tokens, transport: Transport) -> (Syncer, Receiver<u64>) {
+        started_fetching(vault, transport, pictures(Arc::default()))
+    }
+
+    fn started_fetching(
+        vault: Tokens,
+        transport: Transport,
+        fetch: Fetch,
+    ) -> (Syncer, Receiver<u64>) {
         let (tx, rx) = channel();
         let syncer = start_with(
             vault,
             transport,
+            fetch,
             Box::new(move |count| {
                 let _ = tx.send(count);
             }),
@@ -677,6 +762,92 @@ mod tests {
                 }],
             }],
         }
+    }
+
+    #[test]
+    fn a_show_not_found_without_the_token_is_described_as_empty_not_gone() {
+        let (syncer, counts) = started(always(NOT_FOUND));
+        let [entry] = entries(1)[..] else {
+            unreachable!()
+        };
+        syncer.post(&Work {
+            services: vec![ServiceWork {
+                service: ANILIST,
+                user: UserId(7),
+                jobs: vec![Job {
+                    entry,
+                    task: Task::Describe {
+                        media: MediaId(154587),
+                    },
+                    when: When::Now,
+                }],
+            }],
+        });
+        next_count(&counts);
+        assert_eq!(
+            syncer.take_reports(),
+            vec![Report::Described {
+                service: ANILIST,
+                media: MediaId(154587),
+                info: ShowInfo::default(),
+                cover: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_posted_describe_reports_the_info_and_a_cover_fetched_without_the_token() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let (syncer, counts) = started_fetching(
+            Tokens::default(),
+            fake(seen.clone()),
+            pictures(asked.clone()),
+        );
+        let [entry] = entries(1)[..] else {
+            unreachable!()
+        };
+        syncer.post(&Work {
+            services: vec![ServiceWork {
+                service: ANILIST,
+                user: UserId(7),
+                jobs: vec![Job {
+                    entry,
+                    task: Task::Describe {
+                        media: MediaId(154587),
+                    },
+                    when: When::Now,
+                }],
+            }],
+        });
+        next_count(&counts);
+        let url = "https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx154587-n1fmjRv4JQUd.jpg";
+        let reports = syncer.take_reports();
+        let [
+            Report::Described {
+                service,
+                media,
+                info,
+                cover: Some(cover),
+            },
+        ] = &reports[..]
+        else {
+            panic!("one description with a cover: {reports:?}");
+        };
+        assert_eq!((*service, *media), (ANILIST, MediaId(154587)));
+        assert_eq!(info.studio.as_deref(), Some("Madhouse"));
+        assert_eq!(cover.extension, "jpg");
+        assert_eq!(cover.bytes, format!("picture at {url}").into_bytes());
+        assert_eq!(*asked.lock().unwrap(), vec![url.to_owned()]);
+        // Asked with no token kept at all, which a signed call would refuse.
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![Seen {
+                operation: "describe",
+                variables: json!({ "id": 154587 }),
+                signed: false,
+            }]
+        );
     }
 
     #[test]

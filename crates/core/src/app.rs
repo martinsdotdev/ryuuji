@@ -608,7 +608,7 @@ impl Ryuuji {
         if last.link == Link::Exact(chosen) {
             return;
         }
-        if !self.state.library.iter().any(|entry| entry.id == chosen) {
+        if self.state.entry(chosen).is_none() {
             return;
         }
         let standing = match self.state.watch_progress.map(|progress| progress.outcome) {

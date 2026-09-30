@@ -36,6 +36,7 @@ pub(crate) struct Key {
 pub(crate) enum Kind {
     Find,
     Reconcile,
+    Describe,
 }
 
 impl Kind {
@@ -43,6 +44,7 @@ impl Kind {
         match task {
             Task::Find { .. } => Kind::Find,
             Task::Reconcile { .. } => Kind::Reconcile,
+            Task::Describe { .. } => Kind::Describe,
         }
     }
 }

@@ -238,7 +238,7 @@ impl Ryuuji {
         if looked_up {
             return;
         }
-        let Some(show) = self.state.library.iter().find(|show| show.id == entry) else {
+        let Some(show) = self.state.entry(entry) else {
             return;
         };
         let tie = match auto_link(show, &candidates) {
@@ -280,7 +280,7 @@ impl Ryuuji {
             );
             return;
         }
-        let show = self.state.library.iter().find(|show| show.id == entry);
+        let show = self.state.entry(entry);
         let (Some(show), Some(listing)) = (show, self.state.sync.listing(entry, service)) else {
             return;
         };
@@ -439,7 +439,7 @@ impl Ryuuji {
         let Some(range) = &last.episode else {
             return;
         };
-        let Some(show) = self.state.library.iter().find(|show| show.id == id) else {
+        let Some(show) = self.state.entry(id) else {
             return;
         };
         if !show
@@ -452,18 +452,11 @@ impl Ryuuji {
         let (progress, end) = (show.progress, *range.end());
         let sync = &self.state.sync;
         let linked: Vec<Service> = sync
-            .accounts
-            .iter()
-            .filter(|account| matches!(account.signed, Signed::In))
+            .signed_in_accounts()
             .map(|account| account.service)
             .filter(|&service| {
-                matches!(
-                    sync.listing(id, service),
-                    Some(Listing {
-                        tie: Tie::Linked { .. },
-                        ..
-                    })
-                )
+                sync.listing(id, service)
+                    .is_some_and(|listing| listing.tie.linked().is_some())
             })
             .collect();
         for service in linked {
@@ -682,6 +675,21 @@ mod tests {
             }
         }
 
+        /// What the catalogue says about `media`.
+        fn describe(&self, media: MediaId) -> ShowInfo {
+            self.catalogue
+                .iter()
+                .find(|candidate| candidate.media.id == media)
+                .map(|candidate| ShowInfo {
+                    titles: candidate.titles.clone(),
+                    format: candidate.format,
+                    season_year: candidate.year,
+                    episodes: candidate.media.episodes,
+                    ..ShowInfo::default()
+                })
+                .unwrap_or_default()
+        }
+
         fn search(&self, query: &str) -> Vec<Candidate> {
             let query = normalize_title(query);
             self.catalogue
@@ -738,6 +746,12 @@ mod tests {
                                 remote: self.read(*media),
                             }
                         }
+                        Task::Describe { media } => Report::Described {
+                            service: service.service,
+                            media: *media,
+                            info: self.describe(*media),
+                            cover: None,
+                        },
                     });
                 }
             }
@@ -778,12 +792,15 @@ mod tests {
         assert!(jobs(app).is_empty(), "{:?}", jobs(app));
     }
 
+    /// The searches and reconciles the work holds. Fetching show info is
+    /// beside the point of these tests and has its own.
     fn jobs(app: &Ryuuji) -> Vec<Job> {
         app.state()
             .work()
             .services
             .into_iter()
             .flat_map(|service| service.jobs)
+            .filter(|job| !matches!(job.task, Task::Describe { .. }))
             .collect()
     }
 

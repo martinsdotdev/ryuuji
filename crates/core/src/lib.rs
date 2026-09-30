@@ -37,7 +37,7 @@ pub use matching::{Confidence, Link, ProposedMatch, normalize_title, similarity}
 pub use playback::{PlaybackEvent, PlaybackSource, PlaybackStatus};
 pub use players::{MIN_PATTERN_LEN, PlayerRow, too_short};
 // Shells depend on this crate alone, so the parser reaches them through here.
-pub use ryuuji_parse::{Certainty, ElementKind, Options, parse};
+pub use ryuuji_parse::{Certainty, ElementKind, Options, Reading, parse};
 pub use store::{
     Added, DbError, Moved, Opened, Recording, Recovered, SchemaVersion, Settled, Store, StoreError,
     Tied,
@@ -535,6 +535,13 @@ pub struct AppState {
     /// The accounts signed in and the shows tied to them, read once at
     /// open.
     pub sync: SyncState,
+}
+
+impl AppState {
+    /// The library's show with `id`, while the library has it.
+    pub fn entry(&self, id: EntryId) -> Option<&LibraryEntry> {
+        self.library.iter().find(|entry| entry.id == id)
+    }
 }
 
 impl Default for AppState {

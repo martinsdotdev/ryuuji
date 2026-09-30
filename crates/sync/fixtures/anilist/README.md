@@ -28,3 +28,4 @@ Each file is one answer as the wire sees it:
 | `not_found_404.json` | HTTP 404 with `Media` null and an error with `status` 404 | schema |
 | `validation_200.json` | HTTP 200 with `data` null and a `validation` map in the error | schema; the field text is a guess |
 | `server_error_500.json` | HTTP 500 with an HTML body | made up |
+| `describe.json` | `Media` with titles, season, status, genres, studio, a description carrying `<br>` and `<i>`, and the cover's address | schema; the description and address are made up |
