@@ -108,6 +108,26 @@ pub(crate) fn episode_text(episode: &RangeInclusive<u32>) -> String {
     }
 }
 
+/// `m:ss`, or `h:mm:ss` from one hour.
+pub(crate) fn clock_text(value: Duration) -> String {
+    let total = value.as_secs();
+    let (hours, minutes, seconds) = (total / 3600, total / 60 % 60, total % 60);
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    }
+}
+
+/// Like [`clock_text`], with an unknown length shown as `--:--`.
+pub(crate) fn duration_text(value: Duration) -> String {
+    if value.is_zero() {
+        "--:--".to_string()
+    } else {
+        clock_text(value)
+    }
+}
+
 /// A grid of uniform rows: optional header, then one row per cell array.
 /// Callers hand over unplaced cells and the builder assigns every
 /// `grid_row`/`grid_column`, so a row count can never drift from the rows.
@@ -295,6 +315,19 @@ mod tests {
             let index = index_of(&EventLevelFilter::ALL, EventLevelFilter::label, *filter);
             assert_eq!(index, position as i32);
         }
+    }
+
+    #[test]
+    fn clock_text_formats_minutes_and_hours() {
+        assert_eq!(clock_text(Duration::ZERO), "0:00");
+        assert_eq!(clock_text(Duration::from_secs(305)), "5:05");
+        assert_eq!(clock_text(Duration::from_secs(3661)), "1:01:01");
+    }
+
+    #[test]
+    fn duration_text_marks_zero_unknown() {
+        assert_eq!(duration_text(Duration::ZERO), "--:--");
+        assert_eq!(duration_text(Duration::from_secs(1420)), "23:40");
     }
 
     #[test]

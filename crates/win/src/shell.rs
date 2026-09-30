@@ -21,6 +21,7 @@ use crate::debug;
 use crate::destination::{Body, Destination};
 use crate::logging::RecentEvents;
 use crate::pages;
+use crate::status_bar;
 
 /// Root component. Owns the core for the life of the window; the reducer
 /// hook mirrors its state so the tree rerenders after every command.
@@ -181,7 +182,11 @@ impl Component for Shell {
                 },
             ),
         };
-        let body = pages::chrome(&state.notices, dispatch.clone(), body);
+        let status = status_bar::bar(
+            &status_bar::status_bar(&state, detection_down),
+            dispatch.clone(),
+        );
+        let body = pages::chrome(&state.notices, dispatch.clone(), body, status);
 
         let back = {
             let dispatch = dispatch.clone();

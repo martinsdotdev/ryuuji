@@ -10,6 +10,8 @@ mod logging;
 mod now_playing;
 mod pages;
 mod shell;
+mod standing;
+mod status_bar;
 mod ui;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
