@@ -82,6 +82,7 @@ pub fn body(
                 dispatch,
                 core: core.clone(),
                 library: state.library.clone(),
+                pending: history::pending(state),
             },
         ),
         Page::Seasons => placeholder(
@@ -113,14 +114,14 @@ pub fn chrome(
     notices: &[Notice],
     dispatch: Dispatch<Command>,
     body: Element,
-    status: Border,
+    status: Element,
 ) -> Element {
     grid((
         notice(notices, dispatch),
         border(body)
             .padding(Thickness::uniform(PAGE_PADDING))
             .grid_row(1),
-        status.grid_row(2),
+        border(status).grid_row(2),
     ))
     .rows([GridLength::Auto, GridLength::STAR, GridLength::Auto])
     .into()

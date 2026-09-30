@@ -1,9 +1,10 @@
-//! The History page: every watch that reached its threshold and every value
-//! the library took from a list, newest first, under the local day it shows
-//! at, with Undo on a recording the show still stands at. Rows are read from
-//! the core on each render rather than held in the app state, which the
-//! shell clones on every dispatch; a page of them loads at a time and Show
-//! older asks for the next.
+//! The History page: the changes waiting to go out to a list, then every
+//! watch that reached its threshold and every value the library took from a
+//! list, newest first, under the local day it shows at, with Undo on a
+//! recording the show still stands at. Rows are read from the core on each
+//! render rather than held in the app state, which the shell clones on every
+//! dispatch; a page of them loads at a time and Show older asks for the
+//! next.
 
 use std::cell::RefCell;
 use std::fmt;
@@ -11,9 +12,9 @@ use std::rc::Rc;
 use std::time::SystemTime;
 
 use ryuuji_core::{
-    Command, EntryId, HistoryId, HistoryPage, LibraryEntry, Line, Link, ListStatus, ListUpdate,
-    ListUpdateId, Recorded, Ryuuji, StatusMove, TimeZone, Watch, WatchOutcome, days, error_chain,
-    time_of_day, week_start,
+    AppState, Command, EntryId, HistoryId, HistoryPage, LibraryEntry, Line, Link, ListState,
+    ListStatus, ListUpdate, ListUpdateId, Recorded, Ryuuji, StatusMove, TimeZone, Watch,
+    WatchOutcome, days, error_chain, time_of_day, week_start,
 };
 use windows_reactor::*;
 
@@ -30,12 +31,53 @@ const EMPTY_BODY: &str = "An episode shows up here once you've watched half of i
                           whether it recorded the episode or not, and says why when it didn't.";
 
 /// The sources History reads. `library` names each row's show and decides
-/// whether its Undo still applies.
+/// whether its Undo still applies; `pending` is what waits to go out.
 #[derive(Clone)]
 pub struct HistoryProps {
     pub dispatch: Dispatch<Command>,
     pub core: Rc<RefCell<Ryuuji>>,
     pub library: Vec<LibraryEntry>,
+    pub pending: Vec<Pending>,
+}
+
+/// A show whose change waits to go out: what the library wants against
+/// what the list last confirmed. Said once per show, whichever lists wait
+/// on it, and without naming one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pending {
+    entry: EntryId,
+    title: String,
+    /// `3 → 4 · Completed`.
+    detail: String,
+}
+
+/// The shows waiting to go out to a signed-in list, in library order.
+pub fn pending(state: &AppState) -> Vec<Pending> {
+    state
+        .waiting()
+        .into_iter()
+        .map(|waiting| Pending {
+            entry: waiting.entry.id,
+            title: waiting.entry.title.clone(),
+            detail: pending_text(waiting.base, waiting.wanted),
+        })
+        .collect()
+}
+
+/// `3 → 4`, then the status the change moves the show to when it moves it;
+/// the status alone when only it moved, and the rewatch count otherwise.
+fn pending_text(base: ListState, wanted: ListState) -> String {
+    let mut parts = Vec::new();
+    if wanted.progress != base.progress {
+        parts.push(format!("{} \u{2192} {}", base.progress, wanted.progress));
+    }
+    if wanted.status != base.status {
+        parts.push(wanted.status.label().to_owned());
+    }
+    if parts.is_empty() {
+        parts.push(format!("rewatched {} times", wanted.repeat));
+    }
+    parts.join(" \u{b7} ")
 }
 
 /// Identity for the handles, contents for the library. The reactor requires
@@ -46,6 +88,7 @@ impl PartialEq for HistoryProps {
         self.dispatch == other.dispatch
             && Rc::ptr_eq(&self.core, &other.core)
             && self.library == other.library
+            && self.pending == other.pending
     }
 }
 
@@ -69,12 +112,14 @@ pub fn history(props: &HistoryProps, cx: &mut RenderCx) -> Element {
             });
         }
     };
-    if page.watches.is_empty() && page.updates.is_empty() {
+    if page.watches.is_empty() && page.updates.is_empty() && props.pending.is_empty() {
         return placeholder(EMPTY_HEADING, EMPTY_BODY);
     }
 
     let dispatch = props.dispatch.clone();
-    let list = list_view(items(&page, &props.library, now, &zone), move |item, _| {
+    let mut rows = waiting(&props.pending);
+    rows.extend(items(&page, &props.library, now, &zone));
+    let list = list_view(rows, move |item, _| {
         item_view(item, &dispatch, &set_limit, limit)
     })
     .with_key_selector(key)
@@ -141,6 +186,29 @@ enum Item {
     Older,
 }
 
+/// The group of changes waiting to go out, above the days.
+fn waiting(pending: &[Pending]) -> Vec<Item> {
+    let Some(first) = pending.first() else {
+        return Vec::new();
+    };
+    let mut items = vec![Item::Day {
+        label: "Waiting to send".to_owned(),
+        first: RowId::Pending(first.entry),
+    }];
+    items.extend(pending.iter().map(|row| {
+        Item::Row(Row {
+            id: RowId::Pending(row.entry),
+            mark: Mark::Waiting,
+            title: row.title.clone(),
+            detail: row.detail.clone(),
+            file: None,
+            time: String::new(),
+            action: Action::Nothing,
+        })
+    }));
+    items
+}
+
 fn items(
     page: &HistoryPage,
     library: &[LibraryEntry],
@@ -179,6 +247,8 @@ fn key(item: &Item) -> String {
 enum RowId {
     Watch(HistoryId),
     Update(ListUpdateId),
+    /// A show waiting to go out, which has no stored row until it has.
+    Pending(EntryId),
 }
 
 impl fmt::Display for RowId {
@@ -186,6 +256,7 @@ impl fmt::Display for RowId {
         match self {
             RowId::Watch(id) => write!(f, "watch-{id}"),
             RowId::Update(id) => write!(f, "update-{id}"),
+            RowId::Pending(entry) => write!(f, "pending-{entry}"),
         }
     }
 }
@@ -216,10 +287,12 @@ enum Mark {
     Undone,
     Ignored,
     Updated,
+    Waiting,
 }
 
 impl Mark {
-    /// Segoe Fluent Icons: CheckMark, Info, Add, Undo, Blocked, Sync.
+    /// Segoe Fluent Icons: CheckMark, Info, Add, Undo, Blocked, Sync,
+    /// Recent.
     fn glyph(self) -> &'static str {
         match self {
             Mark::Recorded => "\u{E73E}",
@@ -228,6 +301,7 @@ impl Mark {
             Mark::Undone => "\u{E7A7}",
             Mark::Ignored => "\u{E733}",
             Mark::Updated => "\u{E895}",
+            Mark::Waiting => "\u{E823}",
         }
     }
 }
@@ -926,6 +1000,58 @@ mod tests {
         assert_eq!(listed.len(), 4);
         assert_eq!(key(&listed[0]), format!("day-update-{}", newest.id));
         assert_eq!(key(&listed[1]), format!("update-{}", newest.id));
+    }
+
+    #[test]
+    fn a_change_waiting_to_go_out_heads_the_page_without_naming_the_list() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = ryuuji_core::DataDir::at(tmp.path()).unwrap();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::Synced(Report::SignedIn(Account {
+            service: Service::AniList,
+            user: UserId(7),
+            name: "someone".into(),
+            expires: None,
+            signed: Signed::In,
+        })));
+        let held = |progress| ListState {
+            status: ListStatus::Watching,
+            progress,
+            repeat: 0,
+        };
+        let dandadan = take_from_list(&mut app, "Dandadan", 6, held(5));
+        let frieren = take_from_list(&mut app, "Frieren", 5, held(3));
+        assert_eq!(pending(app.state()), vec![]);
+
+        app.dispatch(Command::SetProgress {
+            id: dandadan,
+            progress: 6,
+        });
+        app.dispatch(Command::SetStatus {
+            id: frieren,
+            status: ryuuji_core::WatchStatus::OnHold,
+        });
+        let waiting_now = pending(app.state());
+        assert_eq!(
+            waiting_now
+                .iter()
+                .map(|row| (row.title.as_str(), row.detail.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("Dandadan", "5 \u{2192} 6"), ("Frieren", "On hold")]
+        );
+        let listed = waiting(&waiting_now);
+        assert_eq!(listed.len(), 3);
+        assert_eq!(key(&listed[0]), format!("day-pending-{dandadan}"));
+        assert_eq!(key(&listed[1]), format!("pending-{dandadan}"));
+        assert!(matches!(
+            &listed[0],
+            Item::Day { label, .. } if label == "Waiting to send"
+        ));
+        assert_eq!(waiting(&[]), vec![]);
+
+        // Signed out, nothing is waiting to go anywhere.
+        app.dispatch(Command::Synced(Report::SignedOut(Service::AniList)));
+        assert_eq!(pending(app.state()), vec![]);
     }
 
     #[test]

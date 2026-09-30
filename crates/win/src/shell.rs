@@ -182,9 +182,13 @@ impl Component for Shell {
                 },
             ),
         };
-        let status = status_bar::bar(
-            &status_bar::status_bar(&state, detection_down),
-            dispatch.clone(),
+        let status = component(
+            status_bar::view,
+            status_bar::StatusBarProps {
+                dispatch: dispatch.clone(),
+                bar: status_bar::status_bar(&state, detection_down),
+                syncer: syncer.clone(),
+            },
         );
         let body = pages::chrome(&state.notices, dispatch.clone(), body, status);
 
