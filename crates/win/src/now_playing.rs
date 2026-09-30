@@ -10,28 +10,26 @@ use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 
 use ryuuji_core::{
-    AppState, Certainty, Command, Detail, ElementKind, EntryId, LastWatched, LibraryEntry, Link,
-    ListStatus, NowPlaying, Options, Page, ProposedMatch, RecordOutcome, Ryuuji, WatchProgress,
-    normalize_title, parse,
+    AppState, Certainty, Command, Described, Detail, ElementKind, EntryId, LastWatched,
+    LibraryEntry, Link, ListStatus, NowPlaying, Options, Page, ProposedMatch, Reading,
+    RecordOutcome, Ryuuji, WatchProgress, normalize_title, parse,
 };
 use tracing::warn;
 use windows_reactor::*;
 
 use crate::list_pick::{self, ListPick, ListPickProps};
 use crate::share;
-use crate::standing::{Standing, Why, standing};
+use crate::show_info;
+use crate::standing::{Standing, Tone, Why, standing};
 use crate::ui::{
-    self, CONTENT_MAX_WIDTH, ICON_FONT, MONO_FONT, age_of, caption, card_frame, clock_text,
-    episode_text, placeholder, table,
+    self, CONTENT_MAX_WIDTH, ICON_FONT, MONO_FONT, PICKER_HEIGHT, PICKER_ROWS, age_of, caption,
+    card_frame, clock_text, episode_text, placeholder,
 };
 
 /// How many shows a library needs before the picker offers a search box.
 /// Below this the whole list is on screen, so a field to narrow it would be
 /// one more thing to read for nothing.
 const SEARCH_FROM: usize = 12;
-
-/// How many rows the picker shows before it scrolls.
-const PICKER_ROWS: usize = 5;
 
 /// How many shows Continue watching offers.
 const CONTINUE: usize = 5;
@@ -72,13 +70,15 @@ pub(crate) fn body(
         .last_match
         .as_ref()
         .map_or_else(String::new, |m| m.raw_title.clone());
+    let settled = settled_entry(state);
     component(
         now_playing,
         NowPlayingProps {
             dispatch,
             view: view(state, detection_down, &recent, SystemTime::now()),
             question: question(state),
-            list_pick: settled_entry(state).and_then(|entry| list_pick::needed(state, entry)),
+            list_pick: settled.and_then(|entry| list_pick::needed(state, entry)),
+            described: show_info::source(state, core, settled),
         },
     )
     // A new file starts with the picker closed and its search empty.
@@ -88,13 +88,17 @@ pub(crate) fn body(
 /// The show a playing file is settled on, when it is: a pick on a list is
 /// only asked of a show the file surely is.
 fn settled_entry(state: &AppState) -> Option<EntryId> {
-    if state.ignored || !matches!(state.now_playing, NowPlaying::Playing { .. }) {
+    if !matches!(state.now_playing, NowPlaying::Playing { .. }) {
         return None;
     }
-    match state.last_match.as_ref()?.link {
-        Link::Exact(entry) => Some(entry),
-        Link::Likely(_) | Link::Unmatched => None,
-    }
+    let m = state.last_match.as_ref()?;
+    is_settled(state, m).then(|| m.link.entry()).flatten()
+}
+
+/// Whether a file is settled on a show: matched for sure, and not ignored.
+/// Anything short of that leaves the person to say which show it is.
+fn is_settled(state: &AppState, m: &ProposedMatch) -> bool {
+    !state.ignored && matches!(m.link, Link::Exact(_))
 }
 
 /// One library row the picker can offer, worked out by the caller so the
@@ -184,15 +188,12 @@ struct Hero {
     episode: Option<String>,
     /// `A guess: 07 may be a word of the title`.
     doubt: Option<String>,
-    /// The show the file is settled on, which Edit opens the page of.
+    /// The show the file is settled on: Edit opens its page, Share names
+    /// it, and since two titles can fold alike, the card offers the way to
+    /// say it is the wrong show.
     entry: Option<EntryId>,
-    /// What Share hands the share sheet, once the show is settled.
-    share: Option<String>,
     /// The episode after this file, while the show has one.
     next: Option<u32>,
-    /// A settled match, which can still be the wrong show when two titles
-    /// fold alike: the card offers the way to say so.
-    settled: bool,
 }
 
 /// The episode as a bar, with the point where it records.
@@ -203,7 +204,8 @@ struct Timeline {
     /// Where the tick sits, from 0 to 1, when there is a point to mark.
     mark: Option<f64>,
     start: String,
-    middle: String,
+    /// `records at 12:00`, under the tick, when there is something to say.
+    middle: Option<String>,
     end: String,
     /// A viewing on its way to a recording, whose point is said in the
     /// primary text colour rather than the secondary.
@@ -234,7 +236,7 @@ fn question(state: &AppState) -> Option<Question> {
             Link::Likely(entry) => Some(entry),
             Link::Exact(_) | Link::Unmatched => None,
         },
-        open: state.ignored || !matches!(m.link, Link::Exact(_)),
+        open: !is_settled(state, m),
         can_add: m.link == Link::Unmatched,
         shows: choices(&state.library),
     })
@@ -248,7 +250,7 @@ fn view(state: &AppState, detection_down: bool, recent: &[LastWatched], now: Sys
             last_seen: state
                 .last_match
                 .as_ref()
-                .filter(|m| state.ignored || !matches!(m.link, Link::Exact(_)))
+                .filter(|m| !is_settled(state, m))
                 .map(|m| format!("Last seen in {} \u{b7} {}", m.player, age_of(m.at, now))),
         }),
         NowPlaying::Detecting => View::Detecting,
@@ -263,23 +265,27 @@ fn view(state: &AppState, detection_down: bool, recent: &[LastWatched], now: Sys
             let m = state.last_match.as_ref();
             let entry = m
                 .and_then(|m| m.link.entry())
-                .and_then(|id| state.library.iter().find(|entry| entry.id == id));
-            let mut file = m.map(fact_rows).unwrap_or_default();
+                .and_then(|id| state.entry(id));
+            let reading = m.map(|m| parse(&m.raw_title, &Options::default()));
+            let mut file = reading.as_ref().map(fact_rows).unwrap_or_default();
             file.push(("Player".to_owned(), player.clone()));
-            let show = m.map_or_else(|| title.clone(), |m| m.title_in(&state.library).to_owned());
-            let episode = m.and_then(|m| m.episode.as_ref()).map(episode_text);
-            let settled = !state.ignored && m.is_some_and(|m| matches!(m.link, Link::Exact(_)));
+            let show = match (entry, m) {
+                (Some(entry), _) => entry.title.clone(),
+                (None, Some(m)) => m.shown_title().to_owned(),
+                (None, None) => title.clone(),
+            };
+            let settled = m.is_some_and(|m| is_settled(state, m));
             View::Playing(Box::new(Playing {
                 undo: undo_applies(state),
                 hero: Hero {
-                    status: hero_status(entry.filter(|_| !state.ignored)),
+                    status: entry
+                        .filter(|_| !state.ignored)
+                        .map_or_else(|| "Not in your library".to_owned(), show_info::status_line),
                     entry: entry.filter(|_| settled).map(|entry| entry.id),
-                    share: settled.then(|| share_text(&show, episode.as_deref())),
                     title: show,
-                    episode,
-                    doubt: m.and_then(episode_doubt),
+                    episode: m.and_then(|m| m.episode.as_ref()).map(episode_text),
+                    doubt: reading.as_ref().and_then(episode_doubt),
                     next: m.and_then(|m| next_after(m, entry)),
-                    settled,
                 },
                 timeline: timeline(
                     *position,
@@ -292,21 +298,6 @@ fn view(state: &AppState, detection_down: bool, recent: &[LastWatched], now: Sys
                 raw_title: title.clone(),
             }))
         }
-    }
-}
-
-/// `Watching · 7 of 28 episodes`: the show's status and how far the person
-/// is, or only the status when nothing is watched and the length is unknown.
-pub(crate) fn hero_status(entry: Option<&LibraryEntry>) -> String {
-    let Some(entry) = entry else {
-        return "Not in your library".to_owned();
-    };
-    let status = ListStatus::of(entry).label();
-    match (entry.progress, entry.total) {
-        (progress, Some(total)) => format!("{status} \u{b7} {progress} of {total} episodes"),
-        (0, None) => status.to_owned(),
-        (1, None) => format!("{status} \u{b7} 1 episode"),
-        (progress, None) => format!("{status} \u{b7} {progress} episodes"),
     }
 }
 
@@ -378,34 +369,27 @@ fn timeline(
     let lands = progress
         .map(|progress| position + progress.threshold.saturating_sub(progress.accrued))
         .filter(|at| *at <= duration);
-    let marked = |words: &str| match lands {
-        Some(at) => (Some(fraction(at)), format!("{words} {}", clock_text(at))),
-        None => (None, String::new()),
+    // Where the recording lands, with what it still waits on.
+    let point = |waits_on: &str| match lands {
+        Some(at) => (
+            Some(fraction(at)),
+            Some(format!("records at {}{waits_on}", clock_text(at))),
+        ),
+        None => (None, None),
     };
-    let (mark, middle, recording) = match standing {
-        Some(Standing::Counting { .. }) => {
-            let (mark, middle) = marked("records at");
-            (mark, middle, true)
-        }
+    let ((mark, middle), recording) = match standing {
+        Some(Standing::Counting { .. }) => (point(""), true),
         Some(Standing::NotRecording {
             why: Why::NoShow,
             refused: false,
-        }) => {
-            let (mark, middle) = marked("records at");
-            (mark, format_once(middle, "once linked"), false)
-        }
+        }) => (point(" once linked"), false),
         Some(Standing::NotRecording {
             why: Why::Unconfirmed,
             refused: false,
-        }) => {
-            let (mark, middle) = marked("records at");
-            (mark, format_once(middle, "once confirmed"), false)
-        }
-        Some(Standing::Recorded { .. }) => (None, "recorded".to_owned(), true),
-        Some(Standing::Undone { .. } | Standing::NotRecording { .. }) => {
-            (None, String::new(), false)
-        }
-        None => (None, String::new(), true),
+        }) => (point(" once confirmed"), false),
+        Some(Standing::Recorded { .. }) => ((None, Some("recorded".to_owned())), true),
+        Some(Standing::Undone { .. } | Standing::NotRecording { .. }) => ((None, None), false),
+        None => ((None, None), true),
     };
     Some(Timeline {
         value: fraction(position),
@@ -415,16 +399,6 @@ fn timeline(
         end: clock_text(duration),
         recording,
     })
-}
-
-/// `records at 12:00 once linked`, or nothing when there is no point to
-/// name.
-fn format_once(middle: String, condition: &str) -> String {
-    if middle.is_empty() {
-        middle
-    } else {
-        format!("{middle} {condition}")
-    }
 }
 
 /// Whether Now playing may offer Undo: the viewing recorded, and its show
@@ -446,9 +420,8 @@ fn undo_applies(state: &AppState) -> bool {
         return false;
     };
     state
-        .library
-        .iter()
-        .any(|shown| shown.id == entry && shown.progress == *episode.end())
+        .entry(entry)
+        .is_some_and(|shown| shown.progress == *episode.end())
 }
 
 /// What Now playing is handed. `dispatch` is fresh every render and compares
@@ -460,6 +433,9 @@ struct NowPlayingProps {
     question: Option<Question>,
     /// The playing show's entry on a list, when the person has to pick it.
     list_pick: Option<ListPick>,
+    /// Where to read what the first service the playing show is paired
+    /// with says about it: the cover, the synopsis and the details.
+    described: show_info::Source,
 }
 
 fn now_playing(props: &NowPlayingProps, cx: &mut RenderCx) -> Element {
@@ -473,6 +449,7 @@ fn now_playing(props: &NowPlayingProps, cx: &mut RenderCx) -> Element {
         cx,
         idle.is_some_and(|idle| !idle.next_up.is_empty() || idle.last_seen.is_some()),
     );
+    let described = show_info::use_described(cx, &props.described);
 
     let asking = props
         .question
@@ -511,7 +488,13 @@ fn now_playing(props: &NowPlayingProps, cx: &mut RenderCx) -> Element {
                 });
                 list_pick.or(picker)
             };
-            playing_sections(playing, card, &props.dispatch, set_wrong_show)
+            playing_sections(
+                playing,
+                card,
+                &props.dispatch,
+                set_wrong_show,
+                described.as_ref(),
+            )
         }
     };
     scroll_viewer(vstack(sections).spacing(16.0).max_width(CONTENT_MAX_WIDTH)).into()
@@ -522,6 +505,7 @@ fn playing_sections(
     picker: Option<Element>,
     dispatch: &Dispatch<Command>,
     set_wrong_show: SetState<bool>,
+    described: Option<&Described>,
 ) -> Vec<Element> {
     let mut sections = Vec::new();
     if let Some(standing) = &playing.standing {
@@ -532,29 +516,38 @@ fn playing_sections(
         playing.timeline.as_ref(),
         dispatch,
         set_wrong_show,
+        described,
     ));
     if let Some(picker) = picker {
         sections.push(picker);
     }
-    sections.push(this_file(&playing.file, &playing.raw_title));
+    let info = described.map(|described| &described.info);
+    if let Some(synopsis) = info.and_then(show_info::synopsis) {
+        sections.push(synopsis);
+    }
+    let file = this_file(&playing.file, &playing.raw_title);
+    // The design sets the details and the file side by side, the details
+    // the wider.
+    sections.push(
+        match info.and_then(|info| show_info::details(info, &playing.hero.title)) {
+            Some(details) => grid((border(details).grid_column(0), border(file).grid_column(1)))
+                .columns([GridLength::Star(3.0), GridLength::Star(2.0)])
+                .column_spacing(8.0)
+                .into(),
+            None => file,
+        },
+    );
     sections
 }
 
 /// The viewing's standing, right-aligned under the page's title: the
 /// toolkit's header takes only text, so it cannot sit beside it.
 fn header(standing: &Standing, undo: bool, dispatch: &Dispatch<Command>) -> Element {
-    let (glyph, brush) = match standing {
-        Standing::Counting { .. } => (RECORD_GLYPH, ThemeRef::Accent),
-        Standing::Recorded { .. } => (CHECK_GLYPH, ThemeRef::SystemSuccess),
-        Standing::Undone { .. } => (INFO_GLYPH, ThemeRef::SecondaryText),
-        Standing::NotRecording {
-            why: Why::NoShow | Why::Unconfirmed | Why::Ignored,
-            ..
-        } => (INFO_GLYPH, ThemeRef::SecondaryText),
-        Standing::NotRecording {
-            why: Why::Declined { .. },
-            ..
-        } => (CAUTION_GLYPH, ThemeRef::SystemCaution),
+    let (glyph, brush) = match standing.tone() {
+        Tone::Accent => (RECORD_GLYPH, ThemeRef::Accent),
+        Tone::Success => (CHECK_GLYPH, ThemeRef::SystemSuccess),
+        Tone::Neutral => (INFO_GLYPH, ThemeRef::SecondaryText),
+        Tone::Caution => (CAUTION_GLYPH, ThemeRef::SystemCaution),
     };
     let mut parts: Vec<Element> = vec![
         text_block(glyph)
@@ -569,17 +562,14 @@ fn header(standing: &Standing, undo: bool, dispatch: &Dispatch<Command>) -> Elem
             .into(),
     ];
     let action = match standing {
-        Standing::Counting { .. } => Some(("Don't record".to_owned(), Command::DontRecord)),
-        Standing::Recorded { watch, .. } if undo => {
-            Some(("Undo".to_owned(), Command::UndoRecording(*watch)))
-        }
+        Standing::Counting { .. } => Some(("Don't record", Command::DontRecord)),
+        Standing::Recorded { watch, .. } if undo => Some(("Undo", Command::UndoRecording(*watch))),
         Standing::Recorded { .. } | Standing::Undone { .. } | Standing::NotRecording { .. } => None,
     };
     if let Some((label, command)) = action {
-        let dispatch = dispatch.clone();
         parts.push(
             button(label)
-                .on_click(move || dispatch.call(command.clone()))
+                .on_click(ui::send(dispatch, command))
                 .vertical_alignment(VerticalAlignment::Center)
                 .into(),
         );
@@ -595,6 +585,7 @@ fn hero(
     timeline: Option<&Timeline>,
     dispatch: &Dispatch<Command>,
     set_wrong_show: SetState<bool>,
+    described: Option<&Described>,
 ) -> Element {
     let mut lines: Vec<Element> = vec![
         caption(hero.status.clone()).into(),
@@ -617,16 +608,19 @@ fn hero(
     }
     let mut links: Vec<Element> = Vec::new();
     if let Some(entry) = hero.entry {
-        let dispatch = dispatch.clone();
         links.push(
             button("Edit")
                 .text_link()
-                .on_click(move || dispatch.call(Command::OpenDetail(Detail::Entry(entry))))
+                .on_click(ui::send(
+                    dispatch,
+                    Command::OpenDetail(Detail::Entry(entry)),
+                ))
                 .into(),
         );
     }
-    if let Some(text) = &hero.share {
-        let (show, text) = (hero.title.clone(), text.clone());
+    if hero.entry.is_some() {
+        let show = hero.title.clone();
+        let text = share_text(&show, hero.episode.as_deref());
         links.push(
             button("Share")
                 .text_link()
@@ -647,7 +641,7 @@ fn hero(
                 .into(),
         );
     }
-    if hero.settled {
+    if hero.entry.is_some() {
         links.push(
             button("Wrong show?")
                 .text_link()
@@ -662,7 +656,13 @@ fn hero(
     if let Some(timeline) = timeline {
         card.push(timeline_element(timeline));
     }
-    card_frame(vstack(card).spacing(16.0)).into()
+    card_frame(show_info::beside_cover(
+        described,
+        vstack(card)
+            .spacing(16.0)
+            .vertical_alignment(VerticalAlignment::Bottom),
+    ))
+    .into()
 }
 
 /// Links in a row with a dot between each, the way the design separates
@@ -719,8 +719,8 @@ fn timeline_element(timeline: &Timeline) -> Element {
                 .into(),
         );
     }
-    if !timeline.middle.is_empty() {
-        let words = caption(timeline.middle.clone()).max_lines(1);
+    if let Some(middle) = &timeline.middle {
+        let words = caption(middle.clone()).max_lines(1);
         let words = if timeline.mark.is_some() && timeline.recording {
             words.foreground(ThemeRef::PrimaryText)
         } else {
@@ -764,7 +764,7 @@ fn star(weight: f64) -> GridLength {
 fn this_file(rows: &[(String, String)], raw_title: &str) -> Element {
     let mut children: Vec<Element> = vec![text_block("This file").semibold().into()];
     if !rows.is_empty() {
-        children.push(facts_grid(rows));
+        children.push(ui::facts_table(rows.iter().cloned()).into());
     }
     children.push(
         caption(raw_title)
@@ -820,7 +820,7 @@ fn which_show(
         .with_key_selector(|candidate: &Candidate| candidate.show.entry.to_string())
         .selection_mode(SelectionMode::None);
         children.push(if many {
-            list.height(280.0).into()
+            list.height(PICKER_HEIGHT).into()
         } else {
             list.into()
         });
@@ -919,10 +919,7 @@ fn matching_shows(shows: &[ShowChoice], query: &str) -> Vec<ShowChoice> {
 
 /// A button that hands one command to the core and nothing else.
 fn dispatching(dispatch: &Dispatch<Command>, label: &str, command: Command) -> Element {
-    let dispatch = dispatch.clone();
-    button(label)
-        .on_click(move || dispatch.call(command.clone()))
-        .into()
+    button(label).on_click(ui::send(dispatch, command)).into()
 }
 
 fn idle_sections(
@@ -939,10 +936,6 @@ fn idle_sections(
                 .into(),
         );
     }
-    let open_library = {
-        let dispatch = dispatch.clone();
-        move || dispatch.call(Command::SelectPage(Page::Library))
-    };
     let mut watching: Vec<Element> = vec![
         grid((
             text_block("Continue watching")
@@ -951,7 +944,7 @@ fn idle_sections(
                 .grid_column(0),
             button("Open Library")
                 .text_link()
-                .on_click(open_library)
+                .on_click(ui::send(dispatch, Command::SelectPage(Page::Library)))
                 .grid_column(1),
         ))
         .columns([GridLength::STAR, GridLength::Auto])
@@ -1006,10 +999,9 @@ fn idle_placeholder_copy(detection_down: bool) -> (&'static str, &'static str) {
 
 /// `A guess: 07 may be a word of the title`, when the parser had to guess
 /// the episode. The card already names the episode, so this says only what
-/// else its text could have been. Re-parsed from the raw title like the
-/// file's facts, so nothing about the doubt is carried on the proposal.
-fn episode_doubt(m: &ProposedMatch) -> Option<String> {
-    let reading = parse(&m.raw_title, &Options::default());
+/// else its text could have been. Read off the raw title like the file's
+/// facts, so nothing about the doubt is carried on the proposal.
+fn episode_doubt(reading: &Reading) -> Option<String> {
     if reading.episodes()?.certainty != Certainty::Guessed {
         return None;
     }
@@ -1028,10 +1020,10 @@ fn episode_doubt(m: &ProposedMatch) -> Option<String> {
     (!doubts.is_empty()).then(|| format!("A guess: {}", doubts.join("; ")))
 }
 
-/// Every element the parser finds in the raw player title. Re-parsed here
+/// Every element the parser finds in the raw player title. Read here
 /// rather than carried on the proposal, so a reloaded one reads the same.
-fn fact_rows(m: &ProposedMatch) -> Vec<(String, String)> {
-    parse(&m.raw_title, &Options::default())
+fn fact_rows(reading: &Reading) -> Vec<(String, String)> {
+    reading
         .elements()
         .iter()
         .map(|(kind, value)| (fact_label(kind.label()), value.to_owned()))
@@ -1044,16 +1036,6 @@ fn fact_label(label: &str) -> String {
         first.make_ascii_uppercase();
     }
     label
-}
-
-fn facts_grid(rows: &[(String, String)]) -> Element {
-    table([GridLength::Auto, GridLength::STAR])
-        .spacing(2.0, 12.0)
-        .rows(
-            rows.iter()
-                .map(|(label, value)| [caption(label.clone()), text_block(value.clone()).wrap()]),
-        )
-        .into()
 }
 
 #[cfg(test)]
@@ -1127,7 +1109,7 @@ mod tests {
         .unwrap();
         assert_eq!(line.start, "11:33");
         assert_eq!(line.end, "24:00");
-        assert_eq!(line.middle, "records at 12:00");
+        assert_eq!(line.middle.as_deref(), Some("records at 12:00"));
         assert_eq!(line.mark, Some(0.5));
         assert!((line.value - 693.0 / 1440.0).abs() < 1e-9);
         assert!(line.recording);
@@ -1141,7 +1123,7 @@ mod tests {
             Some(&standing_of(8)),
         )
         .unwrap();
-        assert_eq!(seeked.middle, "records at 22:00");
+        assert_eq!(seeked.middle.as_deref(), Some("records at 22:00"));
         assert_eq!(seeked.mark, Some(1320.0 / 1440.0));
 
         // Too little watched to record before the episode ends.
@@ -1152,7 +1134,7 @@ mod tests {
             Some(&standing_of(8)),
         )
         .unwrap();
-        assert_eq!((short.mark, short.middle.as_str()), (None, ""));
+        assert_eq!((short.mark, short.middle), (None, None));
     }
 
     #[test]
@@ -1168,14 +1150,17 @@ mod tests {
             Some(&unmatched),
         )
         .unwrap();
-        assert_eq!(line.middle, "records at 12:00 once linked");
+        assert_eq!(line.middle.as_deref(), Some("records at 12:00 once linked"));
         assert!(!line.recording);
         let guess = Standing::NotRecording {
             why: Why::Unconfirmed,
             refused: false,
         };
         let line = timeline(secs(312), secs(1440), Some(&counting(312)), Some(&guess)).unwrap();
-        assert_eq!(line.middle, "records at 12:00 once confirmed");
+        assert_eq!(
+            line.middle.as_deref(),
+            Some("records at 12:00 once confirmed")
+        );
     }
 
     #[test]
@@ -1189,8 +1174,8 @@ mod tests {
         };
         let line = timeline(secs(842), secs(1440), Some(&counting(842)), Some(&refused)).unwrap();
         assert_eq!(
-            (line.mark, line.middle.as_str(), line.recording),
-            (None, "", false)
+            (line.mark, line.middle, line.recording),
+            (None, None, false)
         );
         let (_, watch) = recorded();
         let recorded = Standing::Recorded {
@@ -1199,8 +1184,8 @@ mod tests {
         };
         let line = timeline(secs(760), secs(1440), Some(&counting(760)), Some(&recorded)).unwrap();
         assert_eq!(
-            (line.mark, line.middle.as_str(), line.recording),
-            (None, "recorded", true)
+            (line.mark, line.middle.as_deref(), line.recording),
+            (None, Some("recorded"), true)
         );
         assert_eq!(timeline(secs(60), Duration::ZERO, None, None), None);
     }
@@ -1220,28 +1205,22 @@ mod tests {
     #[test]
     fn the_hero_says_where_the_show_stands() {
         let (frieren, vinland) = two_shows();
-        assert_eq!(
-            hero_status(Some(&frieren)),
-            "Watching \u{b7} 7 of 28 episodes"
-        );
-        assert_eq!(hero_status(Some(&vinland)), "Watching \u{b7} 2 episodes");
+        let status = show_info::status_line;
+        assert_eq!(status(&frieren), "Watching \u{b7} 7 of 28 episodes");
+        assert_eq!(status(&vinland), "Watching \u{b7} 2 episodes");
         let planned = LibraryEntry {
             status: WatchStatus::PlanToWatch,
             progress: 0,
             ..vinland.clone()
         };
-        assert_eq!(hero_status(Some(&planned)), "Plan to watch");
+        assert_eq!(status(&planned), "Plan to watch");
         let rewatch = LibraryEntry {
             status: WatchStatus::Completed,
             rewatching: true,
             progress: 3,
             ..frieren.clone()
         };
-        assert_eq!(
-            hero_status(Some(&rewatch)),
-            "Rewatching \u{b7} 3 of 28 episodes"
-        );
-        assert_eq!(hero_status(None), "Not in your library");
+        assert_eq!(status(&rewatch), "Rewatching \u{b7} 3 of 28 episodes");
     }
 
     #[test]
@@ -1412,21 +1391,12 @@ mod tests {
 
     #[test]
     fn a_guessed_episode_says_what_else_it_could_be() {
-        let guess = ProposedMatch {
-            raw_title: "Magical Girl Series 07.mkv".to_owned(),
-            episode: Some(7..=7),
-            ..proposal()
-        };
+        let read = |raw: &str| parse(raw, &Options::default());
         assert_eq!(
-            episode_doubt(&guess).as_deref(),
+            episode_doubt(&read("Magical Girl Series 07.mkv")).as_deref(),
             Some("A guess: 07 may be a word of the title")
         );
-        let sure = ProposedMatch {
-            raw_title: "[Subs] Show - 05 [1080p].mkv".to_owned(),
-            episode: Some(5..=5),
-            ..proposal()
-        };
-        assert_eq!(episode_doubt(&sure), None);
+        assert_eq!(episode_doubt(&read("[Subs] Show - 05 [1080p].mkv")), None);
     }
 
     /// A recording with an id of its own, which only a store mints: episode
@@ -1484,12 +1454,8 @@ mod tests {
     }
 
     #[test]
-    fn fact_rows_re_parse_the_raw_title() {
-        let m = ProposedMatch {
-            raw_title: "[Subs] Show - 03 (1080p).mkv".to_owned(),
-            ..proposal()
-        };
-        let rows = fact_rows(&m);
+    fn fact_rows_say_what_the_parser_read() {
+        let rows = fact_rows(&parse("[Subs] Show - 03 (1080p).mkv", &Options::default()));
         assert!(rows.contains(&("Release group".to_owned(), "Subs".to_owned())));
         assert!(rows.contains(&("Anime title".to_owned(), "Show".to_owned())));
         assert!(rows.contains(&("Episode number".to_owned(), "03".to_owned())));

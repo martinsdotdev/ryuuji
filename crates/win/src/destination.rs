@@ -39,11 +39,7 @@ impl Destination {
             Some(detail) => Destination {
                 body: Body::Detail(detail),
                 header: match detail {
-                    Detail::Entry(entry) => state
-                        .library
-                        .iter()
-                        .find(|shown| shown.id == entry)
-                        .map(|shown| shown.title.clone()),
+                    Detail::Entry(entry) => state.entry(entry).map(|shown| shown.title.clone()),
                     Detail::Diagnostics => None,
                 }
                 .unwrap_or_else(|| detail.label().to_owned()),

@@ -29,6 +29,19 @@ pub(crate) enum Standing {
     NotRecording { why: Why, refused: bool },
 }
 
+/// How a standing reads at a glance: the colour its mark takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Tone {
+    /// Counting down to the write.
+    Accent,
+    /// Written.
+    Success,
+    /// Nothing is written, and nothing went wrong.
+    Neutral,
+    /// A gate turned the episode down.
+    Caution,
+}
+
 /// Why nothing is written.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Why {
@@ -94,11 +107,27 @@ pub(crate) fn standing(state: &AppState) -> Option<Standing> {
 /// The episode the proposal's show waits for.
 fn next_episode(state: &AppState) -> Option<u32> {
     let entry = state.last_match.as_ref()?.link.entry()?;
-    let entry = state.library.iter().find(|shown| shown.id == entry)?;
+    let entry = state.entry(entry)?;
     entry.progress.checked_add(1)
 }
 
 impl Standing {
+    pub(crate) fn tone(&self) -> Tone {
+        match self {
+            Standing::Counting { .. } => Tone::Accent,
+            Standing::Recorded { .. } => Tone::Success,
+            Standing::Undone { .. }
+            | Standing::NotRecording {
+                why: Why::NoShow | Why::Unconfirmed | Why::Ignored,
+                ..
+            } => Tone::Neutral,
+            Standing::NotRecording {
+                why: Why::Declined { .. },
+                ..
+            } => Tone::Caution,
+        }
+    }
+
     /// The whole sentence, for Now playing's header.
     pub(crate) fn header(&self) -> String {
         match self {

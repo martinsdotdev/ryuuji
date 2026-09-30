@@ -9,7 +9,7 @@ use std::process::Command as Process;
 use std::sync::OnceLock;
 use std::time::{Duration, SystemTime};
 
-use ryuuji_core::TimeZone;
+use ryuuji_core::{Command, TimeZone};
 use tracing::warn;
 use windows_reactor::*;
 
@@ -24,6 +24,17 @@ pub(crate) const BUILD_PROFILE: &str = if cfg!(debug_assertions) {
 } else {
     "release"
 };
+
+/// How many rows a picker shows before it scrolls, and the height it
+/// scrolls in.
+pub(crate) const PICKER_ROWS: usize = 5;
+pub(crate) const PICKER_HEIGHT: f64 = 280.0;
+
+/// A click handler that hands `command` to the core.
+pub(crate) fn send(dispatch: &Dispatch<Command>, command: Command) -> impl Fn() + Clone + 'static {
+    let dispatch = dispatch.clone();
+    move || dispatch.call(command.clone())
+}
 
 pub(crate) fn section(title: &str) -> TextBlock {
     text_block(title).semibold().margin(Thickness {
@@ -108,6 +119,14 @@ pub(crate) fn episode_text(episode: &RangeInclusive<u32>) -> String {
     }
 }
 
+/// `1 episode`, `26 episodes`.
+pub(crate) fn episodes_text(count: u32) -> String {
+    match count {
+        1 => "1 episode".to_owned(),
+        count => format!("{count} episodes"),
+    }
+}
+
 /// `m:ss`, or `h:mm:ss` from one hour.
 pub(crate) fn clock_text(value: Duration) -> String {
     let total = value.as_secs();
@@ -136,6 +155,16 @@ pub(crate) struct Table<const N: usize> {
     row_spacing: f64,
     column_spacing: f64,
     header: Option<[&'static str; N]>,
+}
+
+/// Labels beside their values, the way a card lists what it knows.
+pub(crate) fn facts_table<L: Into<String>>(rows: impl IntoIterator<Item = (L, String)>) -> Grid {
+    table([GridLength::Auto, GridLength::STAR])
+        .spacing(2.0, 12.0)
+        .rows(
+            rows.into_iter()
+                .map(|(label, value)| [caption(label), text_block(value).wrap()]),
+        )
 }
 
 pub(crate) fn table<const N: usize>(columns: [GridLength; N]) -> Table<N> {
