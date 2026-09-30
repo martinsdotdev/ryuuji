@@ -6,14 +6,18 @@
 //! Nothing here decides what is pending: `AppState::work` derives that
 //! from the library and the listings after each change.
 
+use std::fs;
 use std::time::SystemTime;
 
 use super::{Ryuuji, commit, upsert};
 use crate::{
-    Account, Asked, Attempt, AutoLink, Candidate, EntryId, Link, LinkedBy, ListState, Listing,
-    Media, MediaId, Notice, Parked, Picker, Remote, Report, Service, Settled, Signed, Tie, Tied,
-    UserId, auto_link, settlement,
+    Account, Asked, Attempt, AutoLink, Candidate, Cover, Described, EntryId, Link, LinkedBy,
+    ListState, Listing, Media, MediaId, Notice, Parked, Picker, Remote, Report, Service, Settled,
+    ShowInfo, Signed, Tie, Tied, UserId, auto_link, settlement,
 };
+
+/// The folder under the data directory the covers are kept in.
+const COVERS: &str = "covers";
 
 impl Ryuuji {
     pub(super) fn synced(&mut self, report: Report) {
@@ -53,7 +57,87 @@ impl Ryuuji {
                 entry,
                 media,
             } => self.gone(service, entry, media),
+            Report::Described {
+                service,
+                media,
+                info,
+                cover,
+            } => self.described(service, media, &info, cover.as_ref()),
         }
+    }
+
+    /// Keeps what a service said about a show, and its cover as a file under
+    /// the data folder. A cover that cannot be written is left out with a
+    /// warning, since the page has a placeholder for it; the info is stored
+    /// either way.
+    fn described(
+        &mut self,
+        service: Service,
+        media: MediaId,
+        info: &ShowInfo,
+        cover: Option<&Cover>,
+    ) {
+        let file = cover.and_then(|cover| self.keep_cover(service, media, cover));
+        let outcome = self.store.describe(service, media, info, file.as_deref());
+        if let Some(at) = commit(&mut self.state.notices, "show info", outcome) {
+            let described = &mut self.state.sync.described;
+            match described
+                .iter_mut()
+                .find(|known| known.service == service && known.media == media)
+            {
+                Some(known) => *known = at,
+                None => described.push(at),
+            }
+        }
+    }
+
+    /// Writes a cover into the covers folder by way of a temporary file, so
+    /// a crash never leaves half a picture under the name the page reads.
+    /// Says the file's name, or nothing when it could not be written.
+    fn keep_cover(&self, service: Service, media: MediaId, cover: &Cover) -> Option<String> {
+        let extension: String = cover
+            .extension
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .take(5)
+            .collect::<String>()
+            .to_ascii_lowercase();
+        let extension = if extension.is_empty() {
+            "jpg".to_owned()
+        } else {
+            extension
+        };
+        let name = format!("{}-{}.{extension}", service.tag(), media.0);
+        let folder = self.dir.root().join(COVERS);
+        let written = fs::create_dir_all(&folder).and_then(|()| {
+            let partial = folder.join(format!("{name}.partial"));
+            fs::write(&partial, &cover.bytes)?;
+            fs::rename(&partial, folder.join(&name))
+        });
+        match written {
+            Ok(()) => Some(name),
+            Err(err) => {
+                tracing::warn!(error = %err, cover = %name, "cover not kept");
+                None
+            }
+        }
+    }
+
+    /// What was kept about a show on `service`, with its cover's path when
+    /// the file is there. Read from the store on each call rather than held
+    /// in the app state, which the shell clones on every dispatch.
+    pub fn show_info(
+        &self,
+        service: Service,
+        media: MediaId,
+    ) -> Result<Option<Described>, crate::StoreError> {
+        Ok(self.store.show_info(service, media)?.map(|kept| Described {
+            info: kept.info,
+            cover: kept
+                .cover_file
+                .map(|file| self.dir.root().join(COVERS).join(file))
+                .filter(|path| path.is_file()),
+        }))
     }
 
     /// Keeps the account the token turned out to belong to. The attempt is
@@ -512,7 +596,7 @@ mod tests {
     };
     use super::*;
     use crate::{
-        Command, DataDir, Decline, Job, LinkState, ListEntryId, ListStatus, NewEntry,
+        Command, DataDir, Decline, Format, Job, LinkState, ListEntryId, ListStatus, NewEntry,
         RecordOutcome, Store, Task, WatchStatus, When, Work, Write, merge, normalize_title,
     };
 
@@ -541,7 +625,7 @@ mod tests {
         Candidate {
             media: media(id, title, episodes),
             titles: vec![],
-            format: Some("TV".into()),
+            format: Some(Format::Tv),
             year: None,
         }
     }
@@ -725,6 +809,63 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    #[test]
+    fn a_description_keeps_the_info_and_the_cover_file() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        let info = ShowInfo {
+            titles: vec!["Sousou no Frieren".into()],
+            episodes: Some(28),
+            ..ShowInfo::default()
+        };
+        app.dispatch(Command::Synced(Report::Described {
+            service: ANILIST,
+            media: MediaId(154_587),
+            info: info.clone(),
+            cover: Some(Cover {
+                bytes: b"not a real jpeg".to_vec(),
+                extension: ".JPG?x".into(),
+            }),
+        }));
+        let described = app.show_info(ANILIST, MediaId(154_587)).unwrap().unwrap();
+        assert_eq!(described.info, info);
+        let cover = described.cover.unwrap();
+        assert_eq!(cover, dir.root().join("covers").join("anilist-154587.jpgx"));
+        assert_eq!(fs::read(&cover).unwrap(), b"not a real jpeg");
+        assert_eq!(
+            app.state()
+                .sync
+                .described
+                .iter()
+                .map(|known| (known.service, known.media))
+                .collect::<Vec<_>>(),
+            vec![(ANILIST, MediaId(154_587))]
+        );
+        assert!(
+            !dir.root()
+                .join("covers")
+                .join("anilist-154587.jpgx.partial")
+                .exists()
+        );
+
+        // Fetched again with no cover: the file stays, and so does one row.
+        app.dispatch(Command::Synced(Report::Described {
+            service: ANILIST,
+            media: MediaId(154_587),
+            info: ShowInfo {
+                episodes: Some(29),
+                ..info
+            },
+            cover: None,
+        }));
+        let again = app.show_info(ANILIST, MediaId(154_587)).unwrap().unwrap();
+        assert_eq!(again.info.episodes, Some(29));
+        assert_eq!(again.cover, Some(cover));
+        assert_eq!(app.state().sync.described.len(), 1);
+        drop(app);
+        assert_eq!(Ryuuji::open(&dir).unwrap().state().sync.described.len(), 1);
     }
 
     #[test]

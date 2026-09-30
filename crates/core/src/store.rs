@@ -15,6 +15,7 @@ use crate::{
 };
 
 mod lists;
+mod media;
 
 pub use lists::{Settled, Tied};
 
@@ -1424,18 +1425,22 @@ mod tests {
         }
     }
 
+    /// The schema the newest migration leaves, which every older library
+    /// migrates up to.
+    const LATEST: SchemaVersion = SchemaVersion(12);
+
     fn schema_version(store: &Store) -> SchemaVersion {
         store.schema_version().unwrap()
     }
 
     #[test]
-    fn open_creates_the_database_at_schema_v11_without_recovery() {
+    fn open_creates_the_database_at_the_latest_schema_without_recovery() {
         let (_tmp, dir) = open_tmp();
         let store = open(&dir);
         assert!(dir.root().join("library.sqlite").is_file());
-        assert_eq!(schema_version(&store), SchemaVersion(11));
+        assert_eq!(schema_version(&store), LATEST);
         drop(store);
-        assert_eq!(schema_version(&open(&dir)), SchemaVersion(11));
+        assert_eq!(schema_version(&open(&dir)), LATEST);
     }
 
     #[test]
@@ -1462,7 +1467,7 @@ mod tests {
         let recovered = recovered.expect("recovery reported");
         assert_backup_name(&backup_name(&recovered));
         assert_eq!(fs::read(&recovered.backup).unwrap(), garbage);
-        assert_eq!(schema_version(&store), SchemaVersion(11));
+        assert_eq!(schema_version(&store), LATEST);
         assert_eq!(store.entries().unwrap(), vec![]);
         drop(store);
 
@@ -1579,7 +1584,7 @@ mod tests {
         drop(conn);
 
         let store = open(&dir);
-        assert_eq!(schema_version(&store), SchemaVersion(11));
+        assert_eq!(schema_version(&store), LATEST);
         let entries = store.entries().unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].title, "Show");
@@ -1609,7 +1614,7 @@ mod tests {
         drop(conn);
 
         let store = open(&dir);
-        assert_eq!(schema_version(&store), SchemaVersion(11));
+        assert_eq!(schema_version(&store), LATEST);
         assert_eq!(store.last_match().unwrap(), Some(proposed("Show - 03.mkv")));
     }
 
@@ -1636,7 +1641,7 @@ mod tests {
         drop(conn);
 
         let store = open(&dir);
-        assert_eq!(schema_version(&store), SchemaVersion(11));
+        assert_eq!(schema_version(&store), LATEST);
         assert_eq!(store.last_match().unwrap(), Some(proposed("Show - 03.mkv")));
     }
 
@@ -1670,7 +1675,7 @@ mod tests {
         drop(conn);
 
         let store = open(&dir);
-        assert_eq!(schema_version(&store), SchemaVersion(11));
+        assert_eq!(schema_version(&store), LATEST);
         let entries = store.entries().unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].id, EntryId(7));
@@ -1711,7 +1716,7 @@ mod tests {
         drop(conn);
 
         let store = open(&dir);
-        assert_eq!(schema_version(&store), SchemaVersion(11));
+        assert_eq!(schema_version(&store), LATEST);
         let at = |secs: u64| UNIX_EPOCH + Duration::from_secs(secs);
         let copied = |id: i64,
                       episode: RangeInclusive<u32>,
@@ -1796,7 +1801,7 @@ mod tests {
         drop(conn);
 
         let store = open(&dir);
-        assert_eq!(schema_version(&store), SchemaVersion(11));
+        assert_eq!(schema_version(&store), LATEST);
         let entries = store.entries().unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].id, EntryId(7));
@@ -1838,7 +1843,7 @@ mod tests {
         drop(conn);
 
         let store = open(&dir);
-        assert_eq!(schema_version(&store), SchemaVersion(11));
+        assert_eq!(schema_version(&store), LATEST);
         assert_eq!(store.entries().unwrap().len(), 1);
         let watches = watches(&store);
         assert_eq!(watches.len(), 1);
@@ -1883,7 +1888,7 @@ mod tests {
         drop(conn);
 
         let mut store = open(&dir);
-        assert_eq!(schema_version(&store), SchemaVersion(11));
+        assert_eq!(schema_version(&store), LATEST);
         let entries = store.entries().unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].rewatched, 0);
@@ -1934,7 +1939,7 @@ mod tests {
         drop(conn);
 
         let store = open(&dir);
-        assert_eq!(schema_version(&store), SchemaVersion(11));
+        assert_eq!(schema_version(&store), LATEST);
         let entries = store.entries().unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].id, EntryId(7));
@@ -1948,6 +1953,46 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM updates", [], |row| row.get(0))
             .unwrap();
         assert_eq!(updates, 0);
+    }
+
+    #[test]
+    fn v11_library_migrates_to_v12_with_no_show_info() {
+        let (_tmp, dir) = open_tmp();
+        let conn = Connection::open(dir.library_db()).unwrap();
+        for sql in [
+            include_str!("../migrations/01-entries/up.sql"),
+            include_str!("../migrations/02-last_match/up.sql"),
+            include_str!("../migrations/03-drop_outcome/up.sql"),
+            include_str!("../migrations/04-episode_range_and_rewatching/up.sql"),
+            include_str!("../migrations/05-watch_events/up.sql"),
+            include_str!("../migrations/06-history/up.sql"),
+            include_str!("../migrations/07-aliases/up.sql"),
+            include_str!("../migrations/08-ignored/up.sql"),
+            include_str!("../migrations/09-moved/up.sql"),
+            include_str!("../migrations/10-status_moves/up.sql"),
+            include_str!("../migrations/11-lists/up.sql"),
+        ] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO entries (id, title, status, progress, total, updated_at) \
+             VALUES (7, 'Show', 'watching', 1, 12, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO listings (entry_id, service, tie, media_id, media_title, linked_by, \
+             tied_at) VALUES (7, 'anilist', 'linked', 5, 'Show', 'title', 100)",
+            [],
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 11).unwrap();
+        drop(conn);
+
+        let store = open(&dir);
+        assert_eq!(schema_version(&store), LATEST);
+        assert_eq!(store.listings().unwrap().len(), 1);
+        assert_eq!(store.described().unwrap(), vec![]);
     }
 
     fn watching(id: EntryId, episode: RangeInclusive<u32>) -> NewRecording {

@@ -109,8 +109,8 @@ fn unpicked_reason(service: Service, title: &str, found: u32) -> String {
 /// `TV · 26 episodes · 2001`: what tells two entries of one title apart.
 fn candidate_line(candidate: &Candidate) -> String {
     let mut parts = Vec::new();
-    if let Some(format) = &candidate.format {
-        parts.push(format.replace('_', " "));
+    if let Some(format) = candidate.format {
+        parts.push(format.label().to_owned());
     }
     match candidate.media.episodes {
         Some(1) => parts.push("1 episode".to_owned()),
@@ -299,7 +299,7 @@ fn list_pick(props: &ListPickProps, cx: &mut RenderCx) -> Element {
 
 #[cfg(test)]
 mod tests {
-    use ryuuji_core::{Account, DataDir, Media, NewEntry, Ryuuji, UserId, WatchStatus};
+    use ryuuji_core::{Account, DataDir, Format, Media, NewEntry, Ryuuji, UserId, WatchStatus};
 
     use super::*;
 
@@ -314,19 +314,19 @@ mod tests {
 
     #[test]
     fn a_candidate_says_what_tells_it_apart() {
-        let candidate = |format: Option<&str>, episodes, year| Candidate {
+        let candidate = |format, episodes, year| Candidate {
             media: media(1, "Fruits Basket", episodes),
             titles: vec![],
-            format: format.map(str::to_owned),
+            format,
             year,
         };
         assert_eq!(
-            candidate_line(&candidate(Some("TV"), Some(26), Some(2001))),
+            candidate_line(&candidate(Some(Format::Tv), Some(26), Some(2001))),
             "TV \u{b7} 26 episodes \u{b7} 2001"
         );
         assert_eq!(
-            candidate_line(&candidate(Some("TV_SHORT"), Some(1), None)),
-            "TV SHORT \u{b7} 1 episode"
+            candidate_line(&candidate(Some(Format::TvShort), Some(1), None)),
+            "TV short \u{b7} 1 episode"
         );
         assert_eq!(candidate_line(&candidate(None, None, None)), "");
     }
@@ -371,7 +371,7 @@ mod tests {
             // Both entries list the bare title, which is what makes the
             // show ambiguous.
             titles: vec![title.to_owned(), "Fruits Basket".to_owned()],
-            format: Some("TV".to_owned()),
+            format: Some(Format::Tv),
             year: Some(year),
         }
     }

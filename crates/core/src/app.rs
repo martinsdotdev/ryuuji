@@ -80,6 +80,11 @@ impl Ryuuji {
                 tracing::warn!(error = %error_chain(&err), "listings unreadable");
                 Vec::new()
             }),
+            // Unreadable, every show is fetched again, which does no harm.
+            described: store.described().unwrap_or_else(|err| {
+                tracing::warn!(error = %error_chain(&err), "show info unreadable");
+                Vec::new()
+            }),
             ..SyncState::default()
         };
         let notices = recovered

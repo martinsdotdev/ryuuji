@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use base64::Engine;
 use base64::prelude::BASE64_URL_SAFE_NO_PAD;
 use ryuuji_core::{
-    Candidate, ListEntryId, ListState, ListStatus, Media, MediaId, Remote, UserId, Write,
+    Candidate, Format, ListEntryId, ListState, ListStatus, Media, MediaId, Remote, UserId, Write,
 };
 use serde_json::{Map, Value, json};
 
@@ -251,14 +251,25 @@ fn candidate(media: &Value) -> Result<Candidate, Failure> {
             mal_id: media.get("idMal").and_then(Value::as_u64),
         },
         titles,
-        format: media
-            .get("format")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
+        format: format(media),
         year: media
             .get("seasonYear")
             .and_then(Value::as_u64)
             .and_then(|year| u16::try_from(year).ok()),
+    })
+}
+
+/// A show's format as AniList's `MediaFormat` names it.
+fn format(media: &Value) -> Option<Format> {
+    Some(match media.get("format")?.as_str()? {
+        "TV" => Format::Tv,
+        "TV_SHORT" => Format::TvShort,
+        "MOVIE" => Format::Movie,
+        "SPECIAL" => Format::Special,
+        "OVA" => Format::Ova,
+        "ONA" => Format::Ona,
+        "MUSIC" => Format::Music,
+        _ => return None,
     })
 }
 
@@ -502,7 +513,7 @@ mod tests {
                     "Frieren at the Funeral".into(),
                     "Frieren".into(),
                 ],
-                format: Some("TV".into()),
+                format: Some(Format::Tv),
                 year: Some(2023),
             }
         );
@@ -520,7 +531,7 @@ mod tests {
                     "Sousou no Frieren 2nd Season".into(),
                     "葬送のフリーレン 第2期".into()
                 ],
-                format: Some("TV".into()),
+                format: Some(Format::Tv),
                 year: None,
             }
         );

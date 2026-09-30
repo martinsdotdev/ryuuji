@@ -284,7 +284,7 @@ pub(crate) fn auto_link(entry: &LibraryEntry, found: &[Candidate]) -> AutoLink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{EntryId, LinkedBy, ListEntryId, MediaId, Service, Tie, WatchStatus};
+    use crate::{EntryId, Format, LinkedBy, ListEntryId, MediaId, Service, Tie, WatchStatus};
 
     fn state(status: ListStatus, progress: u32, repeat: u32) -> ListState {
         ListState {
@@ -744,13 +744,13 @@ mod tests {
             Candidate {
                 media: media(1, "Fruits Basket", Some(26)),
                 titles: vec!["Fruits Basket".into(), "Furuba".into()],
-                format: Some("TV".into()),
+                format: Some(Format::Tv),
                 year: Some(2001),
             },
             Candidate {
                 media: media(2, "Fruits Basket (2019)", Some(25)),
                 titles: vec!["Fruits Basket".into(), "Fruits Basket 1st Season".into()],
-                format: Some("TV".into()),
+                format: Some(Format::Tv),
                 year: Some(2019),
             },
         ]

@@ -7,6 +7,7 @@
 mod merge;
 
 use std::fmt;
+use std::path::PathBuf;
 use std::time::SystemTime;
 
 use crate::tagged::tagged_enum;
@@ -91,7 +92,7 @@ pub struct Candidate {
     pub media: Media,
     /// Every title and synonym the service lists for it.
     pub titles: Vec<String>,
-    pub format: Option<String>,
+    pub format: Option<Format>,
     pub year: Option<u16>,
 }
 
@@ -256,6 +257,97 @@ pub enum Attempt {
     Failed { service: Service, message: String },
 }
 
+tagged_enum! {
+    /// What kind of release a show is. Tags are stored in the `media`
+    /// table.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Format {
+        Tv => "tv", "TV",
+        TvShort => "tv_short", "TV short",
+        Movie => "movie", "Movie",
+        Special => "special", "Special",
+        Ova => "ova", "OVA",
+        Ona => "ona", "ONA",
+        Music => "music", "Music",
+    }
+}
+
+tagged_enum! {
+    /// The season a show began airing in. Tags are stored in the `media`
+    /// table.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Season {
+        Winter => "winter", "Winter",
+        Spring => "spring", "Spring",
+        Summer => "summer", "Summer",
+        Fall => "fall", "Fall",
+    }
+}
+
+tagged_enum! {
+    /// Where a show's airing stands. Tags are stored in the `media` table;
+    /// labels are lower case, since they follow the season in a line.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Airing {
+        Finished => "finished", "finished",
+        Ongoing => "ongoing", "airing",
+        Upcoming => "upcoming", "not yet aired",
+        Cancelled => "cancelled", "cancelled",
+        Hiatus => "hiatus", "on hiatus",
+    }
+}
+
+/// What a service says about a show beyond what pairing needs: the words
+/// Now playing and the show's page draw. Kept per media, read on demand.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ShowInfo {
+    /// Every title the service gives, its main one first.
+    pub titles: Vec<String>,
+    pub format: Option<Format>,
+    pub season: Option<Season>,
+    pub season_year: Option<u16>,
+    pub status: Option<Airing>,
+    pub episodes: Option<u32>,
+    pub genres: Vec<String>,
+    pub studio: Option<String>,
+    pub description: Option<String>,
+}
+
+/// A cover picture as downloaded: its bytes, and the extension its address
+/// carried.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Cover {
+    pub bytes: Vec<u8>,
+    pub extension: String,
+}
+
+/// A picture is kilobytes of noise in a log line, so it prints its size.
+impl fmt::Debug for Cover {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Cover")
+            .field("bytes", &self.bytes.len())
+            .field("extension", &self.extension)
+            .finish()
+    }
+}
+
+/// When a show's info was last fetched: all the app state keeps of it,
+/// which is what says whether to fetch it again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DescribedAt {
+    pub service: Service,
+    pub media: MediaId,
+    pub at: SystemTime,
+}
+
+/// A show's info as the pages read it: what the service said, and where
+/// its cover is on disk when one was kept.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Described {
+    pub info: ShowInfo,
+    pub cover: Option<PathBuf>,
+}
+
 /// The picker open over a show: what the person asked the service for, and
 /// what came back once it has. The search itself is the worker's, asked
 /// through [`AppState::work`] while `found` is `None`.
@@ -318,6 +410,14 @@ pub enum Report {
         entry: EntryId,
         media: MediaId,
     },
+    /// What the service says about `media`, and its cover when it could be
+    /// downloaded.
+    Described {
+        service: Service,
+        media: MediaId,
+        info: ShowInfo,
+        cover: Option<Cover>,
+    },
 }
 
 /// The sync side of [`AppState`].
@@ -331,6 +431,8 @@ pub struct SyncState {
     /// heard back on. Each gives a reconcile at once, in step or not.
     pub checks: Vec<(Service, EntryId)>,
     pub picker: Option<Picker>,
+    /// When each linked show's info was last fetched.
+    pub described: Vec<DescribedAt>,
 }
 
 impl SyncState {
