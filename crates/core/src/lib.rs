@@ -43,10 +43,11 @@ pub use store::{
     Tied,
 };
 pub use sync::{
-    Account, Asked, Attempt, Candidate, Job, LinkState, LinkedBy, ListBase, ListEntryId, ListState,
-    ListUpdate, ListUpdateId, Listing, Media, MediaId, Merge, NeedsYou, Parked, Patch, Picker,
-    Remote, Report, Service, ServiceWork, Signed, SyncLine, SyncState, Task, Tie, UserId, Waiting,
-    When, Work, Write, merge,
+    Account, Airing, Asked, Attempt, Candidate, Cover, Described, DescribedAt, Format, Job,
+    LinkState, LinkedBy, ListBase, ListEntryId, ListState, ListUpdate, ListUpdateId, Listing,
+    Media, MediaId, Merge, NeedsYou, Parked, Patch, Picker, Remote, Report, Season, Service,
+    ServiceWork, ShowInfo, Signed, SyncLine, SyncState, Task, Tie, UserId, Waiting, When, Work,
+    Write, merge,
 };
 pub(crate) use sync::{AutoLink, Settlement, auto_link, settlement};
 use tagged::tagged_enum;
