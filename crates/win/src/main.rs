@@ -9,6 +9,7 @@ mod history;
 mod logging;
 mod now_playing;
 mod pages;
+mod share;
 mod shell;
 mod standing;
 mod status_bar;

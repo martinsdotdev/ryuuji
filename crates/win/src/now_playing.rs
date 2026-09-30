@@ -17,6 +17,7 @@ use ryuuji_core::{
 use tracing::warn;
 use windows_reactor::*;
 
+use crate::share;
 use crate::standing::{Standing, Why, standing};
 use crate::ui::{
     self, CONTENT_MAX_WIDTH, ICON_FONT, MONO_FONT, age_of, caption, card_frame, clock_text,
@@ -169,6 +170,8 @@ struct Hero {
     episode: Option<String>,
     /// `A guess: 07 may be a word of the title`.
     doubt: Option<String>,
+    /// What Share hands the share sheet, once the show is settled.
+    share: Option<String>,
     /// The episode after this file, while the show has one.
     next: Option<u32>,
     /// A settled match, which can still be the wrong show when two titles
@@ -247,16 +250,19 @@ fn view(state: &AppState, detection_down: bool, recent: &[LastWatched], now: Sys
                 .and_then(|id| state.library.iter().find(|entry| entry.id == id));
             let mut file = m.map(fact_rows).unwrap_or_default();
             file.push(("Player".to_owned(), player.clone()));
+            let show = m.map_or_else(|| title.clone(), |m| m.title_in(&state.library).to_owned());
+            let episode = m.and_then(|m| m.episode.as_ref()).map(episode_text);
+            let settled = !state.ignored && m.is_some_and(|m| matches!(m.link, Link::Exact(_)));
             View::Playing(Box::new(Playing {
                 undo: undo_applies(state),
                 hero: Hero {
                     status: hero_status(entry.filter(|_| !state.ignored)),
-                    title: m
-                        .map_or_else(|| title.clone(), |m| m.title_in(&state.library).to_owned()),
-                    episode: m.and_then(|m| m.episode.as_ref()).map(episode_text),
+                    share: settled.then(|| share_text(&show, episode.as_deref())),
+                    title: show,
+                    episode,
                     doubt: m.and_then(episode_doubt),
                     next: m.and_then(|m| next_after(m, entry)),
-                    settled: !state.ignored && m.is_some_and(|m| matches!(m.link, Link::Exact(_))),
+                    settled,
                 },
                 timeline: timeline(
                     *position,
@@ -284,6 +290,15 @@ fn hero_status(entry: Option<&LibraryEntry>) -> String {
         (0, None) => status.to_owned(),
         (1, None) => format!("{status} \u{b7} 1 episode"),
         (progress, None) => format!("{status} \u{b7} {progress} episodes"),
+    }
+}
+
+/// `Watching Frieren: Beyond Journey's End, episode 8`: what Share hands
+/// the share sheet.
+fn share_text(show: &str, episode: Option<&str>) -> String {
+    match episode {
+        Some(episode) => format!("Watching {show}, {}", episode.to_lowercase()),
+        None => format!("Watching {show}"),
     }
 }
 
@@ -562,6 +577,19 @@ fn hero(hero: &Hero, timeline: Option<&Timeline>, set_wrong_show: SetState<bool>
         lines.push(caption(doubt.clone()).wrap().into());
     }
     let mut links: Vec<Element> = Vec::new();
+    if let Some(text) = &hero.share {
+        let (show, text) = (hero.title.clone(), text.clone());
+        links.push(
+            button("Share")
+                .text_link()
+                .on_click(move || {
+                    if let Err(err) = share::share(&show, &text) {
+                        warn!(error = %err, "share sheet not opened");
+                    }
+                })
+                .into(),
+        );
+    }
     if let Some(next) = hero.next {
         links.push(
             button(format!("Play episode {next}"))
@@ -1166,6 +1194,19 @@ mod tests {
             "Rewatching \u{b7} 3 of 28 episodes"
         );
         assert_eq!(hero_status(None), "Not in your library");
+    }
+
+    #[test]
+    fn share_names_the_show_and_the_episode() {
+        assert_eq!(
+            share_text("Frieren: Beyond Journey's End", Some("Episode 8")),
+            "Watching Frieren: Beyond Journey's End, episode 8"
+        );
+        assert_eq!(
+            share_text("Frieren", Some("Episodes 1\u{2013}12")),
+            "Watching Frieren, episodes 1\u{2013}12"
+        );
+        assert_eq!(share_text("Frieren", None), "Watching Frieren");
     }
 
     #[test]

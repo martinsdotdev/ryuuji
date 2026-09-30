@@ -726,6 +726,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "windows",
  "windows-reactor",
  "windows-reactor-setup",
 ]
