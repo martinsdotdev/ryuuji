@@ -62,6 +62,13 @@ fn on_list(link: &LinkState, service: Service) -> OnList {
             refused: None,
             actions: vec![],
         },
+        LinkState::SearchRefused { message } => OnList {
+            words: format!("Not linked to an entry on {label} yet."),
+            refused: Some(format!(
+                "{label} refused to search for this show: {message}"
+            )),
+            actions: vec![],
+        },
         LinkState::Merging { show } => linked(show, "Reading your list for the first time."),
         LinkState::Waiting { show } => linked(show, "A change waits to go out."),
         LinkState::InStep { show, listed: true } => linked(show, "In step with your list."),
@@ -292,5 +299,17 @@ mod tests {
             )
         );
         assert_eq!(said(LinkState::Unpicked { found: 3 }).2, vec![]);
+        // No actions of its own, like a show still to pick: the pick card
+        // below the list is where it is searched for by another name.
+        assert_eq!(
+            said(LinkState::SearchRefused {
+                message: "Validation error".to_owned()
+            }),
+            (
+                "Not linked to an entry on AniList yet.".to_owned(),
+                Some("AniList refused to search for this show: Validation error".to_owned()),
+                vec![]
+            )
+        );
     }
 }

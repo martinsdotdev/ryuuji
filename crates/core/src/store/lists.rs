@@ -11,9 +11,10 @@ use super::{
     Store, StoreError, fetch, query_failed, set_column, unix_now, unix_secs, unix_time,
     write_standing,
 };
+use crate::sync::ListBase;
 use crate::{
-    Account, EntryId, LibraryEntry, LinkedBy, ListBase, ListState, ListStatus, ListUpdate,
-    ListUpdateId, Listing, Media, MediaId, Parked, Service, Settlement, Signed, Tie, UserId,
+    Account, EntryId, LibraryEntry, LinkedBy, ListState, ListStatus, ListUpdate, ListUpdateId,
+    Listing, Media, MediaId, Parked, Service, Settlement, Signed, Tie, UserId,
 };
 
 const SELECT_ACCOUNT: &str = "SELECT service, user_id, name, expires_at, refused_at, refusal, \
@@ -22,8 +23,8 @@ const SELECT_ACCOUNT: &str = "SELECT service, user_id, name, expires_at, refused
 const SELECT_LISTING: &str = "SELECT entry_id, service, tie, found, media_id, media_title, \
                               media_episodes, mal_id, linked_by, base_user, base_listed, \
                               base_status, base_progress, base_repeat, based_at, repeat_offset, \
-                              parked_status, parked_progress, parked_repeat, parked, parked_at \
-                              FROM listings";
+                              parked_status, parked_progress, parked_repeat, parked, parked_at, \
+                              refusal FROM listings";
 
 const SELECT_UPDATE: &str = "SELECT id, entry_id, service, progress_before, progress, \
                              status_before, status, at FROM updates";
@@ -32,12 +33,13 @@ const SELECT_UPDATE: &str = "SELECT id, entry_id, service, progress_before, prog
 const TIE_UNPICKED: &str = "unpicked";
 const TIE_LINKED: &str = "linked";
 const TIE_GONE: &str = "gone";
+const TIE_SEARCH_REFUSED: &str = "search-refused";
 const TIE_OFF: &str = "off";
 
 /// A tie as stored, with the entry when tying it filled in a total the
 /// entry lacked.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Tied {
+pub(crate) struct Tied {
     pub listing: Listing,
     /// The entry with the media's episode count as its total, when it had
     /// none before; `None` when the entry was left alone.
@@ -47,7 +49,7 @@ pub struct Tied {
 /// A settlement as stored: the entry with what it took, the listing with
 /// its new base, and the row that says what was taken, when something was.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Settled {
+pub(crate) struct Settled {
     pub entry: LibraryEntry,
     pub listing: Listing,
     pub update: Option<ListUpdate>,
@@ -55,7 +57,7 @@ pub struct Settled {
 
 impl Store {
     /// Every account, in service order.
-    pub fn accounts(&self) -> Result<Vec<Account>, StoreError> {
+    pub(crate) fn accounts(&self) -> Result<Vec<Account>, StoreError> {
         let _span = info_span!("store.accounts").entered();
         let mut stmt = self
             .conn
@@ -76,7 +78,7 @@ impl Store {
     /// `signed_in_at` is stamped by a sign-in and kept through the other
     /// two, since it says when the account last signed in; a first row that
     /// is not a sign-in takes now, so the column is never empty.
-    pub fn save_account(&mut self, account: &Account) -> Result<Account, StoreError> {
+    pub(crate) fn save_account(&mut self, account: &Account) -> Result<Account, StoreError> {
         let _span = info_span!("store.save_account", service = account.service.tag()).entered();
         let tx = self.conn.transaction().map_err(query_failed)?;
         let now = unix_now();
@@ -114,7 +116,7 @@ impl Store {
     }
 
     /// Every listing, by entry then service.
-    pub fn listings(&self) -> Result<Vec<Listing>, StoreError> {
+    pub(crate) fn listings(&self) -> Result<Vec<Listing>, StoreError> {
         let _span = info_span!("store.listings").entered();
         let mut stmt = self
             .conn
@@ -138,7 +140,7 @@ impl Store {
     /// fills a total the entry lacks from the media's episode count, in
     /// the same transaction, so the show can complete on its last episode;
     /// a total the person already set stands.
-    pub fn set_tie(
+    pub(crate) fn set_tie(
         &mut self,
         entry: EntryId,
         service: Service,
@@ -164,20 +166,21 @@ impl Store {
             params![entry.0, service.tag(), media_id],
         )
         .map_err(query_failed)?;
-        let (found, by) = match tie {
-            Tie::Unpicked { found } => (Some(*found), None),
-            Tie::Linked { by, .. } => (None, Some(by.tag())),
-            Tie::Gone { .. } | Tie::Off => (None, None),
+        let (found, by, refusal) = match tie {
+            Tie::Unpicked { found } => (Some(*found), None, None),
+            Tie::Linked { by, .. } => (None, Some(by.tag()), None),
+            Tie::SearchRefused { message } => (None, None, Some(message.as_str())),
+            Tie::Gone { .. } | Tie::Off => (None, None, None),
         };
         tx.execute(
             "INSERT INTO listings (entry_id, service, tie, found, media_id, media_title, \
-             media_episodes, mal_id, linked_by, tied_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
+             media_episodes, mal_id, linked_by, tied_at, refusal) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) \
              ON CONFLICT(entry_id, service) DO UPDATE SET tie = excluded.tie, \
              found = excluded.found, media_id = excluded.media_id, \
              media_title = excluded.media_title, media_episodes = excluded.media_episodes, \
              mal_id = excluded.mal_id, linked_by = excluded.linked_by, \
-             tied_at = excluded.tied_at",
+             tied_at = excluded.tied_at, refusal = excluded.refusal",
             params![
                 entry.0,
                 service.tag(),
@@ -189,6 +192,7 @@ impl Store {
                 media.and_then(|media| media.mal_id),
                 by,
                 unix_now(),
+                refusal,
             ],
         )
         .map_err(query_failed)?;
@@ -215,7 +219,7 @@ impl Store {
     /// Sets a show aside after the service rejected a write, keeping what
     /// was wanted and why it was refused. A show never looked up on the
     /// service has no row to set aside.
-    pub fn park(
+    pub(crate) fn park(
         &mut self,
         entry: EntryId,
         service: Service,
@@ -251,7 +255,11 @@ impl Store {
     /// Takes a show out of the park. The group goes back to NULL rather
     /// than the row going: the row is the show's standing, and nothing
     /// here deletes.
-    pub fn unpark(&mut self, entry: EntryId, service: Service) -> Result<Listing, StoreError> {
+    pub(crate) fn unpark(
+        &mut self,
+        entry: EntryId,
+        service: Service,
+    ) -> Result<Listing, StoreError> {
         let _span = info_span!("store.unpark", entry = %entry, service = service.tag()).entered();
         let tx = self.conn.transaction().map_err(query_failed)?;
         let changed = tx
@@ -371,8 +379,11 @@ impl Store {
         }))
     }
 
-    /// Every value the library took from a list, oldest first.
-    pub fn updates(&self) -> Result<Vec<ListUpdate>, StoreError> {
+    /// Every value the library took from a list, oldest first. Only tests
+    /// read the whole set; the app reads what has come since a point, with
+    /// `updates_since`.
+    #[cfg(test)]
+    pub(crate) fn updates(&self) -> Result<Vec<ListUpdate>, StoreError> {
         let _span = info_span!("store.updates").entered();
         let mut stmt = self
             .conn
@@ -450,6 +461,7 @@ fn tie_tag(tie: &Tie) -> &'static str {
         Tie::Unpicked { .. } => TIE_UNPICKED,
         Tie::Linked { .. } => TIE_LINKED,
         Tie::Gone { .. } => TIE_GONE,
+        Tie::SearchRefused { .. } => TIE_SEARCH_REFUSED,
         Tie::Off => TIE_OFF,
     }
 }
@@ -458,7 +470,7 @@ fn tie_tag(tie: &Tie) -> &'static str {
 fn tie_media(tie: &Tie) -> Option<&Media> {
     match tie {
         Tie::Linked { media, .. } | Tie::Gone { media } => Some(media),
-        Tie::Unpicked { .. } | Tie::Off => None,
+        Tie::Unpicked { .. } | Tie::SearchRefused { .. } | Tie::Off => None,
     }
 }
 
@@ -540,6 +552,7 @@ struct RawListing {
     parked_repeat: Option<i64>,
     parked: Option<String>,
     parked_at: Option<i64>,
+    refusal: Option<String>,
 }
 
 impl RawListing {
@@ -567,6 +580,7 @@ impl RawListing {
             parked_repeat: row.get(18)?,
             parked: row.get(19)?,
             parked_at: row.get(20)?,
+            refusal: row.get(21)?,
         })
     }
 
@@ -611,7 +625,8 @@ fn read_media(raw: &RawListing) -> Result<Media, &'static str> {
 }
 
 /// The tie is its tag with the columns that kind needs: how many were
-/// found, a media and who linked it, a media alone, or nothing.
+/// found, a media and who linked it, a media alone, the service's refusal,
+/// or nothing.
 fn read_tie(raw: &RawListing) -> Result<Tie, &'static str> {
     Ok(match raw.tie.as_str() {
         TIE_UNPICKED => Tie::Unpicked {
@@ -630,6 +645,9 @@ fn read_tie(raw: &RawListing) -> Result<Tie, &'static str> {
         },
         TIE_GONE => Tie::Gone {
             media: read_media(raw)?,
+        },
+        TIE_SEARCH_REFUSED => Tie::SearchRefused {
+            message: raw.refusal.clone().ok_or("refusal")?,
         },
         TIE_OFF => Tie::Off,
         _ => return Err("tie"),
@@ -1394,6 +1412,10 @@ mod tests {
             (
                 "UPDATE listings SET tie = 'gone', media_title = NULL",
                 "media",
+            ),
+            (
+                "UPDATE listings SET media_title = 'Show', tie = 'search-refused'",
+                "refusal",
             ),
             (
                 "UPDATE listings SET media_title = 'Show', service = 'mal'",

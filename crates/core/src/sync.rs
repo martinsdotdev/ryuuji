@@ -68,7 +68,7 @@ pub enum Remote {
 /// because it describes one person's list, and another person's starts
 /// from nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ListBase {
+pub(crate) struct ListBase {
     pub user: UserId,
     /// Whether the list held the show. One it lacks is held until it next
     /// changes here, and that change creates the row.
@@ -128,6 +128,15 @@ pub enum Tie {
     Gone {
         media: Media,
     },
+    /// Looked up and refused: the service would not run a search for the
+    /// show's title, and said why. The same title meets the same refusal,
+    /// so the show waits under Pick, where the person can search for it by
+    /// another name. Left unrecorded, the refusal kept the show reading as
+    /// never looked up, and the search went out again on every change of
+    /// work.
+    SearchRefused {
+        message: String,
+    },
     /// The person said not to keep this show in step.
     Off,
 }
@@ -137,7 +146,7 @@ impl Tie {
     pub fn linked(&self) -> Option<&Media> {
         match self {
             Tie::Linked { media, .. } => Some(media),
-            Tie::Unpicked { .. } | Tie::Gone { .. } | Tie::Off => None,
+            Tie::Unpicked { .. } | Tie::Gone { .. } | Tie::SearchRefused { .. } | Tie::Off => None,
         }
     }
 }
@@ -177,7 +186,7 @@ impl Listing {
     /// base describes, so it counts only while the base is this user's:
     /// another account's list says nothing about this one's count, and a
     /// first merge asks with Ryuuji's own.
-    pub fn wanted(&self, entry: &LibraryEntry, user: UserId) -> ListState {
+    pub(crate) fn wanted(&self, entry: &LibraryEntry, user: UserId) -> ListState {
         let offset = if self.base_for(user).is_some() {
             self.repeat_offset
         } else {
@@ -193,7 +202,7 @@ impl Listing {
 
     /// The base when it is `user`'s. Another account's base says nothing
     /// about this one's list, so that user starts from a first merge.
-    pub fn base_for(&self, user: UserId) -> Option<&ListBase> {
+    pub(crate) fn base_for(&self, user: UserId) -> Option<&ListBase> {
         self.base.as_ref().filter(|base| base.user == user)
     }
 
@@ -207,12 +216,6 @@ impl Listing {
 /// these.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ListUpdateId(pub(crate) i64);
-
-impl ListUpdateId {
-    pub fn as_i64(self) -> i64 {
-        self.0
-    }
-}
 
 impl fmt::Display for ListUpdateId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -350,6 +353,10 @@ pub struct DescribedAt {
     pub service: Service,
     pub media: MediaId,
     pub at: SystemTime,
+    /// Whether a picture was kept. A fetch can bring the words and miss the
+    /// picture, which is not a show fully described, so the two go stale on
+    /// their own clocks.
+    pub has_cover: bool,
 }
 
 /// A show's info as the pages read it: what the service said, and where
@@ -362,13 +369,24 @@ pub struct Described {
 
 /// The picker open over a show: what the person asked the service for, and
 /// what came back once it has. The search itself is the worker's, asked
-/// through [`AppState::work`] while `found` is `None`.
+/// through [`AppState::work`] while `answer` is `None`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Picker {
     pub entry: EntryId,
     pub service: Service,
     pub query: String,
-    pub found: Option<Vec<Candidate>>,
+    pub answer: Option<Answer>,
+}
+
+/// What a picker's search came back with.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Answer {
+    /// The entries it turned up, perhaps none.
+    Found(Vec<Candidate>),
+    /// The service refused to run it, with its message. Asked again, the
+    /// same words meet the same refusal, so nothing more goes out until the
+    /// person searches for something else.
+    Refused(String),
 }
 
 /// What the sync worker sends back, each taken by the reducer through
@@ -397,6 +415,13 @@ pub enum Report {
         entry: EntryId,
         query: String,
         candidates: Vec<Candidate>,
+    },
+    /// The service refused to run a search for `query`.
+    SearchRefused {
+        service: Service,
+        entry: EntryId,
+        query: String,
+        message: String,
     },
     /// A reconcile ran for `user`'s list: what it asked with, and what the
     /// list holds for `media` after its write, if it made one.
@@ -437,6 +462,13 @@ pub enum Report {
 /// it without asking about every show every day.
 const DESCRIBE_AGAIN: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
+/// How long a show whose picture is missing stands before it is asked again.
+/// The words are kept and shown meanwhile, so only the picture is waiting,
+/// and a week of a placeholder is too much to pay for one failed download.
+/// A show the service has no picture for at all is asked this often too,
+/// which is the price of the answer not saying which of the two it is.
+const COVER_AGAIN: Duration = Duration::from_secs(60 * 60);
+
 /// The sync side of [`AppState`].
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct SyncState {
@@ -461,6 +493,9 @@ fn link_state(entry: &LibraryEntry, account: &Account, listing: Option<&Listing>
         Tie::Unpicked { found } => LinkState::Unpicked { found: *found },
         Tie::Gone { media } => LinkState::Gone {
             show: media.title.clone(),
+        },
+        Tie::SearchRefused { message } => LinkState::SearchRefused {
+            message: message.clone(),
         },
         Tie::Off => LinkState::Off,
         Tie::Linked { media, .. } => {
@@ -527,7 +562,7 @@ impl SyncState {
         if let Some(picker) = &self.picker
             && picker.entry == entry.id
             && picker.service == service
-            && picker.found.is_none()
+            && picker.answer.is_none()
         {
             return Some(Job {
                 entry: entry.id,
@@ -546,16 +581,26 @@ impl SyncState {
         })
     }
 
-    /// The fetch of a linked show's info, when it has none or what it has
-    /// is older than [`DESCRIBE_AGAIN`] at `now`.
+    /// The fetch of a linked show's info, when it has none, when what it has
+    /// is older than [`DESCRIBE_AGAIN`] at `now`, or when its picture is
+    /// still missing and [`COVER_AGAIN`] has passed.
+    ///
+    /// The two clocks matter because a fetch can succeed and still bring no
+    /// picture: the words arrive over GraphQL and the picture over a CDN, so
+    /// one can fail alone. Stamped fresh for the week either way, a show
+    /// whose picture was lost to a blink of bad network kept a placeholder
+    /// for seven days.
     fn describe(&self, entry: &LibraryEntry, service: Service, now: SystemTime) -> Option<Job> {
         let media = self.listing(entry.id, service)?.tie.linked()?;
         let fresh = self.described.iter().any(|known| {
+            let stands = if known.has_cover {
+                DESCRIBE_AGAIN
+            } else {
+                COVER_AGAIN
+            };
             known.service == service
                 && known.media == media.id
-                && now
-                    .duration_since(known.at)
-                    .is_ok_and(|age| age < DESCRIBE_AGAIN)
+                && now.duration_since(known.at).is_ok_and(|age| age < stands)
         });
         (!fresh).then_some(Job {
             entry: entry.id,
@@ -673,7 +718,7 @@ impl AppState {
                     raise(SyncLine::Checking);
                 }
                 let why = match link_state(entry, account, listings.get(&entry.id).copied()) {
-                    LinkState::Unpicked { .. } => NeedsYou::Pick,
+                    LinkState::Unpicked { .. } | LinkState::SearchRefused { .. } => NeedsYou::Pick,
                     LinkState::Gone { .. } => NeedsYou::PickAnother,
                     LinkState::Refused { .. } => NeedsYou::Rejected,
                     LinkState::Waiting { .. } => {
@@ -760,7 +805,8 @@ pub enum SyncLine {
 pub enum NeedsYou {
     /// Its token was refused.
     SignIn,
-    /// A show matches several of its entries.
+    /// A show needs its entry picked: the search found several, or none
+    /// that fit, or the service refused to run it.
     Pick,
     /// A show's entry is gone from it.
     PickAnother,
@@ -795,6 +841,10 @@ pub enum LinkState {
     /// The search found `found` candidates and none was the one clear match.
     Unpicked {
         found: u32,
+    },
+    /// The service refused to search for the show's title.
+    SearchRefused {
+        message: String,
     },
     /// Linked, and this user has no base for it yet: the first merge is
     /// still to come.
@@ -961,6 +1011,7 @@ mod tests {
                     service: listing.service,
                     media: listing.tie.linked()?.id,
                     at: SystemTime::now(),
+                    has_cover: true,
                 })
             })
             .collect();
@@ -1365,6 +1416,37 @@ mod tests {
         assert_eq!(app.work().services, vec![]);
     }
 
+    #[test]
+    fn a_described_show_with_no_picture_is_asked_again_within_the_hour() {
+        let wanted = state(ListStatus::Watching, 4, 3);
+        let mut app = app(
+            vec![account(Signed::In)],
+            vec![show(1, 4)],
+            vec![linked(1, based(7, LISTED, wanted))],
+        );
+        let describes = |app: &AppState| {
+            app.work().services[0]
+                .jobs
+                .iter()
+                .filter(|job| matches!(job.task, Task::Describe { .. }))
+                .count()
+        };
+        app.sync.described[0].at = SystemTime::now() - Duration::from_secs(2 * 60 * 60);
+        assert_eq!(describes(&app), 0, "described, picture and all");
+
+        // The words arrive over GraphQL and the picture over a CDN, so one
+        // can fail alone. Stamped fresh for the week either way, a show that
+        // lost its picture to a blink of bad network kept a placeholder for
+        // seven days.
+        app.sync.described[0].has_cover = false;
+        assert_eq!(describes(&app), 1, "the hour is out, so ask again");
+
+        // Still bounded: a picture that cannot be had is not asked for on
+        // every poll.
+        app.sync.described[0].at = SystemTime::now() - Duration::from_secs(60);
+        assert_eq!(describes(&app), 0, "within the hour it stands");
+    }
+
     /// The check is the read: a show in step is reconciled anyway, at once,
     /// and a pending one moves up from Settled. A check on a show that is
     /// not linked has nothing to read.
@@ -1410,11 +1492,11 @@ mod tests {
             vec![show(1, 4), show(2, 4)],
             vec![linked(2, None)],
         );
-        let picker = |entry, found| Picker {
+        let picker = |entry, found: Option<Vec<Candidate>>| Picker {
             entry: EntryId(entry),
             service: Service::AniList,
             query: "Sousou no Frieren".into(),
-            found,
+            answer: found.map(Answer::Found),
         };
         let asked = |entry| Job {
             entry: EntryId(entry),

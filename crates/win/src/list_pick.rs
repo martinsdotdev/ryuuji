@@ -4,11 +4,13 @@
 //! when the service needs the person. The search is the core's picker, run
 //! by the worker; the card asks it with the show's title when it opens.
 
-use ryuuji_core::{AppState, Candidate, Command, EntryId, LinkState, MediaId, Picker, Service};
+use ryuuji_core::{
+    Answer, AppState, Candidate, Command, EntryId, LinkState, MediaId, Picker, Service,
+};
 use windows_reactor::*;
 
 use crate::show_info;
-use crate::ui::{self, PICKER_HEIGHT, PICKER_ROWS, caption, card_frame};
+use crate::ui::{self, caption, card_frame};
 
 /// A show's pick on one service, worked out from the state.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -33,12 +35,18 @@ pub(crate) fn needed(state: &AppState, entry: EntryId) -> Option<ListPick> {
         .find_map(|account| needed_on(state, entry, account.service))
 }
 
-/// The pick the show needs on `service`: it matched several entries, or
-/// the one it was linked to is gone.
+/// The pick the show needs on `service`: it matched several entries, the
+/// service refused to search for it, or the one it was linked to is gone.
 pub(crate) fn needed_on(state: &AppState, entry: EntryId, service: Service) -> Option<ListPick> {
     let shown = state.entry(entry)?;
     let reason = match state.sync.link_state(shown, service)? {
         LinkState::Unpicked { found } => unpicked_reason(service, &shown.title, found),
+        LinkState::SearchRefused { message } => format!(
+            "{} refused to search for {}: {}. Search for it by another name.",
+            service.label(),
+            shown.title,
+            message.trim_end_matches('.')
+        ),
         LinkState::Gone { show } => format!(
             "{show} is gone from {}. Pick the entry this show is now.",
             service.label()
@@ -106,14 +114,11 @@ fn unpicked_reason(service: Service, title: &str, found: u32) -> String {
 
 /// `TV · 26 episodes · 2001`: what tells two entries of one title apart.
 fn candidate_line(candidate: &Candidate) -> String {
-    let parts: Vec<String> = [
+    ui::dot_joined([
         show_info::format_line(candidate.format, candidate.media.episodes),
         candidate.year.map(|year| year.to_string()),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
-    parts.join(" \u{b7} ")
+    ])
+    .unwrap_or_default()
 }
 
 /// What the card is handed. `dispatch` compares by identity, so it comes
@@ -189,8 +194,11 @@ fn list_pick(props: &ListPickProps, cx: &mut RenderCx) -> Element {
         .column_spacing(8.0)
         .into(),
     ];
-    let found = pick.picker.as_ref().and_then(|picker| picker.found.clone());
-    match found {
+    let answer = pick
+        .picker
+        .as_ref()
+        .and_then(|picker| picker.answer.clone());
+    match answer {
         None => children.push(
             hstack((
                 ProgressRing::indeterminate().width(16.0).height(16.0),
@@ -199,20 +207,25 @@ fn list_pick(props: &ListPickProps, cx: &mut RenderCx) -> Element {
             .spacing(8.0)
             .into(),
         ),
-        Some(candidates) if candidates.is_empty() => {
+        Some(Answer::Refused(message)) => children.push(
+            caption(format!(
+                "{label} refused that search: {}. Try another name.",
+                message.trim_end_matches('.')
+            ))
+            .wrap()
+            .into(),
+        ),
+        Some(Answer::Found(candidates)) if candidates.is_empty() => {
             children.push(caption("Nothing came up. Try another name.").into());
         }
-        Some(candidates) => {
-            let selected = candidates
-                .iter()
-                .position(|candidate| Some(candidate.media.id) == chosen)
-                .and_then(|index| i32::try_from(index).ok())
-                .unwrap_or(-1);
+        Some(Answer::Found(candidates)) => {
+            let selected =
+                ui::selection_index(&candidates, |candidate| Some(candidate.media.id) == chosen);
             let ids: Vec<MediaId> = candidates
                 .iter()
                 .map(|candidate| candidate.media.id)
                 .collect();
-            let many = candidates.len() > PICKER_ROWS;
+            let rows = candidates.len();
             let list = list_view(candidates, |candidate: &Candidate, _| {
                 vstack((
                     text_block(candidate.media.title.clone()).wrap(),
@@ -230,17 +243,16 @@ fn list_pick(props: &ListPickProps, cx: &mut RenderCx) -> Element {
                         .and_then(|index| ids.get(index).copied()),
                 );
             });
-            children.push(if many {
-                list.height(PICKER_HEIGHT).into()
-            } else {
-                list.into()
-            });
+            children.push(ui::picker_list(list, rows));
         }
     }
     let media = pick
         .picker
         .as_ref()
-        .and_then(|picker| picker.found.as_ref())
+        .and_then(|picker| match &picker.answer {
+            Some(Answer::Found(found)) => Some(found),
+            Some(Answer::Refused(_)) | None => None,
+        })
         .and_then(|found| {
             found
                 .iter()
@@ -411,6 +423,26 @@ mod tests {
     }
 
     #[test]
+    fn a_show_the_search_refused_needs_a_pick_and_says_why() {
+        let (_tmp, app, entry) = app_with(|app, entry| {
+            app.dispatch(Command::Synced(ryuuji_core::Report::SearchRefused {
+                service: Service::AniList,
+                entry,
+                query: "Fruits Basket".to_owned(),
+                message: "Validation error.".to_owned(),
+            }));
+        });
+        let pick = needed(app.state(), entry).unwrap();
+        // The service's own full stop is dropped, so the sentence does not
+        // end in two.
+        assert_eq!(
+            pick.reason,
+            "AniList refused to search for Fruits Basket: Validation error. Search for it by \
+             another name."
+        );
+    }
+
+    #[test]
     fn nothing_found_or_one_that_does_not_fit_says_so() {
         assert_eq!(
             unpicked_reason(Service::AniList, "Show", 0),
@@ -441,6 +473,6 @@ mod tests {
             query: "Furuba".to_owned(),
         });
         let picker = needed(app.state(), entry).unwrap().picker.unwrap();
-        assert_eq!((picker.query.as_str(), picker.found), ("Furuba", None));
+        assert_eq!((picker.query.as_str(), picker.answer), ("Furuba", None));
     }
 }

@@ -27,8 +27,17 @@ pub(crate) const BUILD_PROFILE: &str = if cfg!(debug_assertions) {
 
 /// How many rows a picker shows before it scrolls, and the height it
 /// scrolls in.
-pub(crate) const PICKER_ROWS: usize = 5;
-pub(crate) const PICKER_HEIGHT: f64 = 280.0;
+const PICKER_ROWS: usize = 5;
+const PICKER_HEIGHT: f64 = 280.0;
+
+/// The resource WinUI keeps its strong neutral fill under: the tick on Now
+/// playing's timeline, and the dot of a quiet standing in the status bar.
+/// The toolkit takes it by name and nothing checks the name, so it is
+/// spelled here once.
+pub(crate) const STRONG_FILL: &str = "ControlStrongFillColorDefaultBrush";
+
+/// What a selector is told when nothing in it is chosen.
+pub(crate) const NO_SELECTION: i32 = -1;
 
 /// A click handler that hands `command` to the core.
 pub(crate) fn send(dispatch: &Dispatch<Command>, command: Command) -> impl Fn() + Clone + 'static {
@@ -218,6 +227,34 @@ fn place<const N: usize>(cells: [TextBlock; N], row: i32) -> [Element; N] {
     })
 }
 
+/// Where the first item `chosen` picks sits, as the index a selector takes,
+/// or [`NO_SELECTION`] when none does.
+pub(crate) fn selection_index<T>(items: &[T], chosen: impl Fn(&T) -> bool) -> i32 {
+    items
+        .iter()
+        .position(chosen)
+        .and_then(|index| i32::try_from(index).ok())
+        .unwrap_or(NO_SELECTION)
+}
+
+/// A picker's list, held to a fixed height once it has more rows than fit,
+/// so a long one scrolls inside its card instead of pushing the card's
+/// buttons down the page.
+pub(crate) fn picker_list<T: 'static>(list: TemplatedListBuilder<T>, rows: usize) -> Element {
+    if rows > PICKER_ROWS {
+        list.height(PICKER_HEIGHT).into()
+    } else {
+        list.into()
+    }
+}
+
+/// The parts that are known, joined the way the pages join facts:
+/// `TV · 26 episodes · 2001`. `None` when none are.
+pub(crate) fn dot_joined(parts: impl IntoIterator<Item = Option<String>>) -> Option<String> {
+    let parts: Vec<String> = parts.into_iter().flatten().collect();
+    (!parts.is_empty()).then(|| parts.join(" \u{b7} "))
+}
+
 /// A drop-down over a fixed set of variants, reporting the chosen one.
 pub(crate) fn enum_picker<T: Copy + PartialEq + 'static>(
     options: &'static [T],
@@ -225,11 +262,7 @@ pub(crate) fn enum_picker<T: Copy + PartialEq + 'static>(
     selected: T,
     on_pick: impl Fn(T) + 'static,
 ) -> ComboBox {
-    let index = options
-        .iter()
-        .position(|candidate| *candidate == selected)
-        .and_then(|index| i32::try_from(index).ok())
-        .unwrap_or(-1);
+    let index = selection_index(options, |option| *option == selected);
     ComboBox::new(options.iter().map(|option| label(*option)))
         .selected_index(index)
         .on_selection_changed(move |index: i32| {
@@ -328,6 +361,26 @@ mod tests {
 
     use super::*;
     use crate::debug::EventLevelFilter;
+
+    #[test]
+    fn a_selection_is_found_by_what_it_is_and_nothing_found_selects_nothing() {
+        let rows = ["Frieren", "Vinland Saga", "Mushishi"];
+        assert_eq!(selection_index(&rows, |row| *row == "Vinland Saga"), 1);
+        assert_eq!(
+            selection_index(&rows, |row| *row == "Monster"),
+            NO_SELECTION
+        );
+        assert_eq!(selection_index::<&str>(&[], |_| true), NO_SELECTION);
+    }
+
+    #[test]
+    fn only_the_parts_that_are_known_are_joined() {
+        assert_eq!(
+            dot_joined([Some("TV".to_owned()), None, Some("2001".to_owned())]).as_deref(),
+            Some("TV \u{b7} 2001")
+        );
+        assert_eq!(dot_joined([None, None]), None);
+    }
 
     /// The picker maps a variant to its index and back; a variant missing
     /// from `options` would select nothing rather than the wrong row.

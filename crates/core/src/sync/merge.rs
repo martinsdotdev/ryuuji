@@ -5,9 +5,8 @@
 //! values.
 
 use crate::matching::normalize_title;
-use crate::{
-    Candidate, LibraryEntry, ListBase, ListState, ListStatus, Listing, Media, Remote, UserId,
-};
+use crate::sync::ListBase;
+use crate::{Candidate, LibraryEntry, ListState, ListStatus, Listing, Media, Remote, UserId};
 
 /// What one reconcile does with a show: the base the merge measured
 /// against, and the write that brings the list to the merged state when
@@ -38,7 +37,7 @@ pub struct Patch {
 
 impl Patch {
     /// The fields where `to` differs from `from`; `None` when none does.
-    pub fn between(from: ListState, to: ListState) -> Option<Patch> {
+    pub(crate) fn between(from: ListState, to: ListState) -> Option<Patch> {
         let patch = Patch {
             status: (to.status != from.status).then_some(to.status),
             progress: (to.progress != from.progress).then_some(to.progress),
@@ -47,8 +46,11 @@ impl Patch {
         (patch != Patch::default()).then_some(patch)
     }
 
-    /// `state` with the patch's fields changed.
-    pub fn apply(self, state: ListState) -> ListState {
+    /// `state` with the patch's fields changed. Only tests need the forward
+    /// direction: the app measures a patch with [`Patch::between`] and sends
+    /// it, and the list applies it.
+    #[cfg(test)]
+    pub(crate) fn apply(self, state: ListState) -> ListState {
         ListState {
             status: self.status.unwrap_or(state.status),
             progress: self.progress.unwrap_or(state.progress),

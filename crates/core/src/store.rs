@@ -17,7 +17,7 @@ use crate::{
 mod lists;
 mod media;
 
-pub use lists::{Settled, Tied};
+pub(crate) use lists::{Settled, Tied};
 
 /// The schema, compiled in from `migrations/`, one numbered directory per
 /// version.
@@ -692,7 +692,7 @@ impl Store {
     /// Up to `limit` shows, the most recently watched first: for each, when
     /// its newest recording that still stands was made, and in which player.
     /// An undone recording does not count, since the episode was taken back.
-    pub fn last_watched(&self, limit: usize) -> Result<Vec<LastWatched>, StoreError> {
+    pub(crate) fn last_watched(&self, limit: usize) -> Result<Vec<LastWatched>, StoreError> {
         let _span = info_span!("store.last_watched", limit).entered();
         // SQLite fills a bare column beside MAX() from the row holding the
         // maximum, which is the recording whose player is wanted.
@@ -1427,7 +1427,7 @@ mod tests {
 
     /// The schema the newest migration leaves, which every older library
     /// migrates up to.
-    const LATEST: SchemaVersion = SchemaVersion(12);
+    const LATEST: SchemaVersion = SchemaVersion(13);
 
     fn schema_version(store: &Store) -> SchemaVersion {
         store.schema_version().unwrap()
@@ -1993,6 +1993,52 @@ mod tests {
         assert_eq!(schema_version(&store), LATEST);
         assert_eq!(store.listings().unwrap().len(), 1);
         assert_eq!(store.described().unwrap(), vec![]);
+    }
+
+    #[test]
+    fn v12_library_migrates_to_v13_with_its_ties_as_they_were() {
+        let (_tmp, dir) = open_tmp();
+        let conn = Connection::open(dir.library_db()).unwrap();
+        for sql in [
+            include_str!("../migrations/01-entries/up.sql"),
+            include_str!("../migrations/02-last_match/up.sql"),
+            include_str!("../migrations/03-drop_outcome/up.sql"),
+            include_str!("../migrations/04-episode_range_and_rewatching/up.sql"),
+            include_str!("../migrations/05-watch_events/up.sql"),
+            include_str!("../migrations/06-history/up.sql"),
+            include_str!("../migrations/07-aliases/up.sql"),
+            include_str!("../migrations/08-ignored/up.sql"),
+            include_str!("../migrations/09-moved/up.sql"),
+            include_str!("../migrations/10-status_moves/up.sql"),
+            include_str!("../migrations/11-lists/up.sql"),
+            include_str!("../migrations/12-media/up.sql"),
+        ] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO entries (id, title, status, progress, total, updated_at) \
+             VALUES (7, 'Show', 'watching', 1, 12, 0), (8, 'Other', 'watching', 0, NULL, 0); \
+             INSERT INTO listings (entry_id, service, tie, media_id, media_title, linked_by, \
+             tied_at) VALUES (7, 'anilist', 'linked', 5, 'Show', 'title', 100); \
+             INSERT INTO listings (entry_id, service, tie, found, tied_at) \
+             VALUES (8, 'anilist', 'unpicked', 3, 100);",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 12).unwrap();
+        drop(conn);
+
+        // The refusal column is new and empty, and no tie before it needed
+        // one, so every row reads as it did.
+        let store = open(&dir);
+        assert_eq!(schema_version(&store), LATEST);
+        let ties: Vec<crate::Tie> = store
+            .listings()
+            .unwrap()
+            .into_iter()
+            .map(|listing| listing.tie)
+            .collect();
+        assert!(matches!(ties[0], crate::Tie::Linked { .. }));
+        assert_eq!(ties[1], crate::Tie::Unpicked { found: 3 });
     }
 
     fn watching(id: EntryId, episode: RangeInclusive<u32>) -> NewRecording {

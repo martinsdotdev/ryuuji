@@ -393,6 +393,66 @@ mod tests {
         assert_eq!(said(&undone), pair("Undid episode 8", "Undid episode 8"));
     }
 
+    #[test]
+    fn the_tone_says_at_a_glance_how_the_viewing_stands() {
+        let entry = show();
+        let (_, watch) = recorded(&entry);
+        let exact = Link::Exact(entry.id);
+        let tone = |link, accrued, outcome| {
+            standing(&state(&entry, link, accrued, outcome))
+                .unwrap()
+                .tone()
+        };
+        assert_eq!(tone(exact, 300, RecordOutcome::Counting), Tone::Accent);
+        assert_eq!(
+            tone(exact, 800, RecordOutcome::Recorded(watch)),
+            Tone::Success
+        );
+        assert_eq!(tone(exact, 800, RecordOutcome::Undone), Tone::Neutral);
+        assert_eq!(
+            tone(Link::Unmatched, 300, RecordOutcome::Counting),
+            Tone::Neutral
+        );
+        assert_eq!(
+            tone(Link::Likely(entry.id), 300, RecordOutcome::Counting),
+            Tone::Neutral
+        );
+        assert_eq!(
+            tone(Link::Unmatched, 300, RecordOutcome::Ignored),
+            Tone::Neutral
+        );
+        // A gate turning the episode down is the one that warns, a skip
+        // included: the person said no, and the header says it was refused.
+        for decline in [Decline::NotNext, Decline::Skipped, Decline::Completed] {
+            assert_eq!(
+                tone(exact, 800, RecordOutcome::Declined(decline)),
+                Tone::Caution
+            );
+        }
+    }
+
+    #[test]
+    fn a_file_that_names_no_episode_is_said_without_one() {
+        let entry = show();
+        let (_, watch) = recorded(&entry);
+        let unnumbered = |outcome| {
+            let mut state = state(&entry, Link::Exact(entry.id), 800, outcome);
+            if let Some(last) = state.last_match.as_mut() {
+                last.episode = None;
+            }
+            standing(&state).unwrap()
+        };
+        assert_eq!(
+            unnumbered(RecordOutcome::Recorded(watch)).status(),
+            "Recorded"
+        );
+        assert_eq!(unnumbered(RecordOutcome::Undone).status(), "Undone");
+        assert_eq!(
+            unnumbered(RecordOutcome::Counting).skip_label().as_deref(),
+            Some("Don't record this episode")
+        );
+    }
+
     /// A recording with an id of its own, which only a store mints.
     fn recorded(entry: &LibraryEntry) -> (LibraryEntry, HistoryId) {
         let tmp = tempfile::tempdir().unwrap();

@@ -171,7 +171,7 @@ pub enum Line<'a> {
 
 impl Line<'_> {
     /// The time the line shows at.
-    pub fn at(&self) -> SystemTime {
+    pub(crate) fn at(&self) -> SystemTime {
         match self {
             Line::Watch(watch) => watch.shown_at(),
             Line::Update(update) => update.at,
@@ -422,7 +422,7 @@ mod tests {
                     .iter()
                     .map(|line| match line {
                         Line::Watch(watch) => watch.id.as_i64(),
-                        Line::Update(update) => -update.id.as_i64(),
+                        Line::Update(update) => -update.id.0,
                     })
                     .collect();
                 (day.label.as_str(), ids)
