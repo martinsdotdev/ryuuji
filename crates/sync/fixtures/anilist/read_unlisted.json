@@ -1,9 +1,16 @@
 {
   "status": 200,
-  "headers": { "X-RateLimit-Limit": "90", "X-RateLimit-Remaining": "89" },
+  "headers": {
+    "X-RateLimit-Limit": "30",
+    "X-RateLimit-Remaining": "19"
+  },
   "body": {
     "data": {
-      "Media": { "id": 154587, "episodes": 28, "mediaListEntry": null }
+      "Media": {
+        "id": 21,
+        "episodes": null,
+        "mediaListEntry": null
+      }
     }
   }
 }

@@ -678,7 +678,7 @@ mod tests {
     const SAVED: &str = include_str!("../fixtures/anilist/save.json");
     const DESCRIBED: &str = include_str!("../fixtures/anilist/describe.json");
     const NOT_FOUND: &str = include_str!("../fixtures/anilist/not_found_404.json");
-    const REJECTED: &str = include_str!("../fixtures/anilist/validation_200.json");
+    const REJECTED: &str = include_str!("../fixtures/anilist/validation_400.json");
 
     const ANILIST: Service = Service::AniList;
 
@@ -932,7 +932,7 @@ mod tests {
             }],
         });
         next_count(&counts);
-        let url = "https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx154587-n1fmjRv4JQUd.jpg";
+        let url = "https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx154587-qQTzQnEJJ3oB.jpg";
         let reports = syncer.take_reports();
         let [
             Report::Described {
@@ -946,7 +946,7 @@ mod tests {
             panic!("one description with a cover: {reports:?}");
         };
         assert_eq!((*service, *media), (ANILIST, MediaId(154587)));
-        assert_eq!(info.studio.as_deref(), Some("Madhouse"));
+        assert_eq!(info.studio.as_deref(), Some("MADHOUSE"));
         assert_eq!(cover.extension, "jpg");
         assert_eq!(cover.bytes, format!("picture at {url}").into_bytes());
         assert_eq!(*asked.lock().unwrap(), vec![url.to_owned()]);
@@ -971,8 +971,8 @@ mod tests {
         assert_eq!(next_count(&counts), 2);
         let account = Account {
             service: ANILIST,
-            user: UserId(7),
-            name: "someone".into(),
+            user: UserId(7_749_611),
+            name: "RyuujiApp".into(),
             expires: token.expires(),
             signed: Signed::In,
         };
@@ -985,8 +985,8 @@ mod tests {
         let [entry] = entries(1)[..] else {
             unreachable!()
         };
-        let base = state(ListStatus::Watching, 3, 0);
-        let wanted = state(ListStatus::Watching, 4, 0);
+        let base = state(ListStatus::Watching, 8, 0);
+        let wanted = state(ListStatus::Watching, 9, 0);
         syncer.post(&reconcile_now(entry, wanted, base));
         assert_eq!(next_count(&counts), 3);
         assert_eq!(
@@ -998,7 +998,7 @@ mod tests {
                 media: MediaId(154587),
                 asked: Asked { wanted, base },
                 remote: Remote::Listed {
-                    id: Some(ListEntryId(381_234_567)),
+                    id: Some(ListEntryId(599_961_536)),
                     state: wanted,
                 },
             }]
@@ -1013,7 +1013,7 @@ mod tests {
         );
         assert_eq!(
             seen[2].variables,
-            json!({ "id": 381_234_567, "mediaId": 154587, "progress": 4 })
+            json!({ "id": 599_961_536, "mediaId": 154587, "progress": 9 })
         );
 
         let facts = wait_for(|| {
@@ -1023,7 +1023,7 @@ mod tests {
                 .find(|facts| facts.service == ANILIST && facts.running == 0 && facts.due == 0)
         });
         assert_eq!(facts.stopped, None);
-        assert_eq!(facts.rate_remaining, Some(89));
+        assert_eq!(facts.rate_remaining, Some(28));
         assert_eq!(facts.last_call.map(|call| call.status), Some(Some(200)));
         assert_eq!(facts.paused, None);
         assert_eq!((facts.due, facts.waiting, facts.running), (0, 0, 0));
@@ -1107,8 +1107,8 @@ mod tests {
         let [entry] = entries(1)[..] else {
             unreachable!()
         };
-        let base = state(ListStatus::Watching, 3, 0);
-        let wanted = state(ListStatus::Watching, 4, 0);
+        let base = state(ListStatus::Watching, 8, 0);
+        let wanted = state(ListStatus::Watching, 9, 0);
         syncer.post(&reconcile_now(entry, wanted, base));
         assert_eq!(next_count(&counts), 1);
         assert_eq!(
@@ -1120,7 +1120,7 @@ mod tests {
                 media: MediaId(154587),
                 asked: Asked { wanted, base },
                 remote: Remote::Listed {
-                    id: Some(ListEntryId(381_234_567)),
+                    id: Some(ListEntryId(599_961_536)),
                     state: wanted,
                 },
             }]

@@ -1,12 +1,20 @@
 {
   "status": 200,
-  "headers": { "X-RateLimit-Limit": "90", "X-RateLimit-Remaining": "89" },
+  "headers": {
+    "X-RateLimit-Limit": "30",
+    "X-RateLimit-Remaining": "20"
+  },
   "body": {
     "data": {
       "Media": {
         "id": 154587,
         "episodes": 28,
-        "mediaListEntry": { "id": 381234567, "status": "CURRENT", "progress": 3, "repeat": 0 }
+        "mediaListEntry": {
+          "id": 599961536,
+          "status": "CURRENT",
+          "progress": 8,
+          "repeat": 0
+        }
       }
     }
   }

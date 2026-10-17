@@ -1,0 +1,16 @@
+{
+  "status": 400,
+  "headers": {
+    "X-RateLimit-Limit": "30",
+    "X-RateLimit-Remaining": "28"
+  },
+  "body": {
+    "data": null,
+    "errors": [
+      {
+        "message": "Invalid token",
+        "status": 400
+      }
+    ]
+  }
+}

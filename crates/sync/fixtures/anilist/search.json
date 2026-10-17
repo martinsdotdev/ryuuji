@@ -1,6 +1,9 @@
 {
   "status": 200,
-  "headers": { "X-RateLimit-Limit": "90", "X-RateLimit-Remaining": "89" },
+  "headers": {
+    "X-RateLimit-Limit": "30",
+    "X-RateLimit-Remaining": "22"
+  },
   "body": {
     "data": {
       "Page": {
@@ -10,35 +13,118 @@
             "idMal": 52991,
             "title": {
               "romaji": "Sousou no Frieren",
-              "english": "Frieren: Beyond Journey's End",
+              "english": "Frieren: Beyond Journey’s End",
               "native": "葬送のフリーレン"
             },
-            "synonyms": ["Frieren at the Funeral", "Frieren"],
+            "synonyms": [
+              "Frieren at the Funeral",
+              "장송의 프리렌",
+              "Frieren - Oltre la Fine del Viaggio",
+              "คำอธิษฐานในวันที่จากลา Frieren",
+              "Frieren e a Jornada para o Além",
+              "Frieren – Nach dem Ende der Reise",
+              "葬送的芙莉蓮",
+              "Frieren: Más allá del final del viaje",
+              "Frieren en el funeral",
+              "Sōsō no Furīren",
+              "Frieren. U kresu drogi",
+              "Frieren - Pháp sư tiễn táng",
+              "Фрирен, провожающая в последний путь",
+              "فريرن: ما وراء نهاية الرحلة",
+              "Frieren: Tras finalizar el viaje"
+            ],
             "episodes": 28,
             "format": "TV",
             "seasonYear": 2023
           },
           {
-            "id": 182255,
-            "idMal": null,
+            "id": 209939,
+            "idMal": 63816,
             "title": {
-              "romaji": "Sousou no Frieren 2nd Season",
+              "romaji": "Sousou no Frieren 3rd Season",
               "english": null,
-              "native": "葬送のフリーレン 第2期"
+              "native": "葬送のフリーレン 第3期"
             },
-            "synonyms": [],
+            "synonyms": [
+              "Frieren: Beyond Journey’s End Season 3 Golden Land Arc",
+              "葬送のフリーレン 第3期【黄金郷編】",
+              "Sousou no Frieren 3rd Season [Ougonkyou-hen]"
+            ],
             "episodes": null,
             "format": "TV",
-            "seasonYear": null
+            "seasonYear": 2027
           },
           {
-            "id": 900001,
+            "id": 182255,
+            "idMal": 59978,
+            "title": {
+              "romaji": "Sousou no Frieren 2nd Season",
+              "english": "Frieren: Beyond Journey’s End Season 2",
+              "native": "葬送のフリーレン 第2期"
+            },
+            "synonyms": [
+              "Провожающая в последний путь Фрирен 2",
+              "장송의 프리렌 2기"
+            ],
+            "episodes": 10,
+            "format": "TV",
+            "seasonYear": 2026
+          },
+          {
+            "id": 170068,
+            "idMal": 56885,
+            "title": {
+              "romaji": "Sousou no Frieren: ●● no Mahou",
+              "english": null,
+              "native": "葬送のフリーレン ～●●の魔法～"
+            },
+            "synonyms": [
+              "Sousou no Frieren Mini Anime",
+              "Frieren: Beyond Journey’s End Mini Anime",
+              "葬送のフリーレン ミニアニメ",
+              "Sousou no Frieren Marumaru no Mahou",
+              "葬送のフリーレン ミニアニメ",
+              "Frieren: Beyond Journey's End: Magic of ??"
+            ],
+            "episodes": 12,
+            "format": "ONA",
+            "seasonYear": 2023
+          },
+          {
+            "id": 189513,
             "idMal": null,
-            "title": { "romaji": null, "english": null, "native": "フリーレン" },
-            "synonyms": null,
-            "episodes": 1,
-            "format": null,
-            "seasonYear": 2024
+            "title": {
+              "romaji": "Sousou no Frieren: ●● no Mahou Part 2",
+              "english": null,
+              "native": "葬送のフリーレン ～●●の魔法～ 2クール"
+            },
+            "synonyms": [
+              "Sousou no Frieren Mini Anime",
+              "Frieren: Beyond Journey’s End Mini Anime",
+              "Sousou no Frieren: Marumaru no Mahou",
+              "葬送のフリーレン ミニアニメ",
+              "Frieren: Beyond Journey's End: Magic of ??"
+            ],
+            "episodes": 6,
+            "format": "ONA",
+            "seasonYear": 2025
+          },
+          {
+            "id": 206425,
+            "idMal": null,
+            "title": {
+              "romaji": "Sousou no Frieren: ●● no Mahou Part 3",
+              "english": null,
+              "native": "葬送のフリーレン ～●●の魔法～ 3クール"
+            },
+            "synonyms": [
+              "Sousou no Frieren 2nd Season Mini Anime",
+              "Frieren: Beyond Journey’s End Season 2 Mini Anime",
+              "Sousou no Frieren: Marumaru no Mahou"
+            ],
+            "episodes": 6,
+            "format": "ONA",
+            "seasonYear": 2026
           }
         ]
       }

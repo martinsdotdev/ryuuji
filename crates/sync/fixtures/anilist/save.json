@@ -1,9 +1,17 @@
 {
   "status": 200,
-  "headers": { "X-RateLimit-Limit": "90", "X-RateLimit-Remaining": "89" },
+  "headers": {
+    "X-RateLimit-Limit": "30",
+    "X-RateLimit-Remaining": "28"
+  },
   "body": {
     "data": {
-      "SaveMediaListEntry": { "id": 381234567, "status": "CURRENT", "progress": 4, "repeat": 0 }
+      "SaveMediaListEntry": {
+        "id": 599961536,
+        "status": "CURRENT",
+        "progress": 9,
+        "repeat": 0
+      }
     }
   }
 }
