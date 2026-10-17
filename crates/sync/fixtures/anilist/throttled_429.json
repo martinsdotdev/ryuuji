@@ -1,8 +1,17 @@
 {
   "status": 429,
-  "headers": { "Retry-After": "30", "X-RateLimit-Limit": "90", "X-RateLimit-Remaining": "0" },
+  "headers": {
+    "Retry-After": "17",
+    "X-RateLimit-Limit": "30",
+    "X-RateLimit-Remaining": "0"
+  },
   "body": {
     "data": null,
-    "errors": [{ "message": "Too Many Requests.", "status": 429 }]
+    "errors": [
+      {
+        "message": "Too Many Requests.",
+        "status": 429
+      }
+    ]
   }
 }

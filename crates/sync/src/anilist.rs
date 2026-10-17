@@ -260,8 +260,9 @@ fn request(query: &str, variables: Value) -> Request {
 
 /// The `data` of an answer that is the one asked for, or how it was not.
 /// The `errors` array is read whatever the HTTP status, since AniList puts
-/// its reasons there: a 200 can carry a validation error, and a 401 or a
-/// 404 says which in its message.
+/// its reasons there. A token it does not accept and a validation error both
+/// come as a 400, told apart only by the message, and a 401 or a 404 says
+/// which in its message too.
 pub(crate) fn classify(response: &Response) -> Result<&Value, Failure> {
     let errors: Vec<&Value> = response
         .body
@@ -513,11 +514,11 @@ mod tests {
     const READ_UNLISTED: &str = include_str!("../fixtures/anilist/read_unlisted.json");
     const SAVED: &str = include_str!("../fixtures/anilist/save.json");
     const UNAUTHORIZED: &str = include_str!("../fixtures/anilist/unauthorized_401.json");
-    const INVALID_TOKEN: &str = include_str!("../fixtures/anilist/invalid_token_200.json");
+    const INVALID_TOKEN: &str = include_str!("../fixtures/anilist/invalid_token_400.json");
     const THROTTLED: &str = include_str!("../fixtures/anilist/throttled_429.json");
     const DESCRIBED: &str = include_str!("../fixtures/anilist/describe.json");
     const NOT_FOUND: &str = include_str!("../fixtures/anilist/not_found_404.json");
-    const VALIDATION: &str = include_str!("../fixtures/anilist/validation_200.json");
+    const VALIDATION: &str = include_str!("../fixtures/anilist/validation_400.json");
     const SERVER_ERROR: &str = include_str!("../fixtures/anilist/server_error_500.json");
 
     fn state(status: ListStatus, progress: u32, repeat: u32) -> ListState {
@@ -596,7 +597,7 @@ mod tests {
             ShowInfo {
                 titles: vec![
                     "Sousou no Frieren".to_owned(),
-                    "Frieren: Beyond Journey's End".to_owned(),
+                    "Frieren: Beyond Journey\u{2019}s End".to_owned(),
                     "葬送のフリーレン".to_owned(),
                 ],
                 format: Some(Format::Tv),
@@ -609,10 +610,10 @@ mod tests {
                     "Drama".to_owned(),
                     "Fantasy".to_owned()
                 ],
-                studio: Some("Madhouse".to_owned()),
+                studio: Some("MADHOUSE".to_owned()),
                 description: Some(
-                    "After the party of heroes defeated the Demon King, they restored peace to \
-                     the land.\n\n(Source: Crunchyroll)"
+                    "A stand-in for AniList's synopsis, which is not ours to copy; the markup \
+                     around it is as captured.\n\n(Source: Crunchyroll)"
                         .to_owned()
                 ),
             }
@@ -620,7 +621,7 @@ mod tests {
         assert_eq!(
             cover.as_deref(),
             Some(
-                "https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx154587-n1fmjRv4JQUd.jpg"
+                "https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx154587-qQTzQnEJJ3oB.jpg"
             )
         );
     }
@@ -697,7 +698,7 @@ mod tests {
     fn the_viewer_is_the_user_and_their_name() {
         assert_eq!(
             parse_viewer(&data(VIEWER_OK)),
-            Ok((UserId(7), "someone".to_owned()))
+            Ok((UserId(7_749_611), "RyuujiApp".to_owned()))
         );
         assert_eq!(
             parse_viewer(&json!({ "Viewer": null })),
@@ -712,49 +713,57 @@ mod tests {
     #[test]
     fn a_search_reads_every_title_and_leaves_out_what_is_null() {
         let found = parse_find(&data(SEARCH)).unwrap();
-        assert_eq!(found.len(), 3);
+        assert_eq!(found.len(), 6);
         assert_eq!(
-            found[0],
-            Candidate {
-                media: Media {
-                    id: MediaId(154587),
-                    title: "Sousou no Frieren".into(),
-                    episodes: Some(28),
-                    mal_id: Some(52991),
-                },
-                titles: vec![
-                    "Sousou no Frieren".into(),
-                    "Frieren: Beyond Journey's End".into(),
-                    "葬送のフリーレン".into(),
-                    "Frieren at the Funeral".into(),
-                    "Frieren".into(),
-                ],
-                format: Some(Format::Tv),
-                year: Some(2023),
+            found[0].media,
+            Media {
+                id: MediaId(154587),
+                title: "Sousou no Frieren".into(),
+                episodes: Some(28),
+                mal_id: Some(52991),
             }
         );
-        // No English title, no synonyms, and an airing show with no count.
         assert_eq!(
-            found[1],
-            Candidate {
-                media: Media {
-                    id: MediaId(182255),
-                    title: "Sousou no Frieren 2nd Season".into(),
-                    episodes: None,
-                    mal_id: None,
-                },
-                titles: vec![
-                    "Sousou no Frieren 2nd Season".into(),
-                    "葬送のフリーレン 第2期".into()
-                ],
-                format: Some(Format::Tv),
-                year: None,
+            found[0].titles[..4],
+            [
+                "Sousou no Frieren",
+                "Frieren: Beyond Journey\u{2019}s End",
+                "葬送のフリーレン",
+                "Frieren at the Funeral",
+            ]
+        );
+        assert_eq!(found[0].titles.len(), 3 + 15);
+        assert_eq!(
+            (found[0].format, found[0].year),
+            (Some(Format::Tv), Some(2023))
+        );
+        // No English title, and a season not yet aired with no count.
+        assert_eq!(
+            found[1].media,
+            Media {
+                id: MediaId(209939),
+                title: "Sousou no Frieren 3rd Season".into(),
+                episodes: None,
+                mal_id: Some(63816),
             }
         );
+        assert_eq!(
+            found[1].titles[..2],
+            ["Sousou no Frieren 3rd Season", "葬送のフリーレン 第3期"]
+        );
+        assert_eq!(found[1].titles.len(), 2 + 3);
+        // No MAL id.
+        assert_eq!(found[4].media.id, MediaId(189513));
+        assert_eq!(found[4].media.mal_id, None);
+        assert_eq!(found[4].format, Some(Format::Ona));
         // Only a native title, and no format.
-        assert_eq!(found[2].media.title, "フリーレン");
-        assert_eq!(found[2].titles, vec!["フリーレン".to_owned()]);
-        assert_eq!(found[2].format, None);
+        let native = parse_find(&json!({ "Page": { "media": [
+            { "id": 1, "title": { "romaji": null, "english": null, "native": "フリーレン" }, "synonyms": [] }
+        ] } }))
+        .unwrap();
+        assert_eq!(native[0].media.title, "フリーレン");
+        assert_eq!(native[0].titles, vec!["フリーレン".to_owned()]);
+        assert_eq!(native[0].format, None);
         assert_eq!(parse_find(&json!({ "Page": { "media": [] } })), Ok(vec![]));
         assert_eq!(
             parse_find(&json!({ "Page": { "media": [{ "id": 1, "title": {} }] } })),
@@ -767,8 +776,8 @@ mod tests {
         assert_eq!(
             parse_read(&data(READ_LISTED)),
             Ok(Remote::Listed {
-                id: Some(ListEntryId(381_234_567)),
-                state: state(ListStatus::Watching, 3, 0),
+                id: Some(ListEntryId(599_961_536)),
+                state: state(ListStatus::Watching, 8, 0),
             })
         );
         assert_eq!(parse_read(&data(READ_UNLISTED)), Ok(Remote::Unlisted));
@@ -789,8 +798,8 @@ mod tests {
         assert_eq!(
             parse_save(&data(SAVED)),
             Ok(Remote::Listed {
-                id: Some(ListEntryId(381_234_567)),
-                state: state(ListStatus::Watching, 4, 0),
+                id: Some(ListEntryId(599_961_536)),
+                state: state(ListStatus::Watching, 9, 0),
             })
         );
         assert_eq!(
@@ -825,10 +834,16 @@ mod tests {
 
     #[test]
     fn every_fixture_classifies_by_its_status_and_its_errors() {
-        for text in [VIEWER_OK, SEARCH, READ_LISTED, READ_UNLISTED, SAVED] {
+        for (text, remaining) in [
+            (VIEWER_OK, 23),
+            (SEARCH, 22),
+            (READ_LISTED, 20),
+            (READ_UNLISTED, 19),
+            (SAVED, 28),
+        ] {
             let response = Response::fixture(text);
             assert!(classify(&response).is_ok(), "{text}");
-            assert_eq!(response.rate_remaining, Some(89));
+            assert_eq!(response.rate_remaining, Some(remaining));
         }
         assert_eq!(
             classify(&Response::fixture(UNAUTHORIZED)),
@@ -843,7 +858,7 @@ mod tests {
         assert_eq!(
             classify(&throttled),
             Err(Failure::Throttled(
-                throttled.received + Duration::from_secs(30)
+                throttled.received + Duration::from_secs(17)
             ))
         );
         assert_eq!(
@@ -852,9 +867,7 @@ mod tests {
         );
         assert_eq!(
             classify(&Response::fixture(VALIDATION)),
-            Err(Failure::Rejected(
-                "The progress may not be greater than 28.".into()
-            ))
+            Err(Failure::Rejected("The progress must be at least 0.".into()))
         );
         assert_eq!(
             classify(&Response::fixture(SERVER_ERROR)),

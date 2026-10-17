@@ -1,10 +1,24 @@
 {
   "status": 404,
-  "headers": { "X-RateLimit-Limit": "90", "X-RateLimit-Remaining": "88" },
+  "headers": {
+    "X-RateLimit-Limit": "30",
+    "X-RateLimit-Remaining": "10"
+  },
   "body": {
-    "data": { "Media": null },
     "errors": [
-      { "message": "Not Found.", "status": 404, "locations": [{ "line": 1, "column": 20 }] }
-    ]
+      {
+        "message": "Not Found.",
+        "status": 404,
+        "locations": [
+          {
+            "line": 1,
+            "column": 20
+          }
+        ]
+      }
+    ],
+    "data": {
+      "Media": null
+    }
   }
 }

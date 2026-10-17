@@ -1,9 +1,15 @@
 {
   "status": 200,
-  "headers": { "X-RateLimit-Limit": "90", "X-RateLimit-Remaining": "89" },
+  "headers": {
+    "X-RateLimit-Limit": "30",
+    "X-RateLimit-Remaining": "23"
+  },
   "body": {
     "data": {
-      "Viewer": { "id": 7, "name": "someone" }
+      "Viewer": {
+        "id": 7749611,
+        "name": "RyuujiApp"
+      }
     }
   }
 }

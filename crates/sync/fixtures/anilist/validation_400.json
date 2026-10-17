@@ -1,0 +1,29 @@
+{
+  "status": 400,
+  "headers": {
+    "X-RateLimit-Limit": "30",
+    "X-RateLimit-Remaining": "17"
+  },
+  "body": {
+    "errors": [
+      {
+        "message": "validation",
+        "status": 400,
+        "locations": [
+          {
+            "line": 1,
+            "column": 94
+          }
+        ],
+        "validation": {
+          "progress": [
+            "The progress must be at least 0."
+          ]
+        }
+      }
+    ],
+    "data": {
+      "SaveMediaListEntry": null
+    }
+  }
+}
