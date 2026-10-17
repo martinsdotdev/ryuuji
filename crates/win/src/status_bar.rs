@@ -213,7 +213,7 @@ fn recording_segment(standing: &Standing, dispatch: Dispatch<Command>) -> Elemen
         Tone::Success => ThemeRef::SystemSuccess,
         // The bar keeps caution for sync; a declined episode is said in
         // words here and in caution on Now playing.
-        Tone::Neutral | Tone::Caution => ThemeRef::custom("ControlStrongFillColorDefaultBrush"),
+        Tone::Neutral | Tone::Caution => ThemeRef::custom(ui::STRONG_FILL),
     };
     let mut parts: Vec<Element> = vec![
         border(Element::Empty)

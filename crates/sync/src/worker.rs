@@ -7,10 +7,11 @@
 
 use std::collections::HashMap;
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use ryuuji_core::{Account, Cover, Report, Service, ShowInfo, Signed, Task, Work};
 use tracing::{info, warn};
@@ -27,6 +28,9 @@ type Transport = Box<dyn FnMut(&Request, Option<&Token>) -> Result<Response, Fai
 /// no token can ride along.
 type Fetch = Box<dyn FnMut(&str) -> Result<Vec<u8>, Failure> + Send>;
 type OnReport = Box<dyn Fn(u64) + Send>;
+
+/// How often the pacing wait looks up to see whether the worker is stopping.
+const STOP_CHECK: Duration = Duration::from_millis(100);
 
 #[derive(Debug, thiserror::Error)]
 pub enum SyncError {
@@ -57,6 +61,7 @@ fn start_with(
     let (tx, rx) = mpsc::channel();
     let reports = Reports::default();
     let mirror = Mirror::default();
+    let stopping = Arc::new(AtomicBool::new(false));
     let worker = Worker {
         engine: Engine::default(),
         vault,
@@ -68,6 +73,7 @@ fn start_with(
         reports: reports.clone(),
         on_report,
         mirror: mirror.clone(),
+        stopping: stopping.clone(),
     };
     let thread = thread::Builder::new()
         .name("ryuuji-sync".to_owned())
@@ -78,6 +84,7 @@ fn start_with(
         thread: Some(thread),
         reports,
         mirror,
+        stopping,
     })
 }
 
@@ -88,6 +95,7 @@ pub struct Syncer {
     thread: Option<JoinHandle<()>>,
     reports: Reports,
     mirror: Mirror,
+    stopping: Arc<AtomicBool>,
 }
 
 impl Syncer {
@@ -123,6 +131,10 @@ impl Syncer {
 
 impl Drop for Syncer {
     fn drop(&mut self) {
+        // Set before the message is sent: a job already waiting out the
+        // pacing cannot read the mailbox, and this is what tells it to give
+        // up rather than hold the join below for the whole spacing.
+        self.stopping.store(true, Ordering::Relaxed);
         let _ = self.tx.send(Msg::Stop);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
@@ -242,6 +254,9 @@ struct Worker {
     reports: Reports,
     on_report: OnReport,
     mirror: Mirror,
+    /// Set by [`Syncer::drop`] before it sends `Msg::Stop`, because a job
+    /// under way cannot read the mailbox.
+    stopping: Arc<AtomicBool>,
 }
 
 impl Worker {
@@ -359,19 +374,39 @@ impl Worker {
                         message,
                     });
                 }
-                Task::Find { title } => warn!(
-                    service = service.tag(),
-                    entry = entry.as_i64(),
-                    title = %title,
-                    %message,
-                    "search rejected"
-                ),
-                Task::Describe { media } => warn!(
-                    service = service.tag(),
-                    media = media.0,
-                    %message,
-                    "show info unreadable"
-                ),
+                Task::Find { title } => {
+                    warn!(
+                        service = service.tag(),
+                        entry = entry.as_i64(),
+                        title = %title,
+                        %message,
+                        "search rejected"
+                    );
+                    self.queue(Report::SearchRefused {
+                        service,
+                        entry,
+                        query: title.clone(),
+                        message,
+                    });
+                }
+                // Said as an answer with nothing in it, the way a show the
+                // service cannot find is. The row keeps what it had and is
+                // stamped, so the same refused request does not go out again
+                // on every change of work, as it did while only logged here.
+                Task::Describe { media } => {
+                    warn!(
+                        service = service.tag(),
+                        media = media.0,
+                        %message,
+                        "show info unreadable"
+                    );
+                    self.queue(Report::Described {
+                        service,
+                        media: *media,
+                        info: ShowInfo::default(),
+                        cover: None,
+                    });
+                }
             },
             Err(Failure::NotFound) => match &posted.job.task {
                 Task::Reconcile { media, .. } => {
@@ -563,9 +598,15 @@ impl Worker {
     ) -> Result<Response, Failure> {
         if let Some(last) = self.last_sent {
             let until = last + SPACING;
-            let now = Instant::now();
-            if until > now {
-                thread::sleep(until - now);
+            // Waited in slices rather than one sleep. A job cannot read the
+            // mailbox, so a single sleep held `Msg::Stop` for as long as the
+            // spacing and `Syncer::drop` joined on it: closing the app sat
+            // out the pacing of a call it was about to throw away.
+            while let Some(left) = until.checked_duration_since(Instant::now()) {
+                if self.stopping.load(Ordering::Relaxed) {
+                    return Err(Failure::Offline);
+                }
+                thread::sleep(left.min(STOP_CHECK));
             }
         }
         self.last_sent = Some(Instant::now());
@@ -637,6 +678,7 @@ mod tests {
     const SAVED: &str = include_str!("../fixtures/anilist/save.json");
     const DESCRIBED: &str = include_str!("../fixtures/anilist/describe.json");
     const NOT_FOUND: &str = include_str!("../fixtures/anilist/not_found_404.json");
+    const REJECTED: &str = include_str!("../fixtures/anilist/validation_200.json");
 
     const ANILIST: Service = Service::AniList;
 
@@ -767,6 +809,75 @@ mod tests {
     #[test]
     fn a_show_not_found_without_the_token_is_described_as_empty_not_gone() {
         let (syncer, counts) = started(always(NOT_FOUND));
+        let [entry] = entries(1)[..] else {
+            unreachable!()
+        };
+        syncer.post(&Work {
+            services: vec![ServiceWork {
+                service: ANILIST,
+                user: UserId(7),
+                jobs: vec![Job {
+                    entry,
+                    task: Task::Describe {
+                        media: MediaId(154587),
+                    },
+                    when: When::Now,
+                }],
+            }],
+        });
+        next_count(&counts);
+        assert_eq!(
+            syncer.take_reports(),
+            vec![Report::Described {
+                service: ANILIST,
+                media: MediaId(154587),
+                info: ShowInfo::default(),
+                cover: None,
+            }]
+        );
+    }
+
+    /// Only logged, a rejected search left no mark, so the core still read
+    /// the show as never looked up and posted the same search again on every
+    /// change of work.
+    #[test]
+    fn a_rejected_search_is_reported_to_the_core_rather_than_only_logged() {
+        let mut vault = Tokens::default();
+        vault.keep(ANILIST, token_until(4_102_444_800)).unwrap();
+        let (syncer, counts) = started_with(vault, always(REJECTED));
+        let [entry] = entries(1)[..] else {
+            unreachable!()
+        };
+        syncer.post(&Work {
+            services: vec![ServiceWork {
+                service: ANILIST,
+                user: UserId(7),
+                jobs: vec![Job {
+                    entry,
+                    task: Task::Find {
+                        title: "Show".into(),
+                    },
+                    when: When::Now,
+                }],
+            }],
+        });
+        next_count(&counts);
+        let reports = syncer.take_reports();
+        assert!(
+            matches!(
+                &reports[..],
+                [Report::SearchRefused { service: ANILIST, entry: got, query, .. }]
+                    if *got == entry && query == "Show"
+            ),
+            "{reports:?}"
+        );
+    }
+
+    /// The same for show info, said as an answer with nothing in it, which
+    /// the store keeps without emptying what it had.
+    #[test]
+    fn a_rejected_describe_is_reported_as_empty_rather_than_only_logged() {
+        let (syncer, counts) = started(always(REJECTED));
         let [entry] = entries(1)[..] else {
             unreachable!()
         };

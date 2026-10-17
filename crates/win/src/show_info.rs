@@ -14,7 +14,7 @@ use ryuuji_core::{
 use tracing::warn;
 use windows_reactor::*;
 
-use crate::ui::{ICON_FONT, card_frame, episodes_text, facts_table};
+use crate::ui::{ICON_FONT, card_frame, dot_joined, episodes_text, facts_table};
 
 const COVER_WIDTH: f64 = 160.0;
 const COVER_HEIGHT: f64 = 240.0;
@@ -95,14 +95,10 @@ pub(crate) fn status_line(entry: &LibraryEntry) -> String {
 
 /// `TV · 28 episodes`: the format and the length, each when it is known.
 pub(crate) fn format_line(format: Option<Format>, episodes: Option<u32>) -> Option<String> {
-    let parts: Vec<String> = [
+    dot_joined([
         format.map(|format| format.label().to_owned()),
         episodes.map(episodes_text),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
-    (!parts.is_empty()).then(|| parts.join(" \u{b7} "))
+    ])
 }
 
 /// The cover with `content` beside it, the way Now playing's card and the
@@ -206,8 +202,7 @@ fn aired(info: &ShowInfo) -> Option<String> {
         (Some(_) | None, None) => None,
     };
     let status = info.status.map(|status| status.label().to_owned());
-    let parts: Vec<String> = [season, status].into_iter().flatten().collect();
-    (!parts.is_empty()).then(|| parts.join(" \u{b7} "))
+    dot_joined([season, status])
 }
 
 /// A `file:` URI for a path on this computer, with the characters a URI

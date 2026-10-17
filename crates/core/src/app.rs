@@ -212,6 +212,12 @@ impl Ryuuji {
         // A viewing coming back is proposed again too: the last match is the
         // other player's by then, and the library may have changed meanwhile.
         if observed.switched {
+            // A new viewing may ask the lists again. The set exists to stop
+            // one viewing asking on every event, not to settle the question
+            // for the whole run: the person may have caught up on the site
+            // since the last viewing, and before this they had to relaunch
+            // for Ryuuji to look.
+            self.asked_ahead.clear();
             let proposal =
                 matching::propose(&event, &self.state.library, &self.aliases, &self.ignored);
             self.record_match(proposal);
@@ -245,13 +251,14 @@ impl Ryuuji {
         if self.state.ignored {
             return RecordOutcome::Ignored;
         }
-        // Said at once, like an ignored file, but logged only once the
-        // viewing has earned a row: a skip is a watch that reached the
-        // threshold and was refused, like any other decline.
+        // Said and logged at once, unlike every other decline, which waits
+        // for the threshold. A skip is an instruction rather than something
+        // watching arrived at, and the row is the only place it outlives the
+        // process: `WatchSession::resume` reads it back from there. Logged
+        // only at the threshold, a skip given early was forgotten by a
+        // relaunch and the episode it refused was recorded after all.
         if accrual.skipped {
-            if accrual.accrued >= accrual.threshold {
-                self.log_decline(Decline::Skipped);
-            }
+            self.log_decline(Decline::Skipped);
             return RecordOutcome::Declined(Decline::Skipped);
         }
         if accrual.accrued < accrual.threshold {
@@ -303,13 +310,20 @@ impl Ryuuji {
     /// only for a title that named an episode: a clip or a file with no
     /// number is not a watch worth a row. A viewing whose row has recorded
     /// logs nothing more, which is the relaunch-after-undo case: the row
-    /// still says Recorded while the gates run again.
+    /// still says Recorded while the gates run again, and a second row for a
+    /// watch already written would say the same thing twice.
+    ///
+    /// A skip is the exception, because it is the person speaking rather than
+    /// the gates recomputing. It has to reach a row or a relaunch forgets it
+    /// and records the episode anyway; [`WatchSession::open_row`] refuses a
+    /// row that recorded, so the skip opens one of its own.
     fn log_decline(&mut self, decline: Decline) {
         let logged = Logged::Declined(decline);
+        let recomputed = decline != Decline::Skipped;
         if self
             .session
             .logged()
-            .is_some_and(|current| current == logged || current == Logged::Recorded)
+            .is_some_and(|current| current == logged || (recomputed && current == Logged::Recorded))
         {
             return;
         }
@@ -791,9 +805,16 @@ fn commit<T>(
 }
 
 fn upsert(library: &mut Vec<LibraryEntry>, entry: LibraryEntry) {
-    match library.iter_mut().find(|existing| existing.id == entry.id) {
-        Some(existing) => *existing = entry,
-        None => library.push(entry),
+    upsert_by(library, entry, |a, b| a.id == b.id);
+}
+
+/// Puts `item` in place of the one `same` says it is, else at the back:
+/// the one shape every list the reducer keeps is written in, whatever its
+/// key.
+fn upsert_by<T>(items: &mut Vec<T>, item: T, same: impl Fn(&T, &T) -> bool) {
+    match items.iter_mut().find(|existing| same(existing, &item)) {
+        Some(existing) => *existing = item,
+        None => items.push(item),
     }
 }
 
@@ -2642,20 +2663,67 @@ mod tests {
     }
 
     #[test]
-    fn dont_record_says_so_at_once_and_logs_one_decline_at_the_threshold() {
+    fn dont_record_logs_the_skip_at_once_and_only_once() {
         let (_tmp, dir) = open_tmp();
         let mut app = Ryuuji::open(&dir).unwrap();
         app.dispatch(Command::AddEntry(entry("Show")));
         app.dispatch(Command::Playback(playing("Show - 01.mkv")));
         app.dispatch(Command::DontRecord);
         assert_eq!(outcome(&app), RecordOutcome::Declined(Decline::Skipped));
-        assert_eq!(stored_watches(&dir), vec![]);
+        // Written before the threshold, not at it: the row is the only place
+        // a skip outlives the process.
+        assert_eq!(stored_declines(&dir), vec![Decline::Skipped]);
+        assert_eq!(stored_watches(&dir).len(), 1);
 
         app.dispatch(Command::Playback(later("Show - 01.mkv", 720)));
         app.dispatch(Command::Playback(later("Show - 01.mkv", 1_400)));
         assert_eq!(outcome(&app), RecordOutcome::Declined(Decline::Skipped));
         assert_eq!(app.state().library[0].progress, 0);
+        // Reaching the threshold says nothing new, so there is still one row.
         assert_eq!(stored_declines(&dir), vec![Decline::Skipped]);
+        assert_eq!(stored_watches(&dir).len(), 1);
+        assert!(app.state().notices.is_empty());
+    }
+
+    #[test]
+    fn a_skip_given_before_the_threshold_survives_a_relaunch() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::AddEntry(entry("Show")));
+        app.dispatch(Command::Playback(playing("Show - 01.mkv")));
+        app.dispatch(Command::DontRecord);
+        drop(app);
+
+        // The skip is read back from its row. Logged only at the threshold,
+        // nothing was written and the relaunch recorded the episode the
+        // person had refused.
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::Playback(playing("Show - 01.mkv")));
+        app.dispatch(Command::Playback(later("Show - 01.mkv", 720)));
+        assert_eq!(outcome(&app), RecordOutcome::Declined(Decline::Skipped));
+        assert_eq!(app.state().library[0].progress, 0);
+        assert_eq!(stored_writes(&dir), vec![]);
+        assert_eq!(stored_watches(&dir).len(), 1);
+    }
+
+    #[test]
+    fn a_skip_after_a_relaunch_following_an_undo_is_logged_in_its_own_row() {
+        let (_tmp, dir) = open_tmp();
+        let mut app = Ryuuji::open(&dir).unwrap();
+        let watch = record_first_episode(&mut app, &dir);
+        app.dispatch(Command::UndoRecording(watch));
+        drop(app);
+
+        // The resumed row still says Recorded, which stops the gates opening
+        // a second row for a watch already written. A skip is not the gates
+        // recomputing, so it gets a row of its own and a later relaunch can
+        // read it back.
+        let mut app = Ryuuji::open(&dir).unwrap();
+        app.dispatch(Command::Playback(playing("Show - 01.mkv")));
+        app.dispatch(Command::DontRecord);
+        assert_eq!(outcome(&app), RecordOutcome::Declined(Decline::Skipped));
+        assert_eq!(stored_declines(&dir), vec![Decline::Skipped]);
+        assert_eq!(app.state().library[0].progress, 0);
         assert!(app.state().notices.is_empty());
     }
 

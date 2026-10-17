@@ -9,11 +9,12 @@
 use std::fs;
 use std::time::SystemTime;
 
-use super::{Ryuuji, commit, upsert};
+use super::{Ryuuji, commit, upsert, upsert_by};
+use crate::store::{Settled, Tied};
 use crate::{
-    Account, Asked, Attempt, AutoLink, Candidate, Cover, Described, EntryId, Link, LinkedBy,
-    ListState, Listing, Media, MediaId, Notice, Parked, Picker, Remote, Report, Service, Settled,
-    ShowInfo, Signed, Tie, Tied, UserId, auto_link, settlement,
+    Account, Answer, Asked, Attempt, AutoLink, Candidate, Cover, Described, EntryId, Link,
+    LinkedBy, ListState, Listing, Media, MediaId, Notice, Parked, Picker, Remote, Report, Service,
+    ShowInfo, Signed, Tie, UserId, auto_link, settlement,
 };
 
 /// The folder under the data directory the covers are kept in.
@@ -37,6 +38,12 @@ impl Ryuuji {
                 query,
                 candidates,
             } => self.found(service, entry, query, candidates),
+            Report::SearchRefused {
+                service,
+                entry,
+                query,
+                message,
+            } => self.search_refused(service, entry, &query, message),
             Report::Reconciled {
                 service,
                 user,
@@ -80,14 +87,9 @@ impl Ryuuji {
         let file = cover.and_then(|cover| self.keep_cover(service, media, cover));
         let outcome = self.store.describe(service, media, info, file.as_deref());
         if let Some(at) = commit(&mut self.state.notices, "show info", outcome) {
-            let described = &mut self.state.sync.described;
-            match described
-                .iter_mut()
-                .find(|known| known.service == service && known.media == media)
-            {
-                Some(known) => *known = at,
-                None => described.push(at),
-            }
+            upsert_by(&mut self.state.sync.described, at, |a, b| {
+                a.service == b.service && a.media == b.media
+            });
         }
     }
 
@@ -203,7 +205,9 @@ impl Ryuuji {
     fn save_account(&mut self, account: Account) -> Option<Account> {
         let outcome = self.store.save_account(&account);
         let stored = commit(&mut self.state.notices, "account", outcome)?;
-        upsert_account(&mut self.state.sync.accounts, stored.clone());
+        upsert_by(&mut self.state.sync.accounts, stored.clone(), |a, b| {
+            a.service == b.service
+        });
         Some(stored)
     }
 
@@ -223,17 +227,12 @@ impl Ryuuji {
         candidates: Vec<Candidate>,
     ) {
         let looked_up = self.state.sync.listing(entry, service).is_some();
-        if let Some(picker) = self.state.sync.picker.as_mut()
-            && picker.entry == entry
-            && picker.service == service
-            && picker.query == query
-            && picker.found.is_none()
-        {
+        if let Some(picker) = self.waiting_picker(entry, service, &query) {
             if looked_up {
-                picker.found = Some(candidates);
+                picker.answer = Some(Answer::Found(candidates));
                 return;
             }
-            picker.found = Some(candidates.clone());
+            picker.answer = Some(Answer::Found(candidates.clone()));
         }
         if looked_up {
             return;
@@ -249,6 +248,47 @@ impl Ryuuji {
             AutoLink::Pick { found } => Tie::Unpicked { found },
         };
         self.tie(entry, service, &tie);
+    }
+
+    /// Takes a search the service refused, the way [`Ryuuji::found`] takes
+    /// one it answered. The picker's own query says so in the picker, which
+    /// then asks nothing more until the person searches for something else.
+    /// A show never looked up is tied as refused, so the background search
+    /// stops: the same title meets the same refusal, and unrecorded it went
+    /// out again on every change of work. Only the show's own title says
+    /// that, though; a name the person tried in the picker was refused, not
+    /// the show.
+    fn search_refused(&mut self, service: Service, entry: EntryId, query: &str, message: String) {
+        let looked_up = self.state.sync.listing(entry, service).is_some();
+        if let Some(picker) = self.waiting_picker(entry, service, query) {
+            picker.answer = Some(Answer::Refused(message.clone()));
+        }
+        if looked_up
+            || self
+                .state
+                .entry(entry)
+                .is_none_or(|show| show.title != query)
+        {
+            return;
+        }
+        self.tie(entry, service, &Tie::SearchRefused { message });
+    }
+
+    /// The picker, while it is open over `entry` on `service` and waiting on
+    /// an answer to `query`. An answer to an older query, or one arriving
+    /// after the picker was filled, is the background search's.
+    fn waiting_picker(
+        &mut self,
+        entry: EntryId,
+        service: Service,
+        query: &str,
+    ) -> Option<&mut Picker> {
+        self.state.sync.picker.as_mut().filter(|picker| {
+            picker.entry == entry
+                && picker.service == service
+                && picker.query == query
+                && picker.answer.is_none()
+        })
     }
 
     /// Settles what a reconcile found into the library and the base. A
@@ -372,7 +412,7 @@ impl Ryuuji {
             entry,
             service,
             query,
-            found: None,
+            answer: None,
         });
     }
 
@@ -501,24 +541,14 @@ impl Ryuuji {
     }
 
     fn title_of(&self, entry: EntryId) -> Option<String> {
-        self.state
-            .library
-            .iter()
-            .find(|show| show.id == entry)
-            .map(|show| show.title.clone())
+        self.state.entry(entry).map(|show| show.title.clone())
     }
 }
 
 /// Says `notice` in place of one of its kind about the same show, where one
 /// stands, else at the back of the queue.
 fn raise(notices: &mut Vec<Notice>, notice: Notice) {
-    match notices
-        .iter()
-        .position(|standing| same_show(standing, &notice))
-    {
-        Some(at) => notices[at] = notice,
-        None => notices.push(notice),
-    }
+    upsert_by(notices, notice, same_show);
 }
 
 /// Whether two list notices are of one kind about one show on one service.
@@ -560,24 +590,10 @@ fn clear_gone(notices: &mut Vec<Notice>, service: Service, show: &str) {
     });
 }
 
-fn upsert_account(accounts: &mut Vec<Account>, account: Account) {
-    match accounts
-        .iter_mut()
-        .find(|existing| existing.service == account.service)
-    {
-        Some(existing) => *existing = account,
-        None => accounts.push(account),
-    }
-}
-
 fn upsert_listing(listings: &mut Vec<Listing>, listing: Listing) {
-    match listings
-        .iter_mut()
-        .find(|existing| existing.entry == listing.entry && existing.service == listing.service)
-    {
-        Some(existing) => *existing = listing,
-        None => listings.push(listing),
-    }
+    upsert_by(listings, listing, |a, b| {
+        a.entry == b.entry && a.service == b.service
+    });
 }
 
 #[cfg(test)]
@@ -1170,6 +1186,13 @@ mod tests {
         app.dispatch(Command::Playback(later("Show - 09.mkv", 800)));
         assert_eq!(app.state().sync.checks, vec![]);
         assert_eq!(stored_updates(&dir).len(), 1);
+
+        // A later viewing of the same file asks once more. The person may
+        // have caught up on the site between the two, and asked once for the
+        // whole run they had to relaunch before Ryuuji would look again.
+        watch_past_threshold(&mut app, "Other - 01.mkv");
+        watch_past_threshold(&mut app, "Show - 09.mkv");
+        assert_eq!(app.state().sync.checks, vec![(ANILIST, id)]);
     }
 
     #[test]
@@ -1516,12 +1539,12 @@ mod tests {
             service: ANILIST,
             query: "Fruits Basket".into(),
         };
-        let picker = |found| {
+        let picker = |found: Option<Vec<Candidate>>| {
             Some(Picker {
                 entry: id,
                 service: ANILIST,
                 query: "Fruits Basket".into(),
-                found,
+                answer: found.map(Answer::Found),
             })
         };
         app.dispatch(search());
@@ -1588,7 +1611,7 @@ mod tests {
         assert_eq!(jobs(&app).len(), 1);
         list.answer(&mut app);
         let picker = app.state().sync.picker.clone().expect("the picker is open");
-        assert_eq!(picker.found, Some(vec![show()]));
+        assert_eq!(picker.answer, Some(Answer::Found(vec![show()])));
         assert_eq!(
             listing(&app, id).tie,
             Tie::Linked {
@@ -1610,5 +1633,121 @@ mod tests {
         }));
         assert_eq!(app.state().sync.picker, Some(picker));
         assert!(matches!(listing(&app, id).tie, Tie::Linked { .. }));
+    }
+
+    fn refused(id: EntryId, query: &str) -> Command {
+        Command::Synced(Report::SearchRefused {
+            service: ANILIST,
+            entry: id,
+            query: query.into(),
+            message: "Validation error".into(),
+        })
+    }
+
+    /// A search the service refuses is kept, as an answer is. Unrecorded,
+    /// the show read as never looked up and the same refused search went out
+    /// again on every change of work, and again after every relaunch.
+    #[test]
+    fn a_refused_search_ties_the_show_as_refused_and_stops_searching() {
+        let (_tmp, dir) = open_tmp();
+        let (mut app, id) = app_with_show(&dir, WatchStatus::Watching, 3);
+        assert!(matches!(
+            jobs(&app)[..],
+            [Job {
+                task: Task::Find { .. },
+                ..
+            }]
+        ));
+
+        app.dispatch(refused(id, "Show"));
+        let tie = Tie::SearchRefused {
+            message: "Validation error".into(),
+        };
+        assert_eq!(listing(&app, id).tie, tie);
+        assert_eq!(jobs(&app), vec![]);
+        assert_eq!(
+            app.state()
+                .sync
+                .link_state(&app.state().library[0], ANILIST),
+            Some(crate::LinkState::SearchRefused {
+                message: "Validation error".into()
+            })
+        );
+        assert_eq!(
+            app.state().sync_line(),
+            Some(crate::SyncLine::NeedsYou {
+                service: ANILIST,
+                why: crate::NeedsYou::Pick
+            })
+        );
+
+        drop(app);
+        let app = Ryuuji::open(&dir).unwrap();
+        assert_eq!(listing(&app, id).tie, tie);
+        assert_eq!(jobs(&app), vec![]);
+    }
+
+    /// The picker's own search, refused, says so there and asks nothing more
+    /// until the person searches for something else. A name they tried is
+    /// refused, not the show, so the show still waits on its own title.
+    #[test]
+    fn a_refused_picker_search_waits_for_another_name() {
+        let (_tmp, dir) = open_tmp();
+        let (mut app, id) = app_with_show(&dir, WatchStatus::Watching, 3);
+        app.dispatch(Command::SearchList {
+            entry: id,
+            service: ANILIST,
+            query: "Shoe".into(),
+        });
+        app.dispatch(refused(id, "Shoe"));
+        assert_eq!(
+            app.state()
+                .sync
+                .picker
+                .as_ref()
+                .map(|picker| &picker.answer),
+            Some(&Some(Answer::Refused("Validation error".into())))
+        );
+        assert_eq!(app.state().sync.listing(id, ANILIST), None);
+        let left: Vec<Task> = jobs(&app).into_iter().map(|job| job.task).collect();
+        assert_eq!(
+            left,
+            vec![Task::Find {
+                title: "Show".into()
+            }]
+        );
+
+        app.dispatch(Command::SearchList {
+            entry: id,
+            service: ANILIST,
+            query: "Show".into(),
+        });
+        assert_eq!(
+            app.state()
+                .sync
+                .picker
+                .as_ref()
+                .map(|picker| &picker.answer),
+            Some(&None)
+        );
+    }
+
+    #[test]
+    fn a_show_the_search_refused_can_still_be_linked_by_hand() {
+        let (_tmp, dir) = open_tmp();
+        let (mut app, id) = app_with_show(&dir, WatchStatus::Watching, 3);
+        app.dispatch(refused(id, "Show"));
+        app.dispatch(Command::LinkShow {
+            entry: id,
+            service: ANILIST,
+            media: show().media,
+        });
+        assert_eq!(
+            listing(&app, id).tie,
+            Tie::Linked {
+                media: show().media,
+                by: LinkedBy::Person
+            }
+        );
     }
 }

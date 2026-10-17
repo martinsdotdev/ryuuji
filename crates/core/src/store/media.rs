@@ -14,16 +14,19 @@ const SELECT_MEDIA: &str = "SELECT titles, format, season, season_year, status, 
 /// A show's info as stored: what the service said, and the cover file's
 /// name under the covers folder when one was kept.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StoredInfo {
+pub(crate) struct StoredInfo {
     pub info: ShowInfo,
     pub cover_file: Option<String>,
 }
 
 impl Store {
-    /// Keeps what a service said about `media`. A fetch that brought no
-    /// cover keeps the file the last one did, so a failed download never
-    /// takes a picture away.
-    pub fn describe(
+    /// Keeps what a service said about `media`. An answer that says nothing
+    /// about a field keeps what the last one said, so a fetch that brought
+    /// no cover never takes a picture away and one that answered with
+    /// nothing at all — a show the service reports as missing, which it does
+    /// for a show the signed-out call cannot see — refreshes the stamp
+    /// without emptying the row.
+    pub(crate) fn describe(
         &mut self,
         service: Service,
         media: MediaId,
@@ -33,21 +36,27 @@ impl Store {
         let _span =
             info_span!("store.describe", service = service.tag(), media = media.0).entered();
         let at = unix_now();
+        let id = i64::try_from(media.0).unwrap_or(i64::MAX);
         self.conn
             .execute(
                 "INSERT INTO media (service, media_id, titles, format, season, season_year, \
                  status, episodes, genres, studio, description, cover_file, described_at) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) \
-                 ON CONFLICT(service, media_id) DO UPDATE SET titles = excluded.titles, \
-                 format = excluded.format, season = excluded.season, \
-                 season_year = excluded.season_year, status = excluded.status, \
-                 episodes = excluded.episodes, genres = excluded.genres, \
-                 studio = excluded.studio, description = excluded.description, \
+                 ON CONFLICT(service, media_id) DO UPDATE SET \
+                 titles = COALESCE(NULLIF(excluded.titles, ''), media.titles), \
+                 format = COALESCE(excluded.format, media.format), \
+                 season = COALESCE(excluded.season, media.season), \
+                 season_year = COALESCE(excluded.season_year, media.season_year), \
+                 status = COALESCE(excluded.status, media.status), \
+                 episodes = COALESCE(excluded.episodes, media.episodes), \
+                 genres = COALESCE(NULLIF(excluded.genres, ''), media.genres), \
+                 studio = COALESCE(excluded.studio, media.studio), \
+                 description = COALESCE(excluded.description, media.description), \
                  cover_file = COALESCE(excluded.cover_file, media.cover_file), \
                  described_at = excluded.described_at",
                 params![
                     service.tag(),
-                    i64::try_from(media.0).unwrap_or(i64::MAX),
+                    id,
                     info.titles.join("\n"),
                     info.format.map(Format::tag),
                     info.season.map(Season::tag),
@@ -62,22 +71,37 @@ impl Store {
                 ],
             )
             .map_err(query_failed)?;
-        info!("show info kept");
+        // Read back rather than trusting what was passed: the upsert keeps
+        // the picture an earlier fetch brought, so a fetch carrying none can
+        // still leave the row with one.
+        let has_cover = self
+            .conn
+            .query_row(
+                "SELECT cover_file IS NOT NULL FROM media WHERE service = ?1 AND media_id = ?2",
+                params![service.tag(), id],
+                |row| row.get(0),
+            )
+            .map_err(query_failed)?;
+        info!(has_cover, "show info kept");
         Ok(DescribedAt {
             service,
             media,
             at: unix_time(at).unwrap_or(std::time::UNIX_EPOCH),
+            has_cover,
         })
     }
 
     /// When each show was last described, which is all the app state keeps
     /// of it. A row whose service or stamp cannot be read is left out, so it
     /// is fetched again.
-    pub fn described(&self) -> Result<Vec<DescribedAt>, StoreError> {
+    pub(crate) fn described(&self) -> Result<Vec<DescribedAt>, StoreError> {
         let _span = info_span!("store.described").entered();
         let mut stmt = self
             .conn
-            .prepare("SELECT service, media_id, described_at FROM media ORDER BY service, media_id")
+            .prepare(
+                "SELECT service, media_id, described_at, cover_file IS NOT NULL \
+                 FROM media ORDER BY service, media_id",
+            )
             .map_err(query_failed)?;
         let rows = stmt
             .query_map([], |row| {
@@ -85,12 +109,13 @@ impl Store {
                     row.get::<_, String>(0)?,
                     row.get::<_, i64>(1)?,
                     row.get::<_, i64>(2)?,
+                    row.get::<_, bool>(3)?,
                 ))
             })
             .map_err(query_failed)?;
         let mut described = Vec::new();
         for row in rows {
-            let (service, media, at) = row.map_err(query_failed)?;
+            let (service, media, at, has_cover) = row.map_err(query_failed)?;
             let (Some(service), Ok(media), Some(at)) = (
                 Service::from_tag(&service),
                 u64::try_from(media),
@@ -102,13 +127,14 @@ impl Store {
                 service,
                 media: MediaId(media),
                 at,
+                has_cover,
             });
         }
         Ok(described)
     }
 
     /// What was kept about `media`, if anything was.
-    pub fn show_info(
+    pub(crate) fn show_info(
         &self,
         service: Service,
         media: MediaId,
@@ -201,6 +227,35 @@ mod tests {
         assert_eq!(kept.info, frieren());
         assert_eq!(kept.cover_file.as_deref(), Some("anilist-154587.jpg"));
         assert_eq!(store.described().unwrap(), vec![at]);
+    }
+
+    #[test]
+    fn an_answer_that_says_nothing_keeps_what_the_last_one_said() {
+        let (_tmp, dir) = open_tmp();
+        let mut store = open(&dir);
+        store
+            .describe(
+                Service::AniList,
+                MediaId(1),
+                &frieren(),
+                Some("anilist-1.jpg"),
+            )
+            .unwrap();
+        // A show the signed-out call cannot see reads as missing, and the
+        // worker reports that as an answer with nothing in it. Written
+        // through, it emptied the row and stamped it fresh for another week,
+        // so the synopsis and the details went blank for a show that had
+        // both.
+        let at = store
+            .describe(Service::AniList, MediaId(1), &ShowInfo::default(), None)
+            .unwrap();
+        let kept = store
+            .show_info(Service::AniList, MediaId(1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(kept.info, frieren());
+        assert_eq!(kept.cover_file.as_deref(), Some("anilist-1.jpg"));
+        assert!(at.has_cover);
     }
 
     #[test]

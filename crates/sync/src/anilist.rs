@@ -165,15 +165,23 @@ fn airing(media: &Value) -> Option<Airing> {
 /// A description as plain text. AniList's "not HTML" still carries `<br>`
 /// and `<i>`: a break becomes a line break, other tags go, and runs of
 /// blank lines close up to one.
+///
+/// A `<` that opens no tag is text. Taken as one, it swallowed everything up
+/// to the next `>`, so a synopsis reading "5 < 6 but 7 > 8" lost its middle.
 fn plain(raw: &str) -> String {
     let mut text = String::new();
     let mut rest = raw;
     while let Some(open) = rest.find('<') {
-        text.push_str(&rest[..open]);
-        let Some(close) = rest[open..].find('>') else {
-            rest = &rest[open..];
-            break;
+        let opens_tag = rest[open + 1..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '/');
+        let Some(close) = rest[open..].find('>').filter(|_| opens_tag) else {
+            text.push_str(&rest[..=open]);
+            rest = &rest[open + 1..];
+            continue;
         };
+        text.push_str(&rest[..open]);
         let tag = rest[open + 1..open + close].trim().to_ascii_lowercase();
         if tag.trim_end_matches('/').trim() == "br" {
             text.push('\n');
@@ -181,10 +189,17 @@ fn plain(raw: &str) -> String {
         rest = &rest[open + close + 1..];
     }
     text.push_str(rest);
+    // `&amp;` goes last. Replaced first, it rewrote `&amp;quot;` to `&quot;`
+    // and the next pass turned that into a quote, so text the service had
+    // escaped once came out unescaped twice.
     let text = text
-        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
         .replace("&quot;", "\"")
-        .replace("&#039;", "'");
+        .replace("&#039;", "'")
+        .replace("&apos;", "'")
+        .replace("&nbsp;", " ")
+        .replace("&amp;", "&");
     let mut lines: Vec<&str> = Vec::new();
     for line in text.lines().map(str::trim) {
         if line.is_empty() && lines.last().is_none_or(|last| last.is_empty()) {
@@ -619,6 +634,17 @@ mod tests {
         assert_eq!(plain("<i>Tilted</i> &amp; <b>bold</b>"), "Tilted & bold");
         assert_eq!(plain("A.<br><br><br><br>B.<br>"), "A.\n\nB.");
         assert_eq!(plain("Keeps a < sign"), "Keeps a < sign");
+        // A `<` with a `>` later in the line used to read as a tag, and the
+        // words between them went with it.
+        assert_eq!(plain("5 < 6 but 7 > 8"), "5 < 6 but 7 > 8");
+        // Escaped once by the service, unescaped once here. `&amp;` replaced
+        // first turned this into a quote.
+        assert_eq!(plain("&amp;quot;"), "&quot;");
+        assert_eq!(plain("&lt;b&gt; is text"), "<b> is text");
+        assert_eq!(
+            plain("He said &quot;hi&quot; &#039;twice&#039;"),
+            "He said \"hi\" 'twice'"
+        );
     }
 
     #[test]

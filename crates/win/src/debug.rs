@@ -275,6 +275,7 @@ pub struct ShowCounts {
     pub waiting: usize,
     pub parked: usize,
     pub unpicked: usize,
+    pub search_refused: usize,
     pub gone: usize,
     pub off: usize,
 }
@@ -310,6 +311,7 @@ fn show_counts(listings: &[Listing], work: &Work, service: Service) -> ShowCount
                 }
             }
             Tie::Unpicked { .. } => counts.unpicked += 1,
+            Tie::SearchRefused { .. } => counts.search_refused += 1,
             Tie::Gone { .. } => counts.gone += 1,
             Tie::Off => counts.off += 1,
         }
@@ -405,8 +407,14 @@ fn last_call_text(last: Option<LastCall>, zone: &TimeZone) -> String {
 
 fn shows_text(shows: &ShowCounts) -> String {
     format!(
-        "linked {}, waiting to send {}, parked {}, unpicked {}, gone {}, off {}",
-        shows.linked, shows.waiting, shows.parked, shows.unpicked, shows.gone, shows.off
+        "linked {}, waiting to send {}, parked {}, unpicked {}, search refused {}, gone {}, off {}",
+        shows.linked,
+        shows.waiting,
+        shows.parked,
+        shows.unpicked,
+        shows.search_refused,
+        shows.gone,
+        shows.off
     )
 }
 
@@ -1168,7 +1176,7 @@ mod tests {
             "Library: {} ({len}, modified ",
             core.library.path.display()
         )));
-        assert!(text.contains("Schema version: 12\n"));
+        assert!(text.contains("Schema version: 13\n"));
         assert!(text.contains(&format!(
             "Settings: {} (missing)",
             core.settings.path.display()
@@ -1339,6 +1347,7 @@ mod tests {
                 waiting: 1,
                 parked: 0,
                 unpicked: 0,
+                search_refused: 0,
                 gone: 0,
                 off: 1,
             }
@@ -1365,7 +1374,7 @@ mod tests {
                  Rate remaining: 89\n    \
                  Last call: 2026-09-23 00:00 status 200\n    \
                  Jobs: 1 due, 2 waiting, 0 running\n    \
-                 Shows: linked 1, waiting to send 1, parked 0, unpicked 0, gone 0, off 1\n\n\
+                 Shows: linked 1, waiting to send 1, parked 0, unpicked 0, search refused 0, gone 0, off 1\n\n\
                  Recent events (0):\n"
             ),
             "{text}"
@@ -1435,7 +1444,7 @@ mod tests {
                 "Lists:\n  sync not running: could not spawn the sync worker thread: no thread\n  \
                  AniList\n    \
                  Standing: signed in as someone (user 7), token works until 2026-09-23 00:00\n    \
-                 Shows: linked 1, waiting to send 1, parked 0, unpicked 0, gone 0, off 1\n"
+                 Shows: linked 1, waiting to send 1, parked 0, unpicked 0, search refused 0, gone 0, off 1\n"
             ),
             "{text}"
         );

@@ -12,8 +12,9 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use ryuuji_core::{
-    Account, AppState, Attempt, Command, DataDir, Detail, EntryId, LibraryEntry, Notice, Page,
-    Ryuuji, Service, Signed, StoreError, ThemePreference, TimeZone, WatchStatus, date, error_chain,
+    Account, AppState, Attempt, Command, DataDir, Detail, EntryId, LibraryEntry, ListStatus,
+    Notice, Page, Ryuuji, Service, Signed, StoreError, ThemePreference, TimeZone, WatchStatus,
+    date, error_chain,
 };
 use ryuuji_sync::{Credentials, SyncError, Syncer, Token, TokenError, authorize_url};
 use windows_reactor::*;
@@ -281,18 +282,16 @@ fn rewatch_label(rewatching: bool) -> &'static str {
     }
 }
 
+/// `Rewatching · 3/24`: where the show stands and how far the person is, in
+/// the compact form a list of many rows wants. The status is [`ListStatus`],
+/// the same value Now playing and the show's own page say, so one show no
+/// longer reads as completed-and-rewatching here and rewatching there.
 fn status_line(entry: &LibraryEntry) -> String {
-    let mut line = match entry.total {
-        Some(total) => format!("{} · {}/{}", entry.status.label(), entry.progress, total),
-        None => format!("{} · {}", entry.status.label(), entry.progress),
-    };
-    // Said on the row rather than in place of the status: the show is still
-    // completed, and the count underneath it is a rewatch rather than a
-    // finished show that somehow slipped back.
-    if entry.rewatching {
-        line.push_str(" · rewatching");
+    let status = ListStatus::of(entry).label();
+    match entry.total {
+        Some(total) => format!("{status} \u{b7} {}/{}", entry.progress, total),
+        None => format!("{status} \u{b7} {}", entry.progress),
     }
-    line
 }
 
 /// What Settings shows. The outcome of the last folder action is the page's
@@ -823,8 +822,11 @@ mod tests {
         );
         assert_eq!(rows[0].detail, "Watching \u{b7} 7/28");
         assert_eq!(rows[1].detail, "Completed \u{b7} 24/24");
-        assert_eq!(rows[2].detail, "Completed \u{b7} 3/24 \u{b7} rewatching");
-        assert_eq!(rows[3].detail, "Completed \u{b7} 5 \u{b7} rewatching");
+        // A rewatch is a status of its own here, as it is on Now playing and
+        // the show's own page. Said as a suffix on "Completed", the row read
+        // differently from every other surface for the same show.
+        assert_eq!(rows[2].detail, "Rewatching \u{b7} 3/24");
+        assert_eq!(rows[3].detail, "Rewatching \u{b7} 5");
     }
 
     #[test]

@@ -22,8 +22,8 @@ use crate::share;
 use crate::show_info;
 use crate::standing::{Standing, Tone, Why, standing};
 use crate::ui::{
-    self, CONTENT_MAX_WIDTH, ICON_FONT, MONO_FONT, PICKER_HEIGHT, PICKER_ROWS, age_of, caption,
-    card_frame, clock_text, episode_text, placeholder,
+    self, CONTENT_MAX_WIDTH, ICON_FONT, MONO_FONT, age_of, caption, card_frame, clock_text,
+    episode_text, placeholder,
 };
 
 /// How many shows a library needs before the picker offers a search box.
@@ -712,7 +712,7 @@ fn timeline_element(timeline: &Timeline) -> Element {
             border(Element::Empty)
                 .width(1.0)
                 .height(4.0)
-                .background(ThemeRef::custom("ControlStrongFillColorDefaultBrush"))
+                .background(ThemeRef::custom(ui::STRONG_FILL))
                 .grid_row(2)
                 .grid_column(1)
                 .horizontal_alignment(HorizontalAlignment::Center)
@@ -807,23 +807,19 @@ fn which_show(
                 .into(),
         );
     }
-    let candidates = candidates(&question.shows, question.likely, query);
-    if candidates.is_empty() {
+    let offers = offers(&question.shows, question.likely, query);
+    if offers.is_empty() {
         children.push(caption("No show in your library has that title.").into());
     } else {
-        let many = candidates.len() > PICKER_ROWS;
+        let rows = offers.len();
         let dispatch_row = dispatch.clone();
         let close = cancel.clone();
-        let list = list_view(candidates, move |candidate: &Candidate, _| {
-            candidate_row(candidate, &dispatch_row, close.clone())
+        let list = list_view(offers, move |offer: &ShowOffer, _| {
+            offer_row(offer, &dispatch_row, close.clone())
         })
-        .with_key_selector(|candidate: &Candidate| candidate.show.entry.to_string())
+        .with_key_selector(|offer: &ShowOffer| offer.show.entry.to_string())
         .selection_mode(SelectionMode::None);
-        children.push(if many {
-            list.height(PICKER_HEIGHT).into()
-        } else {
-            list.into()
-        });
+        children.push(ui::picker_list(list, rows));
     }
     let mut buttons: Vec<Element> = Vec::new();
     if question.can_add {
@@ -848,7 +844,7 @@ fn which_show(
 
 /// One show the picker offers, and whether it is the matcher's guess.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Candidate {
+struct ShowOffer {
     show: ShowChoice,
     likely: bool,
 }
@@ -856,32 +852,32 @@ struct Candidate {
 /// The shows a query narrows to, the guessed one first. Folded the way
 /// matching compares titles, so `frieren beyond journeys end` finds
 /// `Frieren: Beyond Journey's End`; an empty query keeps every show.
-fn candidates(shows: &[ShowChoice], likely: Option<EntryId>, query: &str) -> Vec<Candidate> {
-    let mut candidates: Vec<Candidate> = matching_shows(shows, query)
+fn offers(shows: &[ShowChoice], likely: Option<EntryId>, query: &str) -> Vec<ShowOffer> {
+    let mut offers: Vec<ShowOffer> = matching_shows(shows, query)
         .into_iter()
-        .map(|show| Candidate {
+        .map(|show| ShowOffer {
             likely: Some(show.entry) == likely,
             show,
         })
         .collect();
-    candidates.sort_by_key(|candidate| !candidate.likely);
-    candidates
+    offers.sort_by_key(|offer| !offer.likely);
+    offers
 }
 
 /// One show to link the file to. `close` closes a card the person opened
 /// by hand, once the link is made.
-fn candidate_row(
-    candidate: &Candidate,
+fn offer_row(
+    offer: &ShowOffer,
     dispatch: &Dispatch<Command>,
     close: Option<impl Fn() + 'static>,
 ) -> Grid {
-    let mut name: Vec<Element> = vec![text_block(candidate.show.title.clone()).wrap().into()];
-    let mut line: Vec<Element> = vec![caption(candidate.show.line.clone()).into()];
-    if candidate.likely {
+    let mut name: Vec<Element> = vec![text_block(offer.show.title.clone()).wrap().into()];
+    let mut line: Vec<Element> = vec![caption(offer.show.line.clone()).into()];
+    if offer.likely {
         line.push(caption("Likely").foreground(ThemeRef::AccentText).into());
     }
     name.push(hstack(line).spacing(8.0).into());
-    let entry = candidate.show.entry;
+    let entry = offer.show.entry;
     let dispatch = dispatch.clone();
     grid((
         vstack(name)
@@ -895,7 +891,7 @@ fn candidate_row(
                     close();
                 }
             })
-            .automation_name(format!("Link to {}", row_label(&candidate.show)))
+            .automation_name(format!("Link to {}", row_label(&offer.show)))
             .vertical_alignment(VerticalAlignment::Center)
             .grid_column(1),
     ))
@@ -1096,6 +1092,126 @@ mod tests {
             remaining: secs(27),
             episode: Some(episode..=episode),
         }
+    }
+
+    fn playing(title: &str) -> NowPlaying {
+        NowPlaying::Playing {
+            title: title.to_owned(),
+            player: "mpv".to_owned(),
+            status: ryuuji_core::PlaybackStatus::Playing,
+            position: secs(693),
+            duration: secs(1440),
+        }
+    }
+
+    /// A state with `show` in the library and a file standing against it.
+    fn standing_against(show: &LibraryEntry, now_playing: NowPlaying, link: Link) -> AppState {
+        AppState {
+            library: vec![show.clone()],
+            now_playing,
+            last_match: Some(ProposedMatch {
+                raw_title: "Frieren - 08.mkv".to_owned(),
+                parsed_title: "Frieren".to_owned(),
+                episode: Some(8..=8),
+                link,
+                ..proposal()
+            }),
+            ..AppState::default()
+        }
+    }
+
+    fn hero_of(view: View) -> Hero {
+        match view {
+            View::Playing(playing) => playing.hero,
+            other => panic!("not playing: {other:?}"),
+        }
+    }
+
+    /// The card names the show and offers its page only once the file is
+    /// settled on it. A guess names the show it guessed and offers nothing,
+    /// and an ignored file is not in the library whatever it matched.
+    #[test]
+    fn the_card_offers_the_show_only_once_the_file_is_settled_on_it() {
+        let (frieren, _) = two_shows();
+        let card = |link, ignored| {
+            let state = AppState {
+                ignored,
+                ..standing_against(&frieren, playing("Frieren - 08.mkv"), link)
+            };
+            hero_of(view(&state, false, &[], SystemTime::UNIX_EPOCH))
+        };
+        let settled = card(Link::Exact(frieren.id), false);
+        assert_eq!(settled.title, "Frieren: Beyond Journey's End");
+        assert_eq!(settled.status, "Watching \u{b7} 7 of 28 episodes");
+        assert_eq!(settled.episode.as_deref(), Some("Episode 8"));
+        assert_eq!(settled.entry, Some(frieren.id));
+
+        let guess = card(Link::Likely(frieren.id), false);
+        assert_eq!(guess.title, "Frieren: Beyond Journey's End");
+        assert_eq!(guess.entry, None);
+
+        let ignored = card(Link::Exact(frieren.id), true);
+        assert_eq!(ignored.status, "Not in your library");
+        assert_eq!(ignored.entry, None);
+
+        let unmatched = card(Link::Unmatched, false);
+        assert_eq!(unmatched.status, "Not in your library");
+        assert_eq!(unmatched.title, "Frieren");
+        assert_eq!(unmatched.entry, None);
+    }
+
+    /// Idle, the page says which file still waits for an answer, and only
+    /// that one: a file settled on its show has nothing left to ask.
+    #[test]
+    fn idle_says_what_was_last_seen_only_while_it_still_needs_an_answer() {
+        let (frieren, _) = two_shows();
+        let now = SystemTime::UNIX_EPOCH + secs(120);
+        let idle = |link| match view(
+            &standing_against(&frieren, NowPlaying::Idle, link),
+            false,
+            &[],
+            now,
+        ) {
+            View::Idle(idle) => idle,
+            other => panic!("not idle: {other:?}"),
+        };
+        assert_eq!(
+            idle(Link::Unmatched).last_seen.as_deref(),
+            Some("Last seen in mpv \u{b7} 2 min ago")
+        );
+        assert_eq!(idle(Link::Exact(frieren.id)).last_seen, None);
+        let detecting = AppState {
+            now_playing: NowPlaying::Detecting,
+            ..AppState::default()
+        };
+        assert_eq!(view(&detecting, false, &[], now), View::Detecting);
+    }
+
+    /// A pick on a list is asked only of a show the playing file surely is,
+    /// and only while it plays: a settled match left standing after the
+    /// player stopped asks nothing.
+    #[test]
+    fn a_list_pick_is_asked_only_while_a_settled_file_plays() {
+        let (frieren, _) = two_shows();
+        let exact = Link::Exact(frieren.id);
+        let state = |now_playing, link| standing_against(&frieren, now_playing, link);
+        assert_eq!(
+            settled_entry(&state(playing("Frieren - 08.mkv"), exact)),
+            Some(frieren.id)
+        );
+        assert_eq!(settled_entry(&state(NowPlaying::Idle, exact)), None);
+        assert_eq!(
+            settled_entry(&state(
+                playing("Frieren - 08.mkv"),
+                Link::Likely(frieren.id)
+            )),
+            None
+        );
+        let ignored = AppState {
+            ignored: true,
+            ..state(playing("Frieren - 08.mkv"), exact)
+        };
+        assert_eq!(settled_entry(&ignored), None);
     }
 
     #[test]
@@ -1309,11 +1425,11 @@ mod tests {
                 ("Vinland Saga Season 2", "Watching \u{b7} 2"),
             ]
         );
-        let listed = candidates(&shows, Some(vinland.id), "");
+        let listed = offers(&shows, Some(vinland.id), "");
         assert_eq!(
             listed
                 .iter()
-                .map(|candidate| (candidate.show.entry, candidate.likely))
+                .map(|offer| (offer.show.entry, offer.likely))
                 .collect::<Vec<_>>(),
             vec![(vinland.id, true), (frieren.id, false)]
         );
@@ -1328,9 +1444,9 @@ mod tests {
         let (frieren, vinland) = two_shows();
         let shows = choices(&[frieren, vinland]);
         let titles = |query| {
-            candidates(&shows, None, query)
+            offers(&shows, None, query)
                 .iter()
-                .map(|candidate| candidate.show.title.clone())
+                .map(|offer| offer.show.title.clone())
                 .collect::<Vec<_>>()
         };
         assert_eq!(titles("").len(), 2);
